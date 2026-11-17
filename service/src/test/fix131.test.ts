@@ -151,3 +151,14 @@ test("reopenForOpenPr: DONE with an open PR → PR_OPEN; merged or no PR stays D
   assert.equal(reopenForOpenPr(merged)?.state, "DONE");
   assert.equal(reopenForOpenPr(none)?.state, "DONE");
 });
+
+test("rebase helpers: hook names from git's text; files that stay with you even on your order", async () => {
+  const { failedHooks, mustStayWithYou } = await import("../engine/steps/rebase.js");
+  const out = "[INFO] Checking merge-conflict files only.\ntrim trailing whitespace.................................................Passed\ncheck yaml...............................................................Failed\n- hook id: check-yaml\nruff.....................................................................Failed";
+  assert.deepEqual(failedHooks(out), ["check yaml", "ruff"]);
+  assert.deepEqual(failedHooks("fatal: something else"), []);
+  assert.match(mustStayWithYou("uv.lock")!, /lock file/);
+  assert.match(mustStayWithYou("evals/regression/alt/baseline/ALT-02.json")!, /recorded expected output/);
+  assert.match(mustStayWithYou("tests/__snapshots__/x.snap")!, /recorded expected output/);
+  assert.equal(mustStayWithYou("app/components/ai_engine/domain/canonical_state.py"), undefined);
+});

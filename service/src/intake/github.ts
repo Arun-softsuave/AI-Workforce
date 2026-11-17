@@ -304,6 +304,14 @@ class Producer {
   private async conflict(repo: string, pr: any, item: Item): Promise<void> {
     const r = await this.get<any>(`/repos/${repo}/pulls/${pr.number}`);
     const p = r.data ?? {};
+    // the conflict is gone (you fixed it, or a merge was pushed): one "no conflicts now" line, and "is it resolved?" knows
+    if (p.state === "open" && p.mergeable === true && item.data?.conflict?.state === "open") {
+      this.emit("pr_conflict_cleared", `gh:pr_conflict_cleared:${repo.toLowerCase()}#${pr.number}:${p.head?.sha ?? ""}`, {
+        repo, num: pr.number, url: pr.html_url, branch: p.head?.ref, base: p.base?.ref, sha: p.head?.sha, ours: true,
+      }, { itemId: item.id });
+      try { (await import("../engine/tasks.js")).mergeData(item.id, { conflict: { ...item.data.conflict, state: "resolved", at: new Date().toISOString() } }); } catch { /* item gone */ }
+      return;
+    }
     if (p.state !== "open" || !(p.mergeable === false || p.mergeable_state === "dirty")) return;
     this.emit("pr_conflict", `gh:pr_conflict:${repo.toLowerCase()}#${pr.number}:${p.head?.sha ?? ""}:${p.base?.sha ?? ""}`, {
       repo, num: pr.number, url: pr.html_url, branch: p.head?.ref, base: p.base?.ref, baseSha: p.base?.sha, sha: p.head?.sha, state: p.mergeable_state ?? "dirty", ours: true,

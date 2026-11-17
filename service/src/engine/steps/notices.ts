@@ -60,6 +60,8 @@ export function noticeFor(ev: KernelEvent, item: Item | undefined, s: Settings):
       return { kind: "info", title: `📝 ${ref || "The ticket"} changed in Jira – noted`, body: "No requirement changed, so the PR stays as it is.", url: p.url };
     case "pr_reopened":
       return { kind: "info", title: `↩️ ${n}${tag} was reopened – I look after it again`, body: "CI, comments and conflicts are watched again.", url: pr.url };
+    case "pr_conflict_cleared":
+      return { kind: "info", title: `✅ ${n}${tag} has no conflicts with ${p.base ?? "its base"} now`, body: "GitHub shows it can be merged. Nothing was merged – that is yours.", url: pr.url };
     case "pr_conflict":
       // only reached when no rebase job could start (the PR is not one this plugin can update): say so, never stay silent
       return { kind: "failed", title: `⚠️ ${n}${tag} has conflicts with ${p.base ?? "its base branch"}`, body: `I can't update it by myself${item ? ` (${refOf(item)} is ${String(item.state).toLowerCase().replace(/_/g, " ")})` : ""}. Say "rebase PR ${pr.num ?? ""}" and I'll bring ${p.base ?? "the base"} in, or resolve it yourself. Nothing is force-pushed.`, url: pr.url };

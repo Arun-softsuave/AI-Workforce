@@ -33,7 +33,7 @@ export interface ToolArgs {
   /** control */ action?: "pause" | "resume" | "cancel" | "priority" | "takeover" | "handback" | "undo" | "revert"; until?: string; priority?: number | string; due?: string;
   /** set_directive */ scope?: "global" | "item" | "batch" | "epic" | "sprint"; rule?: string; value?: string;
   /** prefs */ key?: string; name?: string; github?: string;
-  /** fix_pr */ mode?: "comments" | "ci" | "issues" | "rebase";
+  /** fix_pr */ mode?: "comments" | "ci" | "issues" | "rebase"; /** rebase: you told it to resolve the conflicts itself */ resolveAll?: boolean;
   /** start */ project?: string; takeOver?: boolean; again?: boolean; /** several keys on v2: one per ticket instead of one batch */ separately?: boolean;
 }
 export type ToolCall = ConductorCall & { tool: ToolName | "clone_repo"; args: ToolArgs };
@@ -608,6 +608,8 @@ async function toolFixPr(args: ToolArgs, ctx: ToolCtx): Promise<ToolResult> {
   const ref = args.ref && keysIn(args.ref).length ? keysIn(args.ref)[0].split("@")[0] : undefined;
   const text = [args.text ?? ctx.original, args.ref && !ref ? args.ref : ""].filter(Boolean).join(" ");
   // engine v2: a ticket of yours with an open PR gets the fix as a job on its own item (W9/W10, G8 "recheck and resolve")
+  // "resolve the conflicts yourself / by yourself": your explicit OK for bigger conflicts (still shown before any push)
+  const resolveAll = args.resolveAll === true || (args.mode === "rebase" && /(by )?yourself|resolve (them|all|the conflicts|every)/i.test(String(args.text ?? ctx.original ?? "")));
   const command = args.mode === "ci" ? "fix_ci" : args.mode === "rebase" ? "rebase" : args.mode === "issues" ? undefined : "resolve";
   let item = ref && command && engineVersion() === "v2" ? taskFor(ref) : undefined;
   // a PR link or number: the ticket item that raised it (a ticket finished by the old engine with its PR still
@@ -625,13 +627,15 @@ async function toolFixPr(args: ToolArgs, ctx: ToolCtx): Promise<ToolResult> {
   }
   if (item && command && item.state === "PR_OPEN" && ((item as any).owner ?? "me") === "me") {
     const { emit } = await import("../kernel/events.js");
-    emit({ type: "user_command", idemKey: `cmd:${item.id}:${command}:${Date.now()}`, itemId: item.id, payload: { command, by: ctx.who, ours: true } });
+    emit({ type: "user_command", idemKey: `cmd:${item.id}:${command}:${Date.now()}`, itemId: item.id, payload: { command, by: ctx.who, ours: true, ...(command === "rebase" && resolveAll ? { resolveAll: true } : {}) } });
     await tick();
     const r = refOf(item);
     return said(command === "fix_ci"
       ? `🛠️ Fixing the failing CI checks on ${r}'s PR. You'll hear from me here when it's done.`
       : command === "rebase"
-        ? `🔀 Bringing the base branch into ${r}'s PR. Simple conflicts are resolved; a real one stops and comes to you. Nothing is force-pushed.`
+        ? resolveAll
+          ? `🔀 Resolving the conflicts on ${r}'s PR myself (your OK). I'll run the tests and show you the result before anything is pushed. Lock files and recorded test baselines stay with you. Nothing is force-pushed.`
+          : `🔀 Bringing the base branch into ${r}'s PR. Small conflicts I resolve; bigger ones come to you (say \"resolve them yourself\" and I will, shown to you before pushing). Nothing is force-pushed.`
         : `🛠️ Fixing the review comments (and any failing check) on ${r}'s PR. You'll hear from me here when the fixes are ready.`, true, { ref: r });
   }
   if (command === "rebase") return said("❓ Which PR should I update from its base branch? Give me the PR link or the ticket key.");
@@ -713,21 +717,44 @@ function toolFind(args: ToolArgs, ctx: ToolCtx): ToolResult {
   return said(f.matches.slice(0, 5).map((m: Found) => `- ${foundLine(m)}`).join("\n"), true, { matches: f.matches });
 }
 
+/** One line about a PR's conflict state as last checked (data.conflict, written by the rebase job and the PR watcher). */
+export function conflictLine(t: Task): string | undefined {
+  const c = (t.data as any)?.conflict;
+  if (!c?.state) return undefined;
+  const when = String(c.at ?? "").slice(11, 16);
+  const pr = c.num ? `PR #${c.num}` : "The PR";
+  if (c.state === "resolved") return `✅ ${pr} (${refOf(t)}): no conflicts with ${c.base ?? "its base"} now${when ? ` (${when})` : ""}`;
+  const files = Array.isArray(c.files) && c.files.length ? ` – ${c.files.length} file${c.files.length === 1 ? "" : "s"}` : "";
+  return `⚠️ ${pr} (${refOf(t)}): still not merged with ${c.base ?? "its base"}${files}${c.why ? ` · ${truncate(String(c.why), 120)}` : ""}${when ? ` (checked ${when})` : ""}`;
+}
+
+/** PR conflict state of every item checked in the last 7 days, still-open ones first. */
+function conflictSection(): string {
+  try {
+    const since = new Date(Date.now() - 7 * 86_400_000).toISOString();
+    const rows = db().prepare("SELECT id FROM tasks WHERE json_extract(data,'$.conflict.at') >= ? ORDER BY json_extract(data,'$.conflict.state') = 'resolved', updated_at DESC").all(since) as { id: string }[];
+    const lines = rows.map((r) => getTask(r.id)).filter((t): t is Task => !!t).map(conflictLine).filter(Boolean);
+    return lines.length ? `**PR conflicts**\n${lines.slice(0, 8).map((l) => `- ${l}`).join("\n")}` : "";
+  } catch { return ""; }
+}
+
 export function toolStatus(args: ToolArgs): ToolResult {
   const ref = args.ref && !/^(all|everything)$/i.test(args.ref) ? args.ref : undefined;
   if (ref) {
     const t = taskFor(ref);
     const all = tasksOfTicket(ref);
-    if (all.length > 1) return said(all.map((x) => statusText(refOf(x))).join("\n\n"));
-    if (t) return said([statusText(refOf(t)) ?? "", treeLines(t)].filter(Boolean).join("\n\n"));
+    const withConflict = (x: Task) => [conflictLine(x), statusText(refOf(x)) ?? ""].filter(Boolean).join("\n");
+    if (all.length > 1) return said(all.map(withConflict).join("\n\n"));
+    if (t) return said([withConflict(t), treeLines(t)].filter(Boolean).join("\n\n"));
     return said(`I don't have anything for ${ref}. Say "plan for ${ref}" to start it.`);
   }
+  const conflicts = conflictSection();
   // J2: one line per item; what waits on you and what is blocked first
   const active = listTasks({ states: [...ACTIVE_STATES] }).filter((t) => t.kind !== "part" && !(t as any).parent_id);
-  if (!active.length) return said(isPaused() ? "⏸️ Paused – nothing is in progress." : "Nothing is in progress right now.");
+  if (!active.length) return said([conflicts, isPaused() ? "⏸️ Paused – nothing is in progress." : "Nothing is in progress right now."].filter(Boolean).join("\n\n"));
   const rank = (t: Task) => taskNow(t).waitingFor ? 0 : ["BLOCKED", "PAUSED", "FAILED_PUBLISH", "STALE"].includes(t.state) ? 1 : 2;
   const lines = active.sort((a, b) => rank(a) - rank(b)).slice(0, 10).map((t) => `- **${refOf(t)}** – ${taskNow(t).now}`);
-  return said(`📋 **${inboxSummaryLine()}**${isPaused() ? " · ⏸️ paused" : ""}\n\n${lines.join("\n")}${active.length > 10 ? `\n- and ${active.length - 10} more` : ""}`);
+  return said(`${conflicts ? `${conflicts}\n\n` : ""}📋 **${inboxSummaryLine()}**${isPaused() ? " · ⏸️ paused" : ""}\n\n${lines.join("\n")}${active.length > 10 ? `\n- and ${active.length - 10} more` : ""}`);
 }
 
 /** Status by tree (v2 batches, epics, sprints): one line per child. */

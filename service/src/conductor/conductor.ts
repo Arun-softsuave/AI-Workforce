@@ -35,7 +35,7 @@ const ARGS_SCHEMA = {
     until: { type: "string" }, priority: { type: "number" }, due: { type: "string" },
     scope: { type: "string", enum: ["global", "item", "batch", "epic", "sprint"] }, rule: { type: "string" }, value: { type: "string" },
     key: { type: "string" }, name: { type: "string" }, github: { type: "string" },
-    mode: { type: "string", enum: ["comments", "ci", "issues", "rebase"] }, project: { type: "string" }, takeOver: { type: "boolean" }, again: { type: "boolean" },
+    mode: { type: "string", enum: ["comments", "ci", "issues", "rebase"] }, resolveAll: { type: "boolean" }, project: { type: "string" }, takeOver: { type: "boolean" }, again: { type: "boolean" },
   },
   additionalProperties: false,
 };
@@ -75,7 +75,8 @@ export const CONDUCTOR_SYSTEM = [
   "5. A correction (\"no, I meant KAN-53\") = control undo, then the corrected call.",
   "6. \"no need to ask for approval\", \"only backend\", \"don't touch tests\", \"from now on …\" = set_directive (scope item when it is about one ticket, else global). Settings changes (\"raise draft PRs from now on\", \"quiet hours 22-7\", \"Eric left the team\") = prefs.",
   "7. A priority or deadline (\"KAN-47 first, it's urgent\", \"by Friday\") = control priority (+ start if it isn't started).",
-  "8. \"recheck and resolve\" / \"fix the comments\" on a PR = fix_pr mode comments; failing checks = fix_pr mode ci; conflicts, \"rebase\", \"update from dev\" = fix_pr mode rebase.",
+  "8a. \"is it resolved?\", \"are the conflicts fixed?\", \"did CI pass?\" about PRs = status (with the ref when one is named, else all): it lists open PR conflicts and their state first.",
+  "8. \"recheck and resolve\" / \"fix the comments\" on a PR = fix_pr mode comments; failing checks = fix_pr mode ci; conflicts, \"rebase\", \"update from dev\" = fix_pr mode rebase (resolveAll true when the user tells you to resolve the conflicts yourself); one call per PR.",
   "9. Questions about the code or product = lookup. \"why did you …\" = explain. \"what happened with …\" (old work) = find (history) then status.",
   "10. Small talk, thanks, unclear text: no calls, a short friendly reply. If you truly can't tell what they want, no calls and ONE short question in reply.",
   "11. reply: only what the tools won't say – an answer, a small-talk line, or one short question. Empty when the tools say it all. Plain chat style, short.",

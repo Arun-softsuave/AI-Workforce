@@ -134,6 +134,7 @@ export const REACTIONS: Reaction[] = [
   { on: "design_changed", job: "replan", recipe: "replan", priority: 2, merge: "merge", guard: and(itemOpen, built), note: "design changed after building → adapt?" },
   { on: "design_changed", job: "none", recipe: "design_note", guard: and(itemOpen, not(built)), note: "design changed before building → design document updated, re-plan" },
   { on: "pr_approved", job: "none", recipe: "notify", guard: ourPr, note: "PR approved → ready to merge" },
+  { on: "pr_conflict_cleared", job: "none", recipe: "notify", guard: ourPr, note: "conflict gone → tell you" },
 
   // the developer's own commands for an item (Conductor / Teams) – orders only from the owner's channels (§11a)
   { on: "user_command", job: "comment_fix", recipe: "comment_fix", priority: 1, merge: "merge", guard: and(itemOpen, (ev) => command("resolve")(ev) || command("adapt")(ev)), note: "you asked → fix the comments / adapt" },

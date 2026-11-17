@@ -13,6 +13,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { audit } from "../../core/db.js";
+import { mergeData } from "../tasks.js";
 import { truncate } from "../../core/util.js";
 import { clients } from "../../connectors/registry.js";
 import * as G from "../../git/git.js";
@@ -33,6 +34,32 @@ export function teamUpdateStyle(project: Pick<ProjectConfig, "conventions">): "m
 
 /** Files whose conflicts are never "simple" (generated or binary). */
 const NEVER_SIMPLE = /(^|\/)(package-lock\.json|yarn\.lock|pnpm-lock\.yaml|poetry\.lock|uv\.lock|Cargo\.lock|go\.sum|composer\.lock|Gemfile\.lock)$|\.(png|jpe?g|gif|pdf|zip|ico|woff2?|ttf|bin)$/i;
+/** Recorded expected output (baselines, golden files, cassettes, snapshots): a person decides what is right, always. */
+const RECORDED = /(^|\/)(baselines?|golden|goldens|cassettes?|__snapshots__|snapshots)(\/|$)|\.snap$/i;
+
+/** Why a conflicted file must stay with you even when you asked the plugin to resolve everything, or undefined. */
+export function mustStayWithYou(p: string): string | undefined {
+  if (NEVER_SIMPLE.test(p)) return /\.lock$|lock\.json$|lock\.yaml$|go\.sum$/i.test(p) ? "lock file – regenerate it with the package manager" : "binary file";
+  if (RECORDED.test(p)) return "recorded expected output – a person decides which version is right";
+  return undefined;
+}
+
+/** The checks a git hook (pre-commit) reported as failed, from git's error text. */
+export function failedHooks(text: string): string[] {
+  return [...new Set(String(text ?? "").split("\n")
+    .map((l) => /^(.+?)\.{3,}\s*Failed\b/.exec(l.trim().replace(/^git \S+ failed:\s*/i, ""))?.[1]?.trim())
+    .filter((x): x is string => !!x))];
+}
+
+/** Your explicit order on this job: "resolve the conflicts yourself" (payload.resolveAll). */
+function resolveAllOrdered(ctx: StepCtx): boolean {
+  return jobEvents(runningJob(ctx.task.id)).some((e) => e.type === "user_command" && e.payload.command === "rebase" && e.payload.resolveAll === true);
+}
+
+/** Remember on the ticket whether its PR still conflicts (for "is it resolved?" and the "no conflicts now" line). */
+export function recordConflict(itemId: string, c: { state: "open" | "resolved"; num?: number; base?: string; files?: string[]; why?: string }): void {
+  try { mergeData(itemId, { conflict: { ...c, at: new Date().toISOString() } }); } catch { /* the item is gone */ }
+}
 
 export interface ConflictFile { path: string; hunks: number; lines: number }
 
@@ -119,44 +146,90 @@ export const REBASE_STEPS: Record<string, (ctx: StepCtx) => Promise<StepResult>>
         `Your team rebases PR branches, which needs a force-push – I never force-push. Rebase it yourself, or say "merge ${r.base} into PR ${r.num}" to add a merge commit instead.`, r.url);
       return { status: "done", note: "team rebases – told you (no force-push)" };
     }
+    // a retry of this step must start clean: an earlier attempt may have stopped mid-merge (e.g. a hook refused the
+    // commit after the conflicts were resolved). Never commit leftovers that were not checked again.
+    if (G.git(wt, ["rev-parse", "-q", "--verify", "MERGE_HEAD"], { allowFail: true })) {
+      G.git(wt, ["merge", "--abort"], { allowFail: true });
+      G.git(wt, ["reset", "--hard", "HEAD"], { allowFail: true });
+    }
     const before = G.headSha(wt);
-    let mergedOk = true;
-    try { G.git(wt, ["merge", "--no-ff", "--no-edit", r.baseRefName]); } catch { mergedOk = false; }
-    if (mergedOk) {
+    let mergeError = "";
+    try { G.git(wt, ["merge", "--no-ff", "--no-edit", r.baseRefName]); } catch (e: any) { mergeError = String(e?.message ?? e); }
+    if (!mergeError) {
       const changed = G.headSha(wt) !== before;
       ctx.save({ rebase: { ...r, changed, how: changed ? `merged ${r.base} in (no conflicts)` : "already up to date" } });
       return done(changed ? `merged ${r.base} in` : "already up to date");
     }
-    // conflicts: resolve simple ones with the agent, stop on real ones
     const names = G.git(wt, ["diff", "--name-only", "--diff-filter=U"], { allowFail: true }).split("\n").map((s) => s.trim()).filter(Boolean);
-    const files: ConflictFile[] = names.map((p) => { let t = ""; try { t = fs.readFileSync(path.join(wt, p), "utf8"); } catch { /* binary or gone */ } return { path: p, ...conflictStats(t) }; });
-    const stop = async (why: string) => {
+
+    // No file conflicts: the merge itself worked but the merge COMMIT was refused – almost always the team's git hook
+    // (pre-merge-commit / pre-commit). It is told as what it is – a hook, not a conflict. It is never skipped or worked
+    // around (finishing the merge with a plain commit would not run the merge hook again).
+    if (!names.length) {
       G.git(wt, ["merge", "--abort"], { allowFail: true });
-      await tell(ctx, `⚠️ PR #${r.num} (${ref}) conflicts with ${r.base}`, `${why}\n\n${names.map((n) => `- ${n}`).join("\n")}\n\nNothing was pushed. Resolve it on ${r.branch}, or tell me how to resolve it.`, r.url);
+      const hooks = failedHooks(mergeError);
+      const what = hooks.length
+        ? `Merging ${r.base} in has no file conflicts, but your git hook failed on the merge commit: ${hooks.join(", ")}.`
+        : `Merging ${r.base} in has no file conflicts, but git refused the merge commit: ${truncate(mergeError.split("\n").filter(Boolean).slice(-3).join(" "), 300)}`;
+      recordConflict(ctx.task.id, { state: "open", num: r.num, base: r.base, files: [], why: hooks.length ? `git hook failed: ${hooks.join(", ")}` : "git refused the merge commit" });
+      await tell(ctx, `⚠️ PR #${r.num} (${ref}): git hook stopped the update from ${r.base}`, `${what}\n\nNothing was pushed and the hook was not skipped. Fix what the hook reports on ${r.branch}, or tell me what to change.`, r.url);
+      audit("service", "rebase.hook_failed", ctx.task.id, { hooks, error: truncate(mergeError, 500) });
+      return { status: "done", note: hooks.length ? `git hook failed (${hooks.join(", ")}) – told you` : "merge commit refused – told you" };
+    }
+
+    // conflicts: simple ones are resolved by the agent; bigger ones only on your explicit order ("resolve them yourself")
+    const files: ConflictFile[] = names.map((p) => { let t = ""; try { t = fs.readFileSync(path.join(wt, p), "utf8"); } catch { /* binary or gone */ } return { path: p, ...conflictStats(t) }; });
+    const stop = async (why: string, list: string[] = names) => {
+      G.git(wt, ["merge", "--abort"], { allowFail: true });
+      recordConflict(ctx.task.id, { state: "open", num: r.num, base: r.base, files: names, why });
+      await tell(ctx, `⚠️ PR #${r.num} (${ref}) conflicts with ${r.base}`, `${why}\n\n${list.map((n) => `- ${n}`).join("\n")}\n\nNothing was pushed. Resolve it on ${r.branch}, or tell me how to resolve it.`, r.url);
       audit("service", "rebase.conflict", ctx.task.id, { files: names, why });
       return { status: "done", note: "real conflict – told you" } as StepResult;
     };
-    if (!isSimpleConflict(files)) return stop(`A real conflict (${files.length} file${files.length === 1 ? "" : "s"}) – it needs your call.`);
-    const blocks = files.map((f) => `### ${f.path}\n${untrusted(`conflict:${f.path}`, truncate(fs.readFileSync(path.join(wt, f.path), "utf8"), 8000))}`).join("\n\n");
+    const ordered = resolveAllOrdered(ctx);
+    const simple = isSimpleConflict(files);
+    if (!simple && !ordered) {
+      return stop(`A real conflict (${files.length} file${files.length === 1 ? "" : "s"}) – too big for me to resolve without your OK. Say "resolve the conflicts on PR ${r.num} yourself" and I'll resolve them, run the tests and show you the result before anything is pushed.`);
+    }
+    if (!simple) {
+      // even on your order, lock files, binaries and recorded expected output stay with you
+      const yours = names.map((n) => ({ n, why: mustStayWithYou(n) })).filter((x) => x.why);
+      if (yours.length) {
+        return stop(`I can resolve ${names.length - yours.length} of the ${names.length} conflicted files, but these must be yours, so I stopped before changing anything:`,
+          yours.map((x) => `${x.n} – ${x.why}`));
+      }
+    }
+    const big = !simple;
+    const blocks = big
+      ? `Conflicted files (${names.length}) – open each one with Read:\n${names.map((n) => `- ${n}`).join("\n")}`
+      : files.map((f) => `### ${f.path}\n${untrusted(`conflict:${f.path}`, truncate(fs.readFileSync(path.join(wt, f.path), "utf8"), 8000))}`).join("\n\n");
     await ctx.agent("implementer", [
-      `The pull request branch could not be merged with ${r.base} automatically. Resolve ONLY the merge conflicts below in the current directory.`,
-      "Keep the intent of both sides; remove every conflict marker (<<<<<<<, =======, >>>>>>>); change nothing else; do not commit.",
+      `The pull request branch could not be merged with ${r.base} automatically. Resolve ONLY the merge conflicts in the current directory.`,
+      "Keep the intent of both sides (this PR's change AND what landed on the base); remove every conflict marker (<<<<<<<, =======, >>>>>>>); change nothing else; do not commit.",
+      big ? "Read the surrounding code and the base branch's version of each changed function before choosing; when both sides changed the same lines, combine them so both behaviours remain." : "",
       blocks,
-    ].join("\n\n"), { cwd: wt, tools: ["Read", "Edit", "Write", "Grep", "Glob"], maxTurns: 20 });
+    ].filter(Boolean).join("\n\n"), { cwd: wt, tools: ["Read", "Edit", "Write", "Grep", "Glob"], maxTurns: big ? 60 : 20 });
     const left = files.filter((f) => { try { return MARKERS.test(fs.readFileSync(path.join(wt, f.path), "utf8")); } catch { return true; } });
-    if (left.length) return stop("I could not resolve every conflict safely.");
-    G.git(wt, ["add", "-A"]);
-    G.git(wt, ["commit", "--no-edit", "--quiet"]);
+    if (left.length) return stop(`I could not resolve every conflict safely (${left.length} file${left.length === 1 ? "" : "s"} still have conflict markers).`, left.map((f) => f.path));
+    let commitError = "";
+    for (let i = 0; i < 2; i++) {
+      try { G.git(wt, ["add", "-A"]); G.git(wt, ["commit", "--no-edit", "--quiet"]); commitError = ""; break; } catch (e: any) { commitError = String(e?.message ?? e); }
+    }
+    if (commitError) {
+      const hooks = failedHooks(commitError);
+      return stop(hooks.length ? `I resolved the conflicts, but your git hook failed on the merge commit (${hooks.join(", ")}), so I stopped.` : "I resolved the conflicts, but git refused the merge commit, so I stopped.");
+    }
     const test = ctx.project.local.testCommand;
     if (test) {
       const t = await G.runCommand(test, wt, 15 * 60_000).catch((e: any) => ({ code: 1, output: String(e?.message ?? e) }));
       if (t.code !== 0) {
         G.git(wt, ["reset", "--hard", before], { allowFail: true });
+        recordConflict(ctx.task.id, { state: "open", num: r.num, base: r.base, files: names, why: "tests failed after resolving" });
         await tell(ctx, `⚠️ PR #${r.num} (${ref}) conflicts with ${r.base}`, `I resolved the conflict in ${names.join(", ")} but the tests then failed, so nothing was pushed. Please resolve it on ${r.branch}.`, r.url);
         return { status: "done", note: "tests failed after resolving – told you" };
       }
     }
-    ctx.save({ rebase: { ...r, changed: true, resolved: names, how: `merged ${r.base} in, resolved ${names.join(", ")}` } });
+    ctx.save({ rebase: { ...r, changed: true, resolved: names, big, how: `merged ${r.base} in, resolved ${names.length > 4 ? `${names.length} files` : names.join(", ")}` } });
     return done(`merged ${r.base} in, ${names.length} conflict(s) resolved`);
   },
 
@@ -168,13 +241,14 @@ export const REBASE_STEPS: Record<string, (ctx: StepCtx) => Promise<StepResult>>
     const gh = clients.github();
     if (!gh) return { status: "fail", reason: "GitHub is not connected" };
     const ref = refOf(ctx.task);
-    if (r.resolved?.length && !ctx.task.data.directives?.no_approvals) {
+    // conflicts the agent resolved are shown first; bigger ones (resolved on your order) ALWAYS, even under "no approvals"
+    if (r.resolved?.length && (r.big || !ctx.task.data.directives?.no_approvals)) {
       const prev = ctx.task.data.rebaseApprovalId ? getApproval(ctx.task.data.rebaseApprovalId) : undefined;
       if (prev?.state !== "approved") {
         const ap = requestApproval(ctx.task.id, "push_rebase", { repo: r.repo, branch: r.branch, baseSha: r.headSha, headSha: G.headSha(wt), diffHash: G.diffHash(wt, r.headSha) });
         ctx.save({ rebaseApprovalId: ap.id });
         await notify({ kind: "approval_needed", taskId: ctx.task.id, taskRef: ref, approvalId: ap.id, approvalAction: "push_rebase", dedupeKey: ap.id,
-          title: `🔀 PR #${r.num}: merged ${r.base} in and resolved ${r.resolved.join(", ")} – push?`, body: `${r.how}. Tests ran here. Reply 1 to push (a normal push, never forced).`, url: r.url });
+          title: `🔀 PR #${r.num}: merged ${r.base} in and resolved ${r.resolved.length} conflicted file${r.resolved.length === 1 ? "" : "s"} – push?`, body: `${r.resolved.map((n: string) => `- ${n}`).join("\n")}\n\n${ctx.project.local.testCommand ? "The tests passed here." : "No test command is set for this project, so no tests ran here – please look at the change."} Reply 1 to push (a normal push, never forced), or 2 to drop it.`, url: r.url });
         return { status: "await_approval", approvalId: ap.id };
       }
       const bind = verifyBinding(prev, wt);
@@ -190,6 +264,7 @@ export const REBASE_STEPS: Record<string, (ctx: StepCtx) => Promise<StepResult>>
     }
     const sha = G.headSha(wt);
     audit("service", "rebase.pushed", ctx.task.id, { repo: r.repo, num: r.num, sha, how: r.how });
+    recordConflict(ctx.task.id, { state: "resolved", num: r.num, base: r.base, files: r.resolved ?? [] });
     if (r.mode === "conflict") {
       try { G.removeWorktree(ctx.project.local.path, wt); G.git(ctx.project.local.path, ["branch", "-D", ctx.task.branch ?? ""], { allowFail: true }); } catch { /* best effort */ }
       ctx.task = { ...ctx.task, worktree: null, branch: null };

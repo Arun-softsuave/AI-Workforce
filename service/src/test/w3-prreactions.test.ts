@@ -471,6 +471,55 @@ test("G14: the PR fell behind main → main merged in (no force-push); a real co
   const told = sent.find((m) => /PR #7 \(KAN-9\) conflicts with main/.test(m.title));
   assert.ok(told);
   assert.match(told!.body, /A real conflict \(4 files\)[\s\S]*Nothing was pushed/);
+  assert.match(told!.body, /resolve the conflicts on PR 7 yourself/, "says how to give the OK for bigger conflicts");
+  assert.equal(getTask(ticket.id)!.data.conflict?.state, "open", "\"is it resolved?\" knows it is still open");
+  assert.deepEqual(getTask(ticket.id)!.data.conflict?.files, ["a.txt", "b.txt", "c.txt", "d.txt"]);
+});
+
+test("PR #131 case: on your order ('resolve them yourself') a bigger conflict is resolved, tested and shown before the push", async () => {
+  const head0 = remoteHead("feat/KAN-9/refund");
+  let resolved = 0;
+  runner.mock = new MockRunner({ implementer: (req) => {
+    for (const f of ["a", "b", "c", "d"]) fs.writeFileSync(path.join(req.cwd!, `${f}.txt`), `both sides ${f}\n`);
+    resolved++;
+    return { summary: "resolved", filesChanged: [], testsAdded: [], notes: "" };
+  } });
+  emit({ type: "user_command", idemKey: "w3:resolveall:1", itemId: ticket.id, payload: { command: "rebase", resolveAll: true, ours: true, by: "sneha" } });
+  const waiting = await settleJob(ticket.id, "rebase");
+  assert.equal(waiting.state, "waiting", waiting.error ?? "");
+  assert.equal(resolved, 1, "the agent resolved the 4-file conflict on your order");
+  assert.equal(remoteHead("feat/KAN-9/refund"), head0, "nothing pushed before your OK");
+  const ask = sent.filter((m) => /PR #7: merged main in and resolved 4 conflicted files – push\?/.test(m.title)).at(-1);
+  assert.ok(ask, "shown to you first");
+  assert.match(ask!.body, /- a\.txt[\s\S]*Reply 1 to push/);
+  assert.equal((await decideAndApply(waiting.data.ctx.rebaseApprovalId, "approved", "Sneha", "teams-personal")).ok, true);
+  const done = await settleJob(ticket.id, "rebase", ["done", "failed", "cancelled"]);
+  assert.equal(done.state, "done", done.error ?? "");
+  const head1 = remoteHead("feat/KAN-9/refund");
+  assert.notEqual(head1, head0);
+  assert.equal(sh(repo, "merge-base", "--is-ancestor", head0, head1), "", "a normal push on top (no force-push)");
+  assert.equal(getTask(ticket.id)!.data.conflict?.state, "resolved");
+  runner.mock = new MockRunner();
+});
+
+test("a git hook that fails on the merge commit is reported as a hook (never as 'a conflict with 0 files'), never skipped", async () => {
+  pushAs("main", "docs/hook.md", "hook\n", "docs for the hook test");
+  const head0 = remoteHead("feat/KAN-9/refund");
+  const hook = path.join(repo, ".git", "hooks", "pre-merge-commit");   // what git runs for a merge commit
+  fs.mkdirSync(path.dirname(hook), { recursive: true });
+  fs.writeFileSync(hook, "#!/bin/sh\necho 'check yaml...............................................................Failed'\nexit 1\n");   // git runs it only for merge commits
+  fs.chmodSync(hook, 0o755);
+  try {
+    emit({ type: "pr_conflict", idemKey: "w3:conflict:hook", itemId: ticket.id, payload: { ours: true, repo: "acme/shop", num: 7 } });
+    const job = await waitFor(() => { void tick(); const j = jobsOf(ticket.id).filter((x) => x.type === "rebase").at(-1); return j && j.data.events?.some((e: any) => e.payload?.num === 7 && e.type === "pr_conflict") && ["done", "failed"].includes(j.state) && j.created_at > "" ? j : undefined; }, 90_000, 100);
+    assert.equal(job.state, "done", job.error ?? "");
+    assert.equal(remoteHead("feat/KAN-9/refund"), head0, "nothing pushed");
+    const told = sent.filter((m) => /git hook stopped the update from main/.test(m.title)).at(-1);
+    assert.ok(told, "told as a hook problem");
+    assert.match(told!.body, /no file conflicts, but your git hook failed on the merge commit: check yaml/);
+    assert.match(told!.body, /the hook was not skipped/);
+    assert.ok(!sent.some((m) => /A real conflict \(0 files\)/.test(m.body)));
+  } finally { fs.rmSync(hook, { force: true }); }
 });
 
 test("G13: someone else pushed to our branch with nothing local here → nothing moved, nothing overwritten", async () => {
