@@ -61,11 +61,11 @@ test("aiw config engine v1|v2", async () => {
   const env = process.env.AIW_ENGINE;
   delete process.env.AIW_ENGINE;
   try {
-    assert.match((await aiw("config", "engine")).out, /^engine v1$/);
-    assert.equal((await aiw("config", "engine", "v2")).code, 0);
-    assert.equal(loadSettings().engine.version, "v2");
-    assert.equal((await aiw("config", "engine", "v3")).code, 1);
-    await aiw("config", "engine", "v1");
+    assert.match((await aiw("config", "engine")).out, /^engine v2$/);   // the kernel is the default since 1.0
+    assert.equal((await aiw("config", "engine", "v1")).code, 0);
     assert.equal(loadSettings().engine.version, "v1");
+    assert.equal((await aiw("config", "engine", "v3")).code, 1);
+    await aiw("config", "engine", "v2");
+    assert.equal(loadSettings().engine.version, "v2");
   } finally { if (env !== undefined) process.env.AIW_ENGINE = env; }
 });

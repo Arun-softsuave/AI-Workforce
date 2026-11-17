@@ -50,4 +50,4 @@ export async function kick(): Promise<void> {
   try { await api("POST", "/api/kick", {}, 3000); } catch { /* best effort */ }
 }
 
-export const VERSION = "0.6.9";
+export const VERSION = "1.0.0";

@@ -75,7 +75,7 @@ export interface Settings {
   };
   /** The people you work with (both use AI Workforce): matched by GitHub login; used to request reviews and to name who did what. */
   team: { me?: { github?: string }; members: TeamMember[] };
-  /** Which engine runs the work: "v1" (default, the playbook engine) or "v2" (the kernel: items, events, jobs, recipes). */
+  /** Which engine runs the work: "v1" (the old playbook engine) or "v2" (default since 1.0, the kernel: items, events, jobs, recipes). */
   engine: { version: EngineVersion };
   /** The Teams Conductor (conductor/conductor.ts). On unless `enabled: false` (then the older intent model reads messages). */
   conductor?: { enabled: boolean };
@@ -122,7 +122,7 @@ export const DEFAULT_SETTINGS: Settings = {
   service: { port: 47821 },
   pr: { draft: false, autoFixCi: true, autoReview: false, autoPostReview: false, autoQaIssues: false },
   team: { members: [] },
-  engine: { version: "v1" },
+  engine: { version: "v2" },
 };
 
 export const DEFAULT_BUDGET: ProjectConfig["budget"] = {
@@ -151,18 +151,18 @@ export function loadSettings(): Settings {
   ensureBaseDirs();
   const raw = fs.existsSync(paths.settings()) ? YAML.parse(fs.readFileSync(paths.settings(), "utf8")) ?? {} : {};
   const s = deepMerge(structuredClone(DEFAULT_SETTINGS), raw);
-  // anything but an explicit "v2" ("engine: v2" or "engine: { version: v2 }") keeps the old engine
+  // the kernel (v2) is the default since 1.0; only an explicit "v1" ("engine: v1" or "engine: { version: v1 }") keeps the old engine
   const e: any = raw.engine;
-  s.engine = { version: e === "v2" || e?.version === "v2" ? "v2" : "v1" };
+  s.engine = { version: e === "v1" || e?.version === "v1" ? "v1" : "v2" };
   // AIW_ENGINE=v1|v2 overrides the file (running the test suite on either engine)
   const env = process.env.AIW_ENGINE;
   if (env === "v1" || env === "v2") s.engine = { version: env };
   return s;
 }
 
-/** The engine in use ("v1" unless settings say engine.version: v2). */
+/** The engine in use ("v2" unless settings say engine.version: v1). */
 export function engineVersion(s: Settings = loadSettings()): EngineVersion {
-  return s.engine?.version === "v2" ? "v2" : "v1";
+  return s.engine?.version === "v1" ? "v1" : "v2";
 }
 
 export function saveSettings(s: Settings): void {

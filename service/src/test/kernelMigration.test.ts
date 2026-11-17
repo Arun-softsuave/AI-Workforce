@@ -119,19 +119,21 @@ test("kernel states exist with legal transitions; every v1 transition is kept", 
   assert.ok(!canTransition(t("MERGED"), "PR_OPEN"));
 });
 
-test("engine.version defaults to v1 and only an explicit v2 selects the kernel", () => {
-  // this test is about the settings file; AIW_ENGINE (the switch for running the suite on v2) is checked at the end
+test("engine.version defaults to v2 (since 1.0) and only an explicit v1 selects the old engine", () => {
+  // this test is about the settings file; AIW_ENGINE (the switch for running the suite on either engine) is checked at the end
   const envBefore = process.env.AIW_ENGINE;
   delete process.env.AIW_ENGINE;
-  assert.equal(DEFAULT_SETTINGS.engine.version, "v1");
-  assert.equal(engineVersion(loadSettings()), "v1");
+  assert.equal(DEFAULT_SETTINGS.engine.version, "v2");
+  assert.equal(engineVersion(loadSettings()), "v2");
+  fs.writeFileSync(paths.settings(), "engine:\n  version: v1\n");
+  assert.equal(loadSettings().engine.version, "v1");
+  assert.equal(engineVersion(), "v1");
+  fs.writeFileSync(paths.settings(), "engine: v1\n");
+  assert.equal(engineVersion(), "v1");
   fs.writeFileSync(paths.settings(), "engine:\n  version: v2\n");
-  assert.equal(loadSettings().engine.version, "v2");
-  assert.equal(engineVersion(), "v2");
-  fs.writeFileSync(paths.settings(), "engine: v2\n");
   assert.equal(engineVersion(), "v2");
   fs.writeFileSync(paths.settings(), "engine:\n  version: v9\n");
-  assert.equal(engineVersion(), "v1");
+  assert.equal(engineVersion(), "v2");
   // AIW_ENGINE overrides the file, both ways; any other value is ignored
   process.env.AIW_ENGINE = "v2";
   assert.equal(engineVersion(), "v2");
