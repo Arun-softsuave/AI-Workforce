@@ -48,6 +48,8 @@ export interface ToolCtx {
   /** The user already said "yes" to this call (a confirmed destructive action is not asked again). */
   confirmed?: boolean;
   fromMsg?: number | null;
+  /** Where the order came from ("teams-personal" by default; "dashboard" for the dashboard's buttons). */
+  channel?: string;
 }
 
 export interface ToolAsk { question: string; calls?: ToolCall[]; options?: { label: string; key?: string; calls: ToolCall[] }[] }
@@ -286,7 +288,7 @@ export async function toolDecide(args: ToolArgs, ctx: ToolCtx): Promise<ToolResu
     if (looksLikeSecret(text)) return said(`${refOf(t)}: ${secretInstruction(/\b([A-Z][A-Z0-9_]{3,})\b/.exec(q)?.[1])}`, false);
     let answer = text;
     if (SECRET_QUESTION.test(q) && /^(done|added|set|stored|it'?s (set|in the vault))\b/i.test(text)) answer = "The value is stored in the AI Workforce vault (aiw secret set); read it from there, never print it.";
-    const r = await answerTask(refOf(t), answer, ctx.who, "teams-personal", { delegated: args.delegated });
+    const r = await answerTask(refOf(t), answer, ctx.who, ctx.channel ?? "teams-personal", { delegated: args.delegated });
     if (r.ok) setFocus(refOf(t));
     return said(r.message, r.ok);
   }

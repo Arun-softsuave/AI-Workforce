@@ -266,3 +266,17 @@ td .sub{display:block;color:var(--muted);font-size:12.5px}
   .top h1{font-size:20px}
 }
 @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+
+/* message box (same as writing to the bot in Teams) */
+.say{display:flex;gap:8px;align-items:center}
+.say input{flex:1 1 auto;min-width:0;font:inherit;padding:9px 12px;border:1px solid var(--line);border-radius:9px;background:var(--surface);color:var(--fg)}
+.say input:focus{outline:2px solid var(--accent);outline-offset:1px}
+.say-reply{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:10px 14px;white-space:pre-wrap;overflow-wrap:anywhere;font-size:13.5px;position:relative}
+.say-reply .x{position:absolute;top:6px;right:8px;border:0;background:transparent;color:var(--muted);cursor:pointer;font-size:14px}
+.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);border:0}
+/* drawer: conflict box, armed (confirm) buttons */
+.conflict{border:1px solid var(--line);border-left:3px solid var(--bad);border-radius:10px;padding:10px 14px;font-size:13.5px}
+.conflict.ok{border-left-color:var(--ok)}
+.conflict ul{margin:6px 0 0;padding-left:18px}
+.conflict .mono{font-size:12.5px}
+.btn.armed,.opt.armed{background:var(--bad-bg);color:var(--bad);border-color:var(--bad)}

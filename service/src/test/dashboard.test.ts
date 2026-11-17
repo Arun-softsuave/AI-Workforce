@@ -286,16 +286,23 @@ test("dashboard data: needs, working, board, timeline, agents, connections, over
   assert.deepEqual(kinds, ["question:KAN-35", "approval:KAN-58", "start:KAN-47"]);
   const q = needs[0];
   assert.equal(q.title, "Show cancelled orders by default?");
-  assert.deepEqual(q.options.map((o) => o.label), ["Hide them", "Show them"]);
+  // since 1.0.3 every button goes through /api/act – the same code as the Teams command, echoed to Teams
+  assert.deepEqual(q.options.map((o) => o.label), ["Hide them", "Show them", "Write an answer", "You decide"]);
   assert.equal(q.recommended, 0);
-  assert.deepEqual(q.options[1], { label: "Show them", method: "POST", path: "/api/answer", body: { ref: ids.q.id, answer: "2" } });
-  assert.ok(q.freeText);
+  assert.deepEqual(q.options[1], { label: "Show them", method: "POST", path: "/api/act", body: { id: ids.q.id, action: "option", value: "2" }, primary: false });
+  assert.deepEqual(q.options[2].body, { id: ids.q.id, action: "answer" });
+  assert.ok(q.options[2].ask, "a free answer opens a text box");
+  assert.deepEqual(q.options[3].body, { id: ids.q.id, action: "you_decide" });
   const ap = needs[1];
-  assert.equal(ap.options[0].path, `/api/approve/${ids.ap.id}`);
-  assert.equal(ap.options[1].path, `/api/reject/${ids.ap.id}`);
+  assert.equal(ap.options[0].path, "/api/act");
+  assert.deepEqual(ap.options[0].body, { id: ids.a.id, action: "approve" });
+  assert.deepEqual(ap.options[1].body, { id: ids.a.id, action: "change" });
   assert.ok(ap.options[1].ask);
-  assert.equal(needs[2].options[0].path, `/api/tasks/${ids.s.id}/start`);
-  assert.ok(needs[2].options[1].local);
+  assert.deepEqual(ap.options[2].body, { id: ids.a.id, action: "cancel" });
+  assert.ok(ap.options[2].confirm, "cancel asks 'are you sure?' first");
+  assert.deepEqual(needs[2].options[0].body, { id: ids.s.id, action: "start" });
+  assert.ok(needs[2].options[1].local, "Later stays on the page");
+  assert.deepEqual(needs[2].options[2].body, { id: ids.s.id, action: "cancel" });
 
   // working now
   const working = workingNow();
@@ -336,7 +343,7 @@ test("dashboard data: needs, working, board, timeline, agents, connections, over
   assert.ok(tl.timeline.some((e) => e.title === "Wrote the plan" && e.who?.includes("Planner") && e.mark === "done"));
   assert.ok(tl.timeline.some((e) => e.title.startsWith("Asked you") && e.mark === "ask"));
   assert.ok(tl.timeline.some((e) => e.mark === "todo" && e.title === "Built and tested"));
-  assert.equal(tl.actions[0].path, `/api/approve/${ids.ap.id}`);
+  assert.deepEqual(tl.actions.map((a) => (a.body as any).action), ["approve", "change", "cancel"], "the drawer has the same buttons as Needs you");
   assert.equal(itemTimeline("nope"), undefined);
   const tlDone = itemTimeline(ids.d.id)!;
   assert.equal(tlDone.ticketUrl, "https://x.atlassian.net/browse/KAN-40");

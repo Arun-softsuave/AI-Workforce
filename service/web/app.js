@@ -386,12 +386,30 @@
       }).join('') + '</div></div>' +
       (t.parts && t.parts.length > 1 ? '<div><div class="lbl">Repositories</div><div class="repos">' + t.parts.map(function (p) { return '<div class="repo ' + (p.pct >= 100 ? 'done' : '') + '" style="grid-template-columns:110px 1fr 40px;font-size:13px"><span>' + esc(p.repo) + '</span><div class="bar"><i style="width:' + p.pct + '%"></i></div><span class="num">' + p.pct + '%</span></div>'; }).join('') + '</div></div>' : '') +
       (qs.length ? '<div><div class="lbl">Open question' + (qs.length > 1 ? 's' : '') + '</div><div class="qa">' + qs.map(function (q) { return '<div><b>' + esc(q.question) + '</b>' + (q.options.length ? '<div class="muted">' + esc(q.options.join(' / ')) + '</div>' : '') + '</div>'; }).join('') + '</div></div>' : '') +
-      (t.error ? '<div class="error-bar">' + esc(t.error) + '</div>' : '') + depsHtml(t.deps) +
+      (t.error ? '<div class="error-bar">' + esc(t.error) + '</div>' : '') + conflictHtml(t.conflict) + depsHtml(t.deps) +
       '<div><div class="lbl">What happened</div><ol class="tl">' + (t.timeline || []).map(function (e) {
         return '<li class="' + esc(e.mark) + '"><span class="m">' + (e.mark === 'done' ? '✓' : e.mark === 'ask' ? '?' : e.mark === 'bad' ? '!' : '') + '</span><div><div class="st">' + esc(e.title) + '</div>' + (e.who ? '<div class="who">' + esc(e.who) + '</div>' : '') + '</div><time>' + esc(hhmm(e.at)) + '</time></li>';
       }).join('') + '</ol></div>' +
       '<div class="kv"><div><span>Tokens</span><b class="num">' + ktok(t.tokens) + '</b></div><div><span>Cost</span><b class="num">$' + Number(t.cost || 0).toFixed(2) + '</b></div><div><span>PR</span><b>' + esc((t.prs || []).map(function (p) { return p.label; }).join(', ') || '–') + '</b></div></div>' +
       '</div>' + (acts ? '<div class="dacts">' + acts + '</div>' : '');
+  }
+  function conflictHtml(c) {
+    if (!c) return '';
+    if (c.state === 'resolved') return '<div class="conflict ok">✅ No conflicts with ' + esc(c.base || 'the base branch') + ' now <span class="muted">(' + esc(hhmm(c.at)) + ')</span></div>';
+    var files = (c.files || []);
+    return '<div class="conflict"><b>⚠️ Not merged with ' + esc(c.base || 'the base branch') + ' yet</b>' + (c.why ? '<div class="muted">' + esc(c.why) + '</div>' : '') +
+      (files.length ? '<ul>' + files.slice(0, 15).map(function (f) { return '<li class="mono">' + esc(f) + '</li>'; }).join('') + (files.length > 15 ? '<li>and ' + (files.length - 15) + ' more</li>' : '') + '</ul>' : '') +
+      '<div class="muted">Checked ' + esc(hhmm(c.at)) + '</div></div>';
+  }
+  // "are you sure?" in the page: the first click arms the button, a second click within 6 s runs it
+  function armed(btn, a) {
+    if (!a.confirm) return true;
+    if (btn.getAttribute('data-armed') === '1') return true;
+    btn.setAttribute('data-armed', '1'); btn.classList.add('armed');
+    var old = btn.textContent; btn.textContent = 'Click again to confirm';
+    toast(a.confirm);
+    setTimeout(function () { btn.removeAttribute('data-armed'); btn.classList.remove('armed'); btn.textContent = old; }, 6000);
+    return false;
   }
   function closeDrawer() { $('#drawer').hidden = true; $('#scrim').hidden = true; S.drawerId = null; S.drawer = null; }
 
@@ -434,12 +452,14 @@
       var a = n.options[Number(el.getAttribute('data-i'))]; if (!a) return;
       if (a.local) { S.hidden[n.id] = 1; try { sessionStorage.setItem('aiw-later', JSON.stringify(S.hidden)); } catch (x) { /* ignore */ } toast(n.ref + ': I will keep it waiting.'); render(); return; }
       if (a.ask) { openAnswer(row, n, a); return; }
+      if (!armed(el, a)) return;
       runAction(a, a.path === '/api/answer' ? a.body.answer : null, el).catch(function () { /* shown */ });
       return;
     }
     var d = e.target.closest('[data-dact]');
     if (d && S.drawer) {
       var act = S.drawer.actions[Number(d.getAttribute('data-dact'))]; if (!act) return;
+      if (!act.ask && !armed(d, act)) return;
       if (act.ask) { var v = window.prompt(act.ask); if (v == null || !v.trim()) return; runAction(act, v.trim(), d).then(function () { loadDrawer(S.drawerId, true); }).catch(function () {}); }
       else runAction(act, null, d).then(function () { setTimeout(function () { if (S.drawerId) loadDrawer(S.drawerId, true); }, 400); }).catch(function () {});
       return;
@@ -450,6 +470,21 @@
     if (e.target.closest('#closeD')) closeDrawer();
   });
   $('#scrim').addEventListener('click', closeDrawer);
+  // the message box: the same handling as a message to the bot in Teams (and Teams gets the exchange too)
+  $('#sayForm').addEventListener('submit', function (e) {
+    e.preventDefault();
+    var input = $('#sayText'), btn = $('#saySend'), text = input.value.trim();
+    if (!text) { input.focus(); return; }
+    btn.disabled = true; btn.textContent = 'Sending…';
+    api('POST', '/api/message', { text: text }).then(function (r) {
+      var box = $('#sayReply');
+      box.innerHTML = '<button class="x" type="button" aria-label="Close reply">✕</button>' + esc(stripMd(r.reply || 'Done.'));
+      box.hidden = false;
+      box.querySelector('.x').addEventListener('click', function () { box.hidden = true; });
+      input.value = ''; scheduleRefresh(200);
+      if (S.drawerId) setTimeout(function () { loadDrawer(S.drawerId, true); }, 500);
+    }).catch(function (err) { toast(err.message); }).then(function () { btn.disabled = false; btn.textContent = 'Send'; });
+  });
   document.addEventListener('keydown', function (e) { if (e.key === 'Escape') { closeDrawer(); endTour(); } });
 
   function togglePause() {

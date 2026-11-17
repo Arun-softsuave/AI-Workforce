@@ -3,6 +3,7 @@ import { loadSettings } from "../core/config.js";
 import { safeJson } from "../core/util.js";
 import { readRuntime, VERSION } from "../core/runtime.js";
 import { normaliseQuestions, approvalChoices } from "../core/questions.js";
+import { actionsFor } from "./actions.js";
 import { getTask, listTasks, partsOf, stepsFor, type Task, type State } from "../engine/tasks.js";
 import { getPlaybook } from "../engine/playbooks.js";
 import { getRecipe } from "../kernel/recipes.js";
@@ -23,7 +24,7 @@ import { snapshot } from "../live/bus.js";
 
 export type Tone = "work" | "you" | "ok" | "bad" | "wait";
 export type StageKey = "waiting" | "plan" | "build" | "review" | "pr" | "done";
-export interface Action { label: string; method: "POST"; path: string; body?: Record<string, unknown>; ask?: string; primary?: boolean; local?: boolean }
+export interface Action { label: string; method: "POST"; path: string; body?: Record<string, unknown>; ask?: string; primary?: boolean; local?: boolean; /** ask "are you sure?" in the page first */ confirm?: string }
 
 export const STAGES: [StageKey, string][] = [
   ["waiting", "Waiting"], ["plan", "Understand & plan"], ["build", "Building"], ["review", "Reviewing"], ["pr", "PR open"], ["done", "Done"],
@@ -184,16 +185,14 @@ export function needsYou(): NeedItem[] {
         ...base, id: `q:${t.id}`, kind: "question",
         title: one ? one.question : qs.length ? `${qs.length} questions` : "A question for you",
         detail: one ? short(t.title ?? "") : short(qs.map((q, i) => `${i + 1}. ${q.question}`).join("  ")),
-        options: one ? one.options.map((o, i) => ({ label: o, method: "POST" as const, path: "/api/answer", body: { ref: t.id, answer: String(i + 1) } })) : [],
+        options: actionsFor(t),
         recommended: one?.options.length ? 0 : undefined,
-        freeText: { label: "Answer", method: "POST", path: "/api/answer", body: { ref: t.id }, ask: qs.length > 1 ? "Your answers (one per question, in order)" : "Your answer" },
       });
     } else if (t.state === "AWAITING_START") {
       out.push({
         ...base, id: `s:${t.id}`, kind: "start", title: `Start "${short(t.title ?? ref, 80)}"?${t.size ? ` (size ${t.size})` : ""}`,
         detail: "Large tasks wait for your go-ahead.",
-        options: [{ label: "Start", method: "POST", path: `/api/tasks/${encodeURIComponent(t.id)}/start`, primary: true },
-          { label: "Later", method: "POST", path: "", local: true }],
+        options: [...actionsFor(t).filter((x) => (x.body as any)?.action === "start"), { label: "Later", method: "POST", path: "", local: true }, ...actionsFor(t).filter((x) => (x.body as any)?.action !== "start")],
         recommended: 0,
       });
     } else if (t.state === "AWAITING_APPROVAL") {
@@ -202,16 +201,13 @@ export function needsYou(): NeedItem[] {
       const choices = approvalChoices(a.action);
       out.push({
         ...base, id: `a:${a.id}`, kind: "approval", title: APPROVAL_TITLE[a.action] ?? "Approve?", detail: short(t.title ?? ""),
-        options: [
-          { label: choices[0], method: "POST", path: `/api/approve/${encodeURIComponent(a.id)}`, body: { channel: "dashboard" }, primary: true },
-          { label: "Change something", method: "POST", path: `/api/reject/${encodeURIComponent(a.id)}`, body: { channel: "dashboard" }, ask: "What should change?" },
-        ],
+        options: actionsFor(t),
         recommended: 0,
       });
     } else {
       out.push({
         ...base, id: `p:${t.id}`, kind: "problem", title: stateLabel(t), detail: short(t.error ?? nowText(t)),
-        options: [{ label: t.state === "STALE" ? "Refresh" : "Resume", method: "POST", path: `/api/tasks/${encodeURIComponent(t.id)}/resume`, primary: true }],
+        options: actionsFor(t),
         recommended: 0,
       });
     }
@@ -357,13 +353,9 @@ export function itemTimeline(id: string) {
 
   const stage = stageOf(t);
   const a = latestApproval(t.id);
-  const actions: Action[] = [];
-  if (t.state === "AWAITING_START") actions.push({ label: "Start", method: "POST", path: `/api/tasks/${encodeURIComponent(t.id)}/start`, primary: true });
-  if (t.state === "AWAITING_APPROVAL" && a?.state === "pending") {
-    actions.push({ label: approvalChoices(a.action)[0], method: "POST", path: `/api/approve/${encodeURIComponent(a.id)}`, body: { channel: "dashboard" }, primary: true });
-    actions.push({ label: "Change something", method: "POST", path: `/api/reject/${encodeURIComponent(a.id)}`, body: { channel: "dashboard" }, ask: "What should change?" });
-  }
-  if (["PAUSED", "FAILED", "STALE", "FAILED_PUBLISH"].includes(t.state)) actions.push({ label: t.state === "STALE" ? "Refresh" : "Resume", method: "POST", path: `/api/tasks/${encodeURIComponent(t.id)}/resume`, primary: true });
+  void a;
+  // the same next steps Teams offers, as buttons (api/actions.ts runs the same code as the Teams command)
+  const actions = actionsFor(t);
   const { now, waitingFor } = taskNow(t);
   return {
     ...boardCard(t), now, waitingFor, eta: etaText(t), stageIndex: STAGES.findIndex(([k]) => k === stage),
@@ -372,6 +364,7 @@ export function itemTimeline(id: string) {
     questions: normaliseQuestions(t.data.questions, 10),
     branch: t.branch, error: t.error ?? undefined, kind: t.kind,
     timeline: entries, actions, deps: dependencyView(t.id),
+    conflict: t.data.conflict?.state ? { state: t.data.conflict.state, files: t.data.conflict.files ?? [], why: t.data.conflict.why, base: t.data.conflict.base, at: t.data.conflict.at } : undefined,
   };
 }
 

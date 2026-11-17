@@ -53,6 +53,9 @@ r("POST", /^\/api\/tasks\/([^/]+)\/refresh$/, async (m) => { const t = refreshTa
 r("POST", /^\/api\/tasks\/([^/]+)\/start$/, async (m) => { const n = startAwaiting(decodeURIComponent(m[1])); await tick(); return { ok: n > 0, started: n }; });
 r("POST", /^\/api\/approve\/([^/]+)$/, (m, b) => decideAndApply(decodeURIComponent(m[1]), "approved", b.approver ?? approver(), b.channel ?? "dashboard"));
 r("POST", /^\/api\/reject\/([^/]+)$/, (m, b) => decideAndApply(decodeURIComponent(m[1]), "rejected", b.approver ?? approver(), b.channel ?? "dashboard", b.reason));
+// dashboard buttons and message box: the same code as the Teams commands, echoed to Teams (api/actions.ts)
+r("POST", /^\/api\/act$/, async (_m, b) => (await import("./actions.js")).runDashboardAction({ id: String(b.id ?? ""), action: b.action, text: b.text ?? b.reason ?? b.answer, value: b.value, who: b.by ?? approver() }));
+r("POST", /^\/api\/message$/, async (_m, b) => (await import("./actions.js")).dashboardMessage(String(b.text ?? ""), b.by ?? approver()));
 r("POST", /^\/api\/answer$/, (_m, b) => answerTask(b.ref, String(b.answer ?? ""), b.by ?? approver(), b.channel ?? "dashboard"));
 r("GET", /^\/api\/inbox$/, (_m, _b, u) => inboxView(u.searchParams.get("all") === "1"));
 r("POST", /^\/api\/inbox\/read$/, (_m, b) => { markInboxRead(b.task); return { ok: true }; });

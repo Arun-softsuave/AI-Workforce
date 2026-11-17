@@ -472,6 +472,12 @@ export async function handleChatMessage(text: string, who: string, ctx: MessageC
   }
   // a quoted bot message sets the item exactly (W1a) – it beats the focus for this message and the next short replies
   if (ctx.quotedItem) setFocus(ctx.quotedItem);
+  // "1" / "yes" for something you already decided on the dashboard: say so, never act twice
+  try {
+    const { alreadyDecided } = await import("../api/actions.js");
+    const done = alreadyDecided(text, ctx.quotedItem ?? getFocus());
+    if (done) return done;
+  } catch { /* the normal path decides */ }
   const p = pendingItems();
   const aiAvailable = loadSettings().models.provider !== "mock";
   // a quote of someone's message carries context: the Conductor reads it with the words ("fix this in KAN-52")
