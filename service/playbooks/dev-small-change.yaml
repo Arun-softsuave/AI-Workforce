@@ -9,6 +9,7 @@ steps:
   - plan_gate                # pauses for plan approval (settings.workflow.planApproval: always)
   - implement_test
   - reviews: { reviewers: [combined] }
+  - design_check         # C6: frontend with Figma frames only – screenshots vs the frame, at most 2 fix rounds; skipped (no tokens) otherwise
   - prepublish
   - report
   - request_approval: { action: create_pr }

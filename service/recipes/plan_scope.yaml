@@ -1,0 +1,11 @@
+name: plan_scope
+title: Epic, feature or sprint (W8) – preview, one plan and one approval for the whole scope, waves of children, merge order, epic check
+job: plan_scope
+steps:
+  - preview_scope        # count, sizes, repos, overlaps, rough tokens and time; a sprint / "all my tickets" asks once (even under "no approvals")
+  - scope_plan           # scope planner (large tier): tickets -> repos, areas, dependencies, contracts, missing stories; code makes edges, waves, merge order
+  - scope_review         # fresh eyes on the breakdown (notes go into the approval message)
+  - scope_gate           # ONE approval for the scope (D7); under "no approvals" the plan is sent as information
+  - spawn_children       # one child item per ticket (parent / root = this scope) with depends_on / stacks_on / same_area edges
+  - merge_order          # merge order in PRs, Teams and status; out-of-order warning; waits until every child is finished
+  - epic_check           # acceptance criteria x what was built; missing stories created only after your OK; one summary

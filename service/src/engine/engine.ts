@@ -10,7 +10,7 @@ import { playbookFor } from "../core/roles.js";
 import { groupMembers, describeMembers } from "./routing.js";
 import { getPlaybook, stepIndex } from "./playbooks.js";
 import { STEPS, BudgetPause, ticketText, type StepResult } from "./steps.js";
-import { buildStepCtx, flushUsage, keepWorkspace, applyTicketChange, pause, fail, retryOrFail, finish, askUser, answerHint, liveStep, noteConnectorError } from "./stepRun.js";
+import { buildStepCtx, flushUsage, keepWorkspace, applyTicketChange, pause, fail, retryOrFail, finish, askUser, answerHint, liveStep, noteConnectorError, runWithAskDesk, answerScopeOf } from "./stepRun.js";
 
 export { askUser, answerHint };
 import {
@@ -26,6 +26,9 @@ import { needsApproval } from "../policy/gate.js";
 import { describeInForce } from "../policy/directives.js";
 import { isBlockedByConnector, unavailableConnectors } from "../intake/healthGate.js";
 import { getRecipe } from "../kernel/recipes.js";
+import { readDoc } from "../knowledge/designDoc.js";
+import { wakeScopes } from "./steps/scope.js";
+const readDocSafe = (id: string) => { try { return readDoc(id); } catch { return undefined; } };
 
 /**
  * Playbook Engine: a deterministic state machine. Code decides the order of steps; agents work inside them.
@@ -48,10 +51,21 @@ export function isPaused(): boolean {
 export function pauseAll(until?: string): void { setMeta("paused_until", until ?? "indefinite"); audit("user", "service.pause", undefined, { until }); }
 export function resumeAll(): void { delMeta("paused_until"); audit("user", "service.resume"); }
 
+/** Flows that exist only as kernel recipes (service/recipes), never as v1 playbooks. */
+const RECIPE_ONLY = new Set(["audit", "adopt", "plan_scope", "batch"]);
+
 /** On service start: anything that was RUNNING when we stopped goes back to the queue (resumes at its checkpoint). */
 export function recoverInterrupted(): number {
   const stuck = listTasks({ states: ["RUNNING", "PUBLISHING"] });
+  const v1 = engineVersion() !== "v2";
   for (const t of stuck) {
+    // recipe-only flows (audit, adopt, scopes) have no v1 playbook: an audit runs again in place, the others stop clearly
+    if (v1 && t.playbook && RECIPE_ONLY.has(t.playbook)) {
+      if (t.playbook === "audit") {
+        import("./steps/audit.js").then((m) => m.runAuditInline(t.id)).catch((e) => logger.error("audit recovery failed", { task: t.id, error: e.message }));
+      } else transition(t.id, "FAILED", "needs engine v2", { error: `${t.playbook} runs on the new engine only – it was interrupted by a restart` });
+      continue;
+    }
     if (t.state === "PUBLISHING") transition(t.id, "RUNNING", "recovered after restart");
     transition(t.id, "QUEUED", "recovered after restart");
   }
@@ -186,6 +200,8 @@ export async function tick(): Promise<void> {
     wakeLeads();
     const s = loadSettings();
     if (engineVersion(s) === "v2") {
+      // W8: scopes waiting on their children wake when a child moved (code only, no model)
+      try { wakeScopes(); } catch (e: any) { logger.error("wakeScopes failed", { error: e.message }); }
       // engine v2: events → jobs, one job per item, the kernel scheduler and runner (v1 holds still apply)
       await kernelTick({ settings: s, eligible: (t) => !blockedBySibling(t) && !blockedByLead(t),
         onRunEnd: () => setImmediate(() => { tick().catch(() => {}); }) });
@@ -213,7 +229,7 @@ export async function tick(): Promise<void> {
 }
 
 /** Steps that build and run things on this computer (tests, builds, the app for screenshots). Everything else only reads. */
-export const BUILD_STEPS = new Set(["implement_test", "reviews", "prepublish", "report"]);
+export const BUILD_STEPS = new Set(["implement_test", "reviews", "design_check", "prepublish", "report"]);
 
 function stepOf(t: Task): string | undefined {
   try { return getPlaybook(t.playbook ?? "").steps[t.step_index]?.name; } catch { return undefined; }
@@ -285,7 +301,7 @@ export async function runTask(taskId: string): Promise<Task> {
     const ctx = buildStepCtx({ task, project, settings, runner, params: spec.params });
     let result: StepResult;
     try {
-      result = await fn(ctx);
+      result = await runWithAskDesk(fn, ctx);
     } catch (e: any) {
       flushUsage(ctx, sid, e instanceof BudgetPause ? "paused" : "error", e.message);
       keepWorkspace(task, ctx);
@@ -381,6 +397,12 @@ export async function answerTask(ref: string | undefined, answer: string, by: st
   if (!resolved.ok) return { ok: false, message: `${t.source_ref}: ${resolved.message}` };
   const clarifications = [...(t.data.clarifications ?? []), { questions: questionTexts(asked), answer: resolved.answer, reply: answer.trim(), by, at: new Date().toISOString(), ...(opts.delegated ? { delegated: true } : {}) }];
   mergeData(t.id, { clarifications, questions: null });
+  // O4: the answer goes into the decision log (and the design document) – never asked again in this item, batch, epic or sprint;
+  // "you decide" records the recommended option (C4)
+  try {
+    const { recordAnswers } = await import("../knowledge/askDesk.js");
+    recordAnswers(t.id, asked, opts.delegated ? "you decide" : answer, await answerScopeOf(t.id));
+  } catch (e: any) { logger.error("decision log write failed", { task: t.id, error: e.message }); }
   audit(`user:${by}`, "task.clarified", t.id, { chars: answer.length });
   if (t.data.needInfoFrom === "triage" || !t.playbook) transition(t.id, "DETECTED", "answered – re-triage");
   else transition(t.id, "QUEUED", "answered – continue");               // step_index unchanged: the asking step runs again
@@ -456,6 +478,27 @@ export async function applyDecision(a: Approval): Promise<void> {
   }
   // Rejected: feedback becomes input to a re-run from Plan (or Implement for the fast lane) and a candidate Brain rule.
   t = transition(t.id, "REJECTED", a.reason ?? "rejected");
+  // a goldfish / plan reviewer's view of the rejection: the feedback goes into the design document before re-planning (D4)
+  if (a.action === "implement_plan") {
+    try { const { applyFeedbackToDoc } = await import("../knowledge/goldfish.js"); if (readDocSafe(t.id)) applyFeedbackToDoc(t, { text: a.reason ?? "Rejected without a reason", by: a.approver ?? "you", kind: "reject" }); } catch { /* the document is optional */ }
+  }
+  // recipe-only flows (W8 scopes, W15 audit, W16 adopt) restart from their recipe, not a playbook
+  if (t.playbook && RECIPE_ONLY.has(t.playbook)) {
+    const feedback = [...(t.data.feedback ?? []), a.reason ?? "Rejected without a reason"];
+    mergeData(t.id, { feedback });
+    if (a.action === "start") { transition(t.id, "CANCELLED", "you said no to starting it"); return; }
+    let at = 0;
+    try {
+      const r = getRecipe(t.playbook);
+      const find = (n: string) => r.steps.findIndex((x) => x.name === n);
+      at = a.action === "implement_plan" ? Math.max(0, find("scope_plan"), find("plan"))
+        : a.action === "create_tickets" ? Math.max(0, find("epic_check"))
+        : Math.max(0, find("plan"), find("implement_test"));
+    } catch { at = 0; }
+    updateTask(t.id, { step_index: at, run_no: t.run_no + 1 });
+    transition(t.id, "QUEUED", "re-run with feedback");
+    return;
+  }
   const pb = getPlaybook(t.playbook ?? "dev-feature");
   if (t.playbook === "dev-lead") {
     // plan feedback may change which repositories change → understand again; PR feedback goes to every part

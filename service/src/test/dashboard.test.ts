@@ -251,23 +251,23 @@ function seed() {
 
   const r = createTask({ projectId: "nue-backend", source: "jira", sourceRef: "KAN-61", title: "Email templates", kind: "assigned" });
   transition(r.id, "QUEUED", "go", { playbook: "dev-feature", size: "S" });
-  transition(r.id, "RUNNING", "run", { step_index: 6 });
-  const st = startStep(r.id, 1, 6, "implement_test");
+  transition(r.id, "RUNNING", "run", { step_index: 7 });            // dev-feature: implement_test (after doc_readiness)
+  const st = startStep(r.id, 1, 7, "implement_test");
   db().prepare("UPDATE tasks SET tokens_used=? WHERE id=?").run(12_000, r.id);
 
   const a = createTask({ projectId: "nue-backend", source: "jira", sourceRef: "KAN-58", title: "Login redirect loop", kind: "assigned" });
   transition(a.id, "QUEUED", "go", { playbook: "dev-feature", size: "S" });
-  transition(a.id, "RUNNING", "run", { step_index: 4 });
-  const p = startStep(a.id, 1, 4, "plan");
+  transition(a.id, "RUNNING", "run", { step_index: 3 });
+  const p = startStep(a.id, 1, 3, "plan");
   endStep(p, "done", { agent: "planner", model: "claude-opus-x", tokensIn: 3000, tokensOut: 500 });
-  transition(a.id, "AWAITING_APPROVAL", "plan ready", { step_index: 5 });
+  transition(a.id, "AWAITING_APPROVAL", "plan ready", { step_index: 6 });
   const ap = requestApproval(a.id, "implement_plan", {});
 
   const d = createTask({ projectId: "nue-backend", source: "jira", sourceRef: "KAN-40", title: "Avatar upload", kind: "assigned" });
   transition(d.id, "QUEUED", "go", { playbook: "dev-feature", size: "M" });
-  transition(d.id, "RUNNING", "run", { step_index: 12 });
+  transition(d.id, "RUNNING", "run", { step_index: 14 });
   mergeData(d.id, { pr: { url: "https://github.com/o/nue-backend/pull/138" }, ticket: { url: "https://x.atlassian.net/browse/KAN-40" } });
-  transition(d.id, "DONE", "published", { step_index: 14 });
+  transition(d.id, "DONE", "published", { step_index: 16 });
 
   const w = createTask({ projectId: "nue-backend", source: "jira", sourceRef: "KAN-66", title: "Typing indicator", kind: "assigned" });
   transition(w.id, "QUEUED", "go", { playbook: "dev-feature", size: "S" });

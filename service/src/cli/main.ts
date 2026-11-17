@@ -153,7 +153,11 @@ Daily use
   aiw bench [report]                Token and cost baseline: costly steps, agents and tickets
   aiw bench runs | plan <tickets…> | compare <runA> <runB> | mark <runId> <ticket> yes|no
   aiw items [--all] [<ticket>]      Work items as a tree (epic → ticket → parts), with the job each one runs
-  aiw explain <ticket>              Why it is where it is: plan, decisions, your answers, last steps, rules in force
+  aiw explain <ticket>              Why it is where it is: design document, decisions, merge order, holds, last steps, rules
+  aiw design <ticket> [path|show]   The item's design document (summary, file path, or the whole text)
+  aiw adopt <branch|PR> --ticket KEY [--project id]   Finish your own branch: your commits stay, mine go on top (engine v2)
+  aiw learned [<project>] | add|skip|remove <project> R1   Rule ideas from repeated review comments (rules card)
+  aiw bench gate <runA> <runB> | overrides   Keep a cheaper model / effort only when accuracy holds
   aiw rules                         Standing rules in force ("no plan approval for KAN-45", "only backend"…)
   aiw rules add <rule> <value> [--ref KAN-45 | --scope global|item|batch|epic|sprint] [--until ISO]
                                     rules: plan_approval|pr_approval|start_approval|create_issues|create_tickets (skip|ask),
@@ -224,7 +228,18 @@ export async function main(argv: string[]): Promise<number> {
         const ok = B.markAccepted(run, ticket, /^yes$/i.test(verdict));
         out(ok ? "Saved." : `No row for ${ticket} in run ${run}.`, json); return ok ? 0 : 1;
       }
-      out("Usage: aiw bench [report|runs|plan <tickets…>|compare <runA> <runB>|mark <runId> <ticket> yes|no]", json); return 1;
+      if (sub === "gate") {
+        // §9.1.8: a cheaper model / effort is kept only when accuracy and questions hold and it is really cheaper
+        const [x, y] = [third, a._[3]];
+        if (!x || !y) { out("Usage: aiw bench gate <runBefore> <runAfter>", json); return 1; }
+        const g = B.acceptSavingRuns(x, y);
+        out(json ? g : g.text, json); return 0;
+      }
+      if (sub === "overrides") {
+        const O = await import("../bench/overrides.js");
+        out(json ? O.listOverrides() : O.renderOverrides(), json); return 0;
+      }
+      out("Usage: aiw bench [report|runs|plan <tickets…>|compare <runA> <runB>|gate <runA> <runB>|overrides|mark <runId> <ticket> yes|no]", json); return 1;
     }
     case "service": {
       if (sub === "install") {
@@ -659,7 +674,47 @@ export async function main(argv: string[]): Promise<number> {
       const r = await api("POST", "/api/poll", {}, 120_000);
       out(r ?? "Service is not running – start it with `aiw service start`.", json); return r ? 0 : 1;
     }
-    case "cost": out(cost(Number(a.days ?? 7)), json); return 0;
+    case "cost": {
+      // fresh input vs cache reads, by day / ticket / agent / recipe, alerts, then the model / effort overrides (§9.1.9)
+      const days = Number(a.days ?? 7);
+      if (json) { out(cost(days), json); return 0; }
+      const { costViewText } = await import("../api/ops.js");
+      out(costViewText(days), json); return 0;
+    }
+    case "adopt": {
+      // W16: finish your own branch – your commits stay, mine go on top, a normal push (never forced). Engine v2 only.
+      const target = sub;
+      if (!target) { out("Usage: aiw adopt <branch|PR link|PR number> --ticket <KEY> [--project <id>]", json); return 1; }
+      const { startAdoptFromText } = await import("../engine/steps/adopt.js");
+      const ticket = str(a.ticket);
+      const text = [/^\d+$/.test(target) ? `PR ${target}` : /github\.com/.test(target) ? target : `branch ${target}`, ticket ? ticket : "", a.project ? `project ${a.project}` : ""].filter(Boolean).join(" ");
+      const r = await startAdoptFromText(text, "cli", "cli");
+      await kick();
+      out(r, json); return 0;
+    }
+    case "learned": {
+      // O3: rule ideas from repeated review comments – "aiw learned <project>", "aiw learned add|skip|remove <project> R1"
+      const L = await import("../engine/steps/close_out.js");
+      const projectId = ["add", "skip", "remove"].includes(sub ?? "") ? third : sub;
+      const p = projectId ? getProject(projectId) : loadProjects()[0];
+      if (!p) { out("Usage: aiw learned [<project>] | add|skip|remove <project> R1", json); return 1; }
+      const ref = a._[3];
+      if (sub === "add" && ref) { const r = L.acceptRule(p.id, ref, { by: "cli", line: str(a.line) }); out(r ? `Added to the rules card: ${r.line}` : `No rule idea ${ref}.`, json); return r ? 0 : 1; }
+      if (sub === "skip" && ref) { const r = L.rejectRule(p.id, ref, { by: "cli" }); out(r ? `Skipped ${ref}.` : `No rule idea ${ref}.`, json); return r ? 0 : 1; }
+      if (sub === "remove" && ref) { const r = L.removeRule(p.id, ref); out(r ? `Removed ${ref} from the rules card.` : `No learned rule ${ref}.`, json); return r ? 0 : 1; }
+      out(json ? L.ruleProposals(p.id) : L.renderProposals(p.id), json); return 0;
+    }
+    case "design": {
+      // the design document of an item (W5a): its path and its ≤ 10-line summary, or the whole text with "show"
+      if (!sub) { out("Usage: aiw design <ticket> [path|show]", json); return 1; }
+      const t = (await import("../engine/tasks.js")).getTask(sub);
+      const DD = await import("../knowledge/designDoc.js");
+      const id = t?.data.leadId ?? t?.id ?? sub;
+      const doc = DD.readDoc(id) ?? (t?.source_ref ? DD.readDoc(t.source_ref) : undefined);
+      if (!doc) { out(`No design document for ${sub} yet.`, json); return 1; }
+      if (third === "path") { out(doc.path, json); return 0; }
+      out(json ? doc : third === "show" ? doc.text : `${DD.summary(doc.itemId)}\nFile: ${doc.path}`, json); return 0;
+    }
     case "dashboard": {
       const rt = readRuntime();
       if (!rt || !pidAlive(rt.pid)) { out("Service is not running – start it with `aiw service start`.", json); return 1; }

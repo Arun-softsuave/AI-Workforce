@@ -2,7 +2,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { aiwHome, ensureDir } from "../core/paths.js";
 import { getSecret } from "../core/secrets.js";
-import { sha256, sleep, truncate } from "../core/util.js";
+import { db } from "../core/db.js";
+import { safeJson, sha256, sleep, truncate } from "../core/util.js";
 
 /**
  * Figma accuracy (W12, W13, module 5.11a).
@@ -434,8 +435,12 @@ export async function watchVersions(entries: WatchEntry[], deps?: FigmaDeps): Pr
     const now = versions.get(e.fileKey)!;
     const before = e.lastVersion ?? seen[e.fileKey];
     if (!before || before === now) {
-      // nothing to compare yet: make sure the current copy is cached for the next change
-      if (!before) for (const f of e.frames) await getFrame(e.fileKey, f.nodeId, "values", { ...deps, version: now }).catch(() => undefined);
+      // nothing to compare yet: make sure the current copy is cached for the next change (a frame added to an item
+      // later is cached on its first poll too – one nodes call, then never again for this version)
+      for (const f of e.frames) {
+        if (before && cachedFrame(e.fileKey, f.nodeId, now, deps)) continue;
+        await getFrame(e.fileKey, f.nodeId, "values", { ...deps, version: now }).catch(() => undefined);
+      }
       continue;
     }
     for (const f of e.frames) {
@@ -463,4 +468,158 @@ export function designChangedMessage(ev: DesignChangedEvent, ask = true): string
   const more = ev.changes.length > 3 ? ` and ${ev.changes.length - 3} more` : "";
   const what = ev.compared ? `: ${top}${more}` : " (could not compare with the earlier copy)";
   return `Design of '${ev.frameName}' changed${what}.${ask ? " Adapt?" : ""}`;
+}
+
+// ------------------------------------------------------------------ Figma again (W12), design check input (W5 step 10)
+
+/** Is a Figma token available for the REST calls? (Health checks and reconnect alerts live in intake/health.ts.) */
+export function figmaReady(deps?: FigmaDeps): boolean {
+  try { return !!(deps?.token ?? (() => getSecret("figma.token")))(); } catch { return false; }
+}
+
+function addPointer(out: FramePointer[], p: FramePointer | undefined): void {
+  if (!p?.fileKey || !/^\d+:\d+$/.test(p.nodeId)) return;
+  if (!out.some((x) => x.fileKey === p.fileKey && x.nodeId === p.nodeId)) out.push(p);
+}
+
+/**
+ * The frame pointers of an item: `data.framePointers` (pointer objects or design-document lines) and the pointer lines
+ * in its design document (any section). Order kept, duplicates removed.
+ */
+export function itemFramePointers(item: { id: string; data?: Record<string, any> }): FramePointer[] {
+  const out: FramePointer[] = [];
+  for (const p of (Array.isArray(item.data?.framePointers) ? item.data!.framePointers : []) as any[]) {
+    if (typeof p === "string") parseFramePointers(p).forEach((x) => addPointer(out, x));
+    else if (p?.fileKey && p?.nodeId) addPointer(out, framePointer(String(p.name ?? p.nodeId), String(p.nodeId), String(p.fileKey)));
+  }
+  if (/^[A-Za-z0-9][A-Za-z0-9._@-]{0,120}$/.test(item.id) && !item.id.includes("..")) {
+    try { parseFramePointers(fs.readFileSync(path.join(aiwHome(), "items", item.id, "design.md"), "utf8")).forEach((x) => addPointer(out, x)); }
+    catch { /* no design document */ }
+  }
+  return out;
+}
+
+/**
+ * Finds the frame an agent asks for again ("Chat / Reply chips", "12:345", "12-345" or a Figma link) among the item's
+ * pointers. A link to a frame the item has no pointer for still resolves (to a pointer of its own).
+ */
+export function resolveFrame(ref: string, pointers: FramePointer[]): FramePointer | undefined {
+  const r = (ref ?? "").trim();
+  if (!r) return undefined;
+  const link = /figma\.com\/(?:design|file)\/([A-Za-z0-9]+)\S*?[?&]node-id=(\d+)[-:](\d+)/.exec(r);
+  if (link) {
+    const id = `${link[2]}:${link[3]}`;
+    return pointers.find((p) => p.fileKey === link[1] && p.nodeId === id) ?? framePointer(id, id, link[1]);
+  }
+  const id = /^(\d+)[-:](\d+)$/.exec(r);
+  if (id) return pointers.find((p) => p.nodeId === `${id[1]}:${id[2]}`);
+  const lower = r.toLowerCase();
+  return pointers.find((p) => p.name.toLowerCase() === lower) ?? pointers.find((p) => p.name.toLowerCase().includes(lower));
+}
+
+const versionMemo = new Map<string, { version: string; at: number }>();
+const VERSION_TTL_MS = 60_000;
+
+/** The file version, remembered for a minute so a job that asks for Figma twice makes one call (W12). */
+async function recentVersion(fileKey: string, deps?: FigmaDeps): Promise<string> {
+  const m = versionMemo.get(fileKey);
+  if (m && Date.now() - m.at < VERSION_TTL_MS) return m.version;
+  const version = (await fileVersion(fileKey, deps)).version;
+  versionMemo.set(fileKey, { version, at: Date.now() });
+  return version;
+}
+
+/** Forget the remembered file versions (tests; the watch saw a new version). */
+export function forgetVersions(fileKey?: string): void {
+  if (fileKey) versionMemo.delete(fileKey); else versionMemo.clear();
+}
+
+/**
+ * W12 "Figma again": the frame an agent names, by pointer name, node id or link. Exact values as-is; need = "visual"
+ * adds the frame image (rendered once per file version). Cached by version, so asking twice costs at most one call.
+ */
+export async function figmaAgain(ref: string, need: FrameNeed, opts: { pointers?: FramePointer[]; deps?: FigmaDeps } = {}): Promise<Frame> {
+  const p = resolveFrame(ref, opts.pointers ?? []);
+  if (!p) throw new Error(`No Figma frame "${truncate(ref, 80)}" in this item's design document`);
+  const version = await recentVersion(p.fileKey, opts.deps);
+  return getFrame(p.fileKey, p.nodeId, need, { ...opts.deps, version });
+}
+
+/**
+ * The design check input: for each frame pointer (at most `max`), the exact values and the frame image. One version
+ * call per file; frames and images come from the version cache. A frame that cannot be read is listed in `problems`.
+ */
+export async function designCheckInput(pointers: FramePointer[], deps?: FigmaDeps, max = 4): Promise<{ frames: Frame[]; problems: string[] }> {
+  const frames: Frame[] = [];
+  const problems: string[] = [];
+  const versions = new Map<string, string>();
+  for (const p of pointers.slice(0, max)) {
+    try {
+      if (!versions.has(p.fileKey)) versions.set(p.fileKey, await recentVersion(p.fileKey, deps));
+      frames.push(await getFrame(p.fileKey, p.nodeId, "visual", { ...deps, version: versions.get(p.fileKey)! }));
+    } catch (e: any) {
+      problems.push(`${p.name}: ${truncate(String(e?.message ?? e), 160)}`);
+    }
+  }
+  if (pointers.length > max) problems.push(`only the first ${max} of ${pointers.length} frames were checked`);
+  return { frames, problems };
+}
+
+// ------------------------------------------------------------------ the watch over active items (W13)
+
+export interface ActiveWatchResult { files: number; frames: number; events: DesignChangedEvent[]; emitted: number }
+
+/**
+ * The Figma watch for the GitHub / health timers: every open item with frame pointers is watched. One cheap version
+ * call per file; a frame whose exact values changed becomes a `design_changed` event on the kernel log (deduped by
+ * item + frame + version), with the value differences in its payload. Each item remembers the version it last saw
+ * (data.figmaSeen), so an item that joins later is compared from its own start. Quiet when Figma is not connected.
+ */
+export async function watchActiveFrames(deps?: FigmaDeps & {
+  /** defaults to kernel/events emit() */
+  emit?: (e: { type: "design_changed"; idemKey: string; itemId?: string; payload: Record<string, any> }) => unknown;
+  /** limit to these items (default: every open item) */
+  itemIds?: string[];
+}): Promise<ActiveWatchResult> {
+  const none: ActiveWatchResult = { files: 0, frames: 0, events: [], emitted: 0 };
+  if (!figmaReady(deps)) return none;
+  const rows = (db().prepare("SELECT id, data FROM tasks WHERE state NOT IN ('DONE','CANCELLED','FAILED')").all() as any[])
+    .filter((r) => !deps?.itemIds || deps.itemIds.includes(r.id));
+  const entries: WatchEntry[] = [];
+  for (const r of rows) {
+    const data = safeJson<Record<string, any>>(r.data, {});
+    const byFile = new Map<string, FramePointer[]>();
+    for (const p of itemFramePointers({ id: r.id, data })) byFile.set(p.fileKey, [...(byFile.get(p.fileKey) ?? []), p]);
+    for (const [fileKey, ps] of byFile) {
+      entries.push({ fileKey, itemId: r.id, lastVersion: data.figmaSeen?.[fileKey], frames: ps.map((p) => ({ nodeId: p.nodeId, name: p.name })) });
+    }
+  }
+  if (!entries.length) return none;
+  const events = await watchVersions(entries, deps);
+  const send = deps?.emit ?? (await import("../kernel/events.js")).emit;
+  let emitted = 0;
+  for (const ev of events) {
+    const out = send({
+      type: "design_changed", itemId: ev.itemId,
+      idemKey: `design_changed:${ev.itemId ?? "-"}:${ev.fileKey}:${ev.nodeId}:${ev.newVersion}`,
+      payload: { ...ev, message: designChangedMessage(ev, false) },
+    });
+    if (out) emitted++;
+    forgetVersions(ev.fileKey);
+  }
+  // every watched item has now seen the current version of its files
+  const seen = watchedVersions(deps);
+  const perItem = new Map<string, Record<string, string>>();
+  for (const e of entries) {
+    if (!e.itemId || !seen[e.fileKey]) continue;
+    perItem.set(e.itemId, { ...(perItem.get(e.itemId) ?? {}), [e.fileKey]: seen[e.fileKey] });
+  }
+  for (const [id, files] of perItem) {
+    const cur = safeJson<Record<string, any>>((db().prepare("SELECT data FROM tasks WHERE id=?").get(id) as any)?.data, {});
+    const next = { ...(cur.figmaSeen ?? {}), ...files };
+    if (JSON.stringify(next) !== JSON.stringify(cur.figmaSeen ?? {})) {
+      db().prepare("UPDATE tasks SET data=json_set(data, '$.figmaSeen', json(?)) WHERE id=?").run(JSON.stringify(next), id);
+    }
+  }
+  return { files: new Set(entries.map((e) => e.fileKey)).size, frames: entries.reduce((n, e) => n + e.frames.length, 0), events, emitted };
 }

@@ -234,6 +234,105 @@ export function renderComparison(c: RunComparison): string {
   return `${c.runB} compared with ${c.runA}\n${table(head, rows)}\n${verdict}`;
 }
 
+// ------------------------------------------------------------------ quality gate for savings (§8 "Quality gate", §9.1.8)
+
+/**
+ * Accuracy and cost of one setting, measured on the same sample. Every field is optional; only fields both sides have
+ * are compared. Rates are 0..1. Cost is judged per finished task, not per call.
+ */
+export interface AccuracySummary {
+  tickets?: number;
+  /** total cost of the sample (USD); with `tickets` it gives the cost per finished task */
+  costUsd?: number;
+  /** average questions asked per ticket (lower is better) */
+  questions?: number;
+  /** average review rounds per ticket (lower is better) */
+  reviewRounds?: number;
+  /** share of tickets whose checks were green the first time */
+  ciFirstGreen?: number;
+  /** share of PRs accepted unchanged */
+  prAcceptedUnchanged?: number;
+  /** share of review passes (plan or code review said pass first time) */
+  reviewPassRate?: number;
+  /** replay or eval accuracy for a classifier / single-call agent (§9.1.8) */
+  evalAccuracy?: number;
+}
+
+const ACC_LOWER_BETTER = ["questions", "reviewRounds"] as const;
+const ACC_HIGHER_BETTER = ["ciFirstGreen", "prAcceptedUnchanged", "reviewPassRate", "evalAccuracy"] as const;
+type AccField = typeof ACC_LOWER_BETTER[number] | typeof ACC_HIGHER_BETTER[number];
+const ACC_LABEL: Record<AccField, string> = { questions: "questions", reviewRounds: "review rounds", ciFirstGreen: "checks green first time",
+  prAcceptedUnchanged: "PRs accepted unchanged", reviewPassRate: "review pass rate", evalAccuracy: "eval accuracy" };
+
+/** The accuracy summary of benchmark rows (averages and rates over the rows that have each value). */
+export function accuracyOf(rows: BenchRow[]): AccuracySummary {
+  const avg = (m: Metric): number | undefined => {
+    const v = rows.map((r) => val(r, m)).filter((x): x is number => x !== null);
+    return v.length ? v.reduce((a, b) => a + b, 0) / v.length : undefined;
+  };
+  const costs = rows.map((r) => r.costUsd).filter((x): x is number => typeof x === "number");
+  return {
+    tickets: rows.length,
+    costUsd: costs.length ? costs.reduce((a, b) => a + b, 0) : undefined,
+    questions: avg("questions"),
+    reviewRounds: avg("reviewRounds"),
+    ciFirstGreen: avg("ciFirstGreen"),
+    prAcceptedUnchanged: avg("prAcceptedUnchanged"),
+  };
+}
+
+export interface SavingVerdict {
+  /** keep the cheaper setting: it is cheaper AND no accuracy field is lower */
+  keep: boolean;
+  cheaper: boolean | null;
+  /** cost per finished task, before and after (null when unknown) */
+  costPerTask: { before: number | null; after: number | null };
+  worse: string[];
+  compared: string[];
+  text: string;
+}
+
+const EPS = 1e-9;
+
+/**
+ * The quality gate: a cheaper setting (lower effort, Haiku instead of Sonnet, batch, advisor) is kept only if no
+ * accuracy field measured on both sides is lower. At least one accuracy field must be measured – a saving with no
+ * accuracy evidence is not kept. Pure.
+ */
+export function acceptSaving(before: AccuracySummary, after: AccuracySummary): SavingVerdict {
+  const per = (s: AccuracySummary): number | null =>
+    typeof s.costUsd === "number" ? (s.tickets && s.tickets > 0 ? s.costUsd / s.tickets : s.costUsd) : null;
+  const cb = per(before), ca = per(after);
+  const cheaper = cb === null || ca === null ? null : ca < cb - EPS;
+  const worse: string[] = [], compared: string[] = [];
+  const has = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
+  for (const f of ACC_LOWER_BETTER) {
+    if (!has(before[f]) || !has(after[f])) continue;
+    compared.push(ACC_LABEL[f]);
+    if (after[f]! > before[f]! + EPS) worse.push(ACC_LABEL[f]);
+  }
+  for (const f of ACC_HIGHER_BETTER) {
+    if (!has(before[f]) || !has(after[f])) continue;
+    compared.push(ACC_LABEL[f]);
+    if (after[f]! < before[f]! - EPS) worse.push(ACC_LABEL[f]);
+  }
+  const keep = !!cheaper && compared.length > 0 && worse.length === 0;
+  const money = cb !== null && ca !== null ? ` (${fmtUsd(cb)} → ${fmtUsd(ca)} per task)` : "";
+  const text = !compared.length ? "Not kept: no accuracy was measured on both sides."
+    : worse.length ? `Not kept: ${worse.join(", ")} got worse.`
+    : cheaper === null ? "Not kept: the cost was not measured on both sides."
+    : !cheaper ? `Not kept: it is not cheaper${money}.`
+    : `Kept: cheaper${money} and ${compared.join(", ")} held.`;
+  return { keep, cheaper, costPerTask: { before: cb, after: ca }, worse, compared, text };
+}
+
+/** The gate over two recorded benchmark runs (same tickets): A = current setting, B = the cheaper one. */
+export function acceptSavingRuns(runA: string, runB: string, d: DatabaseSync = db()): SavingVerdict {
+  const A = benchmarkRows(runA, d), B = benchmarkRows(runB, d);
+  const common = new Set(A.map((r) => r.ticket).filter((t) => B.some((b) => b.ticket === t)));
+  return acceptSaving(accuracyOf(A.filter((r) => common.has(r.ticket))), accuracyOf(B.filter((r) => common.has(r.ticket))));
+}
+
 // ------------------------------------------------------------------ plan and run
 
 export interface BenchPlan { tickets: string[]; rules: string[]; text: string }

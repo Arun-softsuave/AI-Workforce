@@ -10,6 +10,7 @@ import { recordUsage } from "../engine/tasks.js";
 import { AGENTS } from "../agents/catalog.js";
 import { docstringLine, NEVER_PUSH } from "./standards.js";
 import { ciSummaryLines } from "./ciPipeline.js";
+import { learnedRulesSection } from "../engine/steps/close_out.js";
 
 /**
  * The rules card: everything an agent must follow in this repository, in ~1,500 tokens.
@@ -93,6 +94,10 @@ export function renderRulesCard(p: ProjectConfig, team: string): string {
     lines.push("- Never weaken or delete a test, edit a CI workflow, or re-record a baseline to make CI pass.");
   }
   if (team.trim()) lines.push("", "## Team rules (from the repository's own instruction files)", team.trim());
+  // O3: rules you accepted from repeated review comments survive a rebuild
+  let learned = "";
+  try { learned = learnedRulesSection(p.id); } catch { /* no learned rules yet */ }
+  if (learned.trim()) lines.push("", learned.trim());
   return truncate(lines.join("\n"), CARD_LIMIT);
 }
 

@@ -112,3 +112,67 @@ export function memberName(login: string): string {
   const m = loadSettings().team.members.find((x: TeamMember) => x.github.toLowerCase() === login.toLowerCase());
   return m?.name || login;
 }
+
+// ------------------------------------------------------------------ A9: the weekly team check
+
+export const TEAM_CHECK_EVERY_MS = 7 * 86_400_000;
+/** A newcomer is mentioned once they have this many commits in the last 6 months. */
+const NEW_MEMBER_COMMITS = 3;
+
+export interface TeamChange { project: string; joined: { github: string; name?: string; commits: number }[]; quiet: string[] }
+
+/**
+ * Who joined or went quiet on each repository, compared with your team list (settings.team). Code only: git history and
+ * GitHub contributors. Nothing is changed – the message says what to reply ("add @x to the team" / "Eric left the team").
+ */
+export async function detectTeamChanges(projects: ProjectConfig[]): Promise<TeamChange[]> {
+  const s = loadSettings();
+  const known = new Set((s.team.members ?? []).map((m) => m.github.toLowerCase()));
+  const me = s.team.me?.github?.toLowerCase();
+  const out: TeamChange[] = [];
+  const activeAnywhere = new Set<string>();
+  const perProject: { p: ProjectConfig; t: TeamSuggestion }[] = [];
+  for (const p of projects) {
+    try {
+      const t = await suggestTeam(p);
+      perProject.push({ p, t });
+      for (const m of t.members) activeAnywhere.add(m.github.toLowerCase());
+    } catch { /* a repository that can't be read is skipped */ }
+  }
+  for (const { p, t } of perProject) {
+    const joined = t.members.filter((m) => m.commits >= NEW_MEMBER_COMMITS && !known.has(m.github.toLowerCase()) && m.github.toLowerCase() !== me);
+    if (joined.length) out.push({ project: p.id, joined: joined.map((m) => ({ github: m.github, name: m.name, commits: m.commits })), quiet: [] });
+  }
+  // a teammate with no commits on ANY repository for 6 months may have left (only said when every repository was read)
+  if (perProject.length && perProject.length === projects.length) {
+    const quiet = (s.team.members ?? []).filter((m) => !activeAnywhere.has(m.github.toLowerCase())).map((m) => m.name || m.github);
+    if (quiet.length) out.push({ project: "*", joined: [], quiet });
+  }
+  return out;
+}
+
+/** The one-line message per change (plain, short). */
+export function teamChangeLines(changes: TeamChange[]): string[] {
+  const lines: string[] = [];
+  for (const c of changes) {
+    for (const j of c.joined) lines.push(`New on ${c.project}: @${j.github}${j.name && j.name !== j.github ? ` (${j.name})` : ""}, ${j.commits} commits. Say "add @${j.github} to the team" to add them as a reviewer.`);
+    for (const q of c.quiet) lines.push(`${q} has no commits in 6 months. Say "${q} left the team" to remove them.`);
+  }
+  return lines;
+}
+
+/** Once a week: detect team changes and send ONE message when there are any. Returns the lines sent. */
+export async function weeklyTeamCheck(now = new Date(), projects?: ProjectConfig[]): Promise<string[]> {
+  const { getMeta, setMeta } = await import("./db.js");
+  const last = Date.parse(getMeta("team.check.at") ?? "");
+  if (Number.isFinite(last) && now.getTime() - last < TEAM_CHECK_EVERY_MS) return [];
+  setMeta("team.check.at", now.toISOString());
+  const { loadProjects } = await import("./config.js");
+  const list = projects ?? loadProjects();
+  if (!list.length) return [];
+  const lines = teamChangeLines(await detectTeamChanges(list));
+  if (!lines.length) return [];
+  const { notify } = await import("../notify/router.js");
+  await notify({ kind: "info", dedupeKey: `team-check:${now.toISOString().slice(0, 10)}`, title: "👥 Team changes", body: lines.slice(0, 8).join("\n") });
+  return lines;
+}

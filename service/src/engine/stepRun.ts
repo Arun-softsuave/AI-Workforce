@@ -147,3 +147,44 @@ export function liveStep(task: Task, step: string, total: number, phase: "start"
     publish("job", { taskId: task.id, ref: task.source_ref, step, phase });
   } catch { /* live view only */ }
 }
+
+// ------------------------------------------------------------------ ask-desk before asking you (§9.1, O4)
+
+/**
+ * A step asks: before the question reaches you, the decision log is checked (an answer given earlier for this item,
+ * its batch / epic / sprint or globally is used, 0 tokens), and the questions agents queued through the knowledge
+ * broker's `ask` tool are added – so every question of the item goes out as ONE message, recommended option first.
+ * When every question was answered earlier, the step simply runs again with those answers (at most twice).
+ */
+export async function runWithAskDesk(fn: (ctx: StepCtx) => Promise<import("./steps.js").StepResult>, ctx: StepCtx): Promise<import("./steps.js").StepResult> {
+  let r = await fn(ctx);
+  for (let round = 0; round < 2; round++) {
+    if (r.status !== "need_info") break;
+    const need = r;
+    const { findDecision } = await import("../knowledge/decisions.js");
+    const { takeQuestions } = await import("../knowledge/askDesk.js");
+    const queued = takeQuestions(ctx.task.id).map((q) => ({ question: q.question, options: q.options ?? [] }));
+    const all: Question[] = [...need.questions, ...queued.filter((q) => !need.questions.some((x) => x.question.trim() === q.question.trim()))];
+    const answered: { question: string; answer: string }[] = [];
+    const kept: Question[] = [];
+    for (const q of all) {
+      const d = findDecision(ctx.task.id, q.question);
+      if (d && d.confidence !== "low") answered.push({ question: q.question, answer: d.answer });
+      else kept.push(q);
+    }
+    if (answered.length) {
+      ctx.save({ decided: [...(ctx.task.data.decided ?? []), ...answered.map((a) => ({ ...a, at: new Date().toISOString() }))] });
+      logger.info("ask-desk: answered from earlier decisions", { task: ctx.task.id, n: answered.length });
+    }
+    if (kept.length) return { ...need, questions: kept };
+    r = await fn(ctx);
+  }
+  return r;
+}
+
+/** The scope a reply to an item's questions is stored under: the nearest batch / epic / sprint it belongs to, else the item. */
+export async function answerScopeOf(itemId: string): Promise<import("../knowledge/decisions.js").DecisionScope> {
+  const { scopesOf } = await import("../knowledge/decisions.js");
+  const s = scopesOf(itemId).find((x) => ["batch", "epic", "sprint"].includes(x.scope) && x.id);
+  return s ? s.scope : "item";
+}

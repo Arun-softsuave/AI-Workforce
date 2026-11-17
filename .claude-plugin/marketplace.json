@@ -7,7 +7,7 @@
     {
       "name": "ai-workforce",
       "source": "./",
-      "description": "Local-first, role-based AI workforce for Claude Code"
+      "description": "Local-first AI team member for Claude Code: Jira → plan → PR → CI, in Teams, never merges"
     }
   ],
   "metadata": {

@@ -5,4 +5,5 @@ steps:
   - unblock_dependents    # items waiting on this one may start; the next PR in the merge order; merged out of order → warning
   - retarget_stacked      # PRs stacked on this one: re-targeted to the base branch and brought up to date (a rebase job each)
   - clean_worktree        # this item's folder and local branch are removed; the CI watch ends
+  - learn_from_reviews    # O3: review comments that keep coming back → one rule idea for the rules card (only after your OK); never fails the close-out
   - close_item            # LAST: PR_OPEN → MERGED → DONE, a Jira note when allowed, one short message

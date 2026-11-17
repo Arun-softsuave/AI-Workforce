@@ -33,7 +33,7 @@ Testers: see **QUICKSTART.md** for install, onboarding, the Teams bot and a test
 | Model access | `aiw model --provider claude-login` (your Claude Code login) · `--provider claude --key-stdin` (API key) · `--provider mock` (offline dry run) |
 | Profile & roles | `aiw profile --name "Asha" --roles backend-developer,qa-engineer --tz Asia/Kolkata` |
 | Connectors (browser sign-in, no tokens) | `aiw connect jira` (Atlassian sign-in) · `aiw connect github` (one-time code) · `aiw connect notion` (Notion sign-in) |
-| Figma (token first – stays connected when the app is closed) | `aiw connect figma --browser` (personal access token in the local page) · optional: `aiw connect figma` (Figma desktop app) |
+| Figma (token first – stays connected when the app is closed) | `aiw connect figma` (personal access token in the local page) · optional: `aiw connect figma --desktop` (Figma desktop app) |
 | Connectors that need an app token / URL | `aiw connect slack --browser` · `aiw connect teams --browser` – these services offer no browser sign-in for outside apps |
 | Teams (two-way bot) | `aiw connect teams-personal --bot` – sign in with a separate personal Microsoft account that acts as the bot |
 | Notifications | `aiw notify --primary teams-personal --fallback desktop,inbox` then `aiw notify test` |
@@ -43,6 +43,8 @@ Testers: see **QUICKSTART.md** for install, onboarding, the Teams bot and a test
 | Team and reviewers | `aiw team detect payment-service` → `aiw team add --github LOGIN --name "Name"` → `aiw team reviewers payment-service --codeowners` |
 | Preferences | `aiw prefs` (e.g. `--draft-pr no --auto-fix-ci yes --plan-approval ask`) |
 | Ready check | `aiw ready` (or `aiw ready payment-service`) |
+| Environment doctor | `aiw doctor payment-service --smoke` (versions, packages, `.env` key names, database, services) |
+| Dashboard | `aiw dashboard` (live view, this computer only) |
 | Go live | `aiw live` |
 
 `--browser` opens a page served by the local service (127.0.0.1, session token), so secrets go straight to the OS
@@ -53,14 +55,21 @@ credential vault and never pass through the chat.
 | In Claude Code | CLI | What it does |
 |---|---|---|
 | `/ai-workforce:aiw-inbox` | `aiw inbox` | Approvals, questions and failures waiting for you |
-| `/ai-workforce:aiw-approve PAY-142` | `aiw approve PAY-142` | Approve the pending action (draft PR / Jira comment) |
+| `/ai-workforce:aiw-approve PAY-142` | `aiw approve PAY-142` | Approve what waits (the plan, or raising the PR) – when decisions are Teams-only, reply in Teams instead |
 | `/ai-workforce:aiw-reject PAY-142 "use RefundValidator"` | `aiw reject …` | Re-run with your feedback |
 | `/ai-workforce:aiw-run PAY-142` | `aiw run PAY-142` | Start a ticket now |
-| `/ai-workforce:aiw-tasks` | `aiw tasks` / `aiw show PAY-142` | Task list / details and report |
-| `/ai-workforce:aiw-status` | `aiw status` | Health of service, connectors, projects |
-| `/ai-workforce:aiw-dashboard` | `aiw dashboard` | Local web dashboard (inbox, tasks, Brain, connections, cost) |
+| `/ai-workforce:aiw-status` | `aiw status` + `aiw items` | Health, connections and the work tree (sprint → ticket → repos → PRs) with blocked reasons and merge order |
+| `/ai-workforce:aiw-tasks [PAY-142]` | `aiw items` / `aiw show PAY-142` | The work tree, or one ticket in detail |
+| `/ai-workforce:aiw-explain PAY-142` | `aiw explain PAY-142` | Why it is where it is: plan, decisions, your answers, last steps, rules in force (from the design document) |
+| `/ai-workforce:aiw-rules` | `aiw rules` / `aiw rules add …` / `aiw rules remove <id>` | Your standing orders ("no plan approval for PAY-142", "only backend") |
+| `/ai-workforce:aiw-fix PAY-142` | `aiw fix …` | Fix CI (pushed without asking) and review comments (shown in Teams first) on your PR |
+| `/ai-workforce:aiw-pr-review 90` | `aiw review …` | Review any PR; comments shown in Teams before posting |
+| `/ai-workforce:aiw-adopt feature/PAY-142-x` | in Teams: "finish my branch …" | Finish your own branch on top of your commits |
+| `/ai-workforce:aiw-doctor nue-backend` | `aiw doctor nue-backend --smoke` | Can this project's tests run here? (versions, packages, `.env` key names, database) |
+| `/ai-workforce:aiw-dashboard` | `aiw dashboard` | Live local page: agents at work, ticket progress, needs you, background jobs, connections, cost |
 | `/ai-workforce:aiw-pause` | `aiw pause --until 2026-12-01` | Holiday mode |
 | `/ai-workforce:aiw-cost` | `aiw cost` | Tokens and cost by project, day, task |
+| `/ai-workforce:aiw-bench` | `aiw bench` / `aiw bench compare A B` | Cost baseline and benchmark comparisons |
 
 The plugin also adds an **MCP server** (`aiw_status`, `aiw_inbox`, `aiw_approve`, `aiw_brain_ask`, …) so you can simply
 ask Claude "what is waiting for me?", plus a **SessionStart hook** that shows your inbox when a session opens.
@@ -109,6 +118,26 @@ check the code and decide" leaves the decision to the agent (it says what it cho
 one short question ("Do you mean KAN-52 (…) or KAN-35 (…)?") instead of a list. When you ask about a waiting question, the
 assistant answers from the code and offers to send that answer to the task with one "yes".
 
+## What's new in 1.0
+
+- **One engine for all work (the kernel)** – every ticket, PR, batch and epic is an item with jobs; a plain-code scheduler
+  says why anything waits ("waiting for KAN-50", "same area", "repo limit"). `aiw items` shows the tree.
+- **Talk normally in Teams** – a Conductor understands free text, quoted replies ("reply to the plan message: use the old
+  validator"), screenshots and files. "No need to ask for KAN-45" becomes a standing rule (`aiw rules`).
+- **Short messages** – at most 10 lines, "details KAN-45" for the rest, routine updates merged, a morning digest.
+- **Design document per ticket** – `~/.ai-workforce/items/<item>/design.md` is the source of truth; fresh "goldfish"
+  checks test it before any code is written. `aiw explain KAN-45` answers "why did you…".
+- **After the PR** – CI failures fixed and pushed without asking; review comments fixed (shown first unless your rule says
+  otherwise); conflicts brought in without a force-push; merged PRs closed out and the next ticket started.
+- **Two repos** – one plan, one PR per repo, merge order in every PR and message. Several tickets in one message
+  ("do KAN-45 and KAN-47") start together; the scheduler keeps tickets that touch the same area apart.
+- **Always connected** – Jira, GitHub, Figma (token first) and Teams are checked every 5 minutes; you get one reconnect
+  line and blocked work resumes by itself.
+- **Environment doctor** – `aiw doctor <project>` before every build: no more builds failing on a broken local setup.
+- **Live dashboard** – `aiw dashboard`: what each agent is doing right now, ticket progress, needs you, background jobs.
+- **Cost** – effort per step, small tool outputs, caches, batch API for non-urgent work; `aiw bench` measures each release.
+- **New commands** – `/aiw-explain`, `/aiw-rules`, `/aiw-doctor`, `/aiw-bench`, `/aiw-adopt`.
+
 ## What's new in 0.7 / 0.8
 
 - **Normal PRs** – pull requests are raised ready for review, not as drafts (`aiw prefs --draft-pr yes` to change).
@@ -117,7 +146,6 @@ assistant answers from the code and offers to send that answer to the task with 
 - **Tickets by name** – in Teams, "start the invite email task" finds the ticket (`aiw tickets find "invite email"`).
 - **Rules card** – a short card of the team's own rules (branch and commit style, docstring style, test layout, CI checks, files never to commit) that every coding, review and fix step follows.
 - **Ready check** – `aiw ready` finds on day one what would fail mid-ticket: push access, lint tools, test runner and test database, screenshots, CI.
-- **Coming:** a new dashboard, and a deeper environment check under `aiw doctor`.
 
 ## Fixing a failed pull request's CI (0.6.7)
 
@@ -261,7 +289,7 @@ understand (reads the ticket, links, Brain AND the code of every repository; ask
      the frontend sees the backend's finished change; a part's questions go to the lead, which answers from the code
      and asks you only for product decisions; contract changes are sent to the other part)
   -> integration check (both diffs + contract + each repository's tests; up to 2 fix rounds sent to the right part)
-  -> ONE PR APPROVAL -> one draft PR per repository, linked to each other, one Teams message with both links
+  -> ONE PR APPROVAL -> one PR per repository, linked to each other, merge order in each, one Teams message with both links
 ```
 
 Teams and Claude Code show one item per ticket (`status of KAN-52` lists each repository). Cancel / resume / refresh on the
@@ -275,7 +303,7 @@ poll Jira (2-5 min, zero tokens) -> Event Gate (diff vs snapshot, idempotent) ->
      -> fresh-eyes plan review -> PLAN APPROVAL (Teams) -> implement + test loop (max 3; may stop and ask in Teams)
      -> code/security/QA reviews in parallel (max 2 fix rounds)
      -> proposed Brain facts -> rebase + secret scan + final tests -> report -> APPROVAL (pause, 0 tokens)
-     -> push branch + draft PR (Approval Service only) -> diary + Brain update
+     -> push branch + PR, ready for review (policy gate only) -> CI watch and auto-fix -> diary + Brain update
 ```
 
 Notifications: Claude Code inbox (always) · desktop alert · **personal Teams, two-way** (messages from a bot account; reply
@@ -288,14 +316,21 @@ sprint-start bursts and fallback channels are built in.
 ```
 .claude-plugin/        plugin.json + local marketplace.json
 commands/              /aiw-* slash commands          skills/   aiw-onboarding, aiw-brain
-agents/                interactive subagents          hooks/    SessionStart inbox hook
+agents/                planner, reviewer, memory keeper (read and write the item's design document)
+hooks/                 SessionStart inbox, prompt routing
 .mcp.json              registers the aiw MCP server   bin/      aiw / aiw.cmd launchers
 service/
   playbooks/*.yaml     the fixed recipes (dev-feature, dev-small-change, qa-test-plan, devops-ci-failure, ba-stories, pm-daily-digest, design-review)
+  recipes/*.yaml       after-PR recipes on engine v2 (ci_fix, comment_fix, ci_watch, rebase, replan, close)
+  web/                 the dashboard page (plain JS, works offline)
   src/core             paths, SQLite + migrations, config, OS credential vault, roles, logging
   src/connectors       Jira, GitHub, Slack (Socket Mode), Teams (Workflows), Notion, Figma
   src/intake           polling, snapshot diffing, idempotent events, burst handling, CI + digest scheduling
-  src/engine           task state machine, playbook engine, steps, budget guard
+  src/kernel           engine v2: items, events, reactions, mailbox, scheduler, runner, recipes (see ARCHITECTURE.md)
+  src/conductor        Teams messages → tools; directives        src/messenger  short messages, merging, digest
+  src/knowledge        design documents, Figma exact values, your pictures and files
+  src/policy           gate, directives, untrusted text           src/live       dashboard activity and live stream
+  src/engine           task state machine, playbook engine, steps (+ steps/ after the PR), environment doctor, budget guard
   src/agents           agent catalog (≈10 reusable agents, tiered models) + Claude Agent SDK runner + offline mock runner
   src/brain            code map, Handbook (facts with lifecycle), FTS index, diary, onboarding, context packs
   src/approvals        approval binding (repo/branch/base/head/diff hash), first-decision-wins
@@ -316,7 +351,7 @@ Handbook lives in each repository under `.ai-workforce/knowledge/` and travels t
 cd service && npm test
 ```
 
-There are 62 tests. They cover the full Jira → PR flow against a real git remote, rejection with feedback, stale
+There are more than 470 tests (run on both engines with `AIW_ENGINE=v2`), including scenario tests for the situations in `SITUATIONS.md`. They cover the full Jira → PR flow against a real git remote, rejection with feedback, stale
 approvals, unclear tickets, unassignment, sprint-start bursts, crash recovery publishing exactly once, budget pauses,
 the QA, BA, DevOps and PM playbooks, notification routing, secret scanning, prompt-injection fencing, and the real
 background service with its token checks and single-instance lock.
@@ -337,7 +372,7 @@ background service with its token checks and single-instance lock.
 | Code map | language-aware regex extraction behind a replaceable interface (tree-sitter later) |
 | Brain search | SQLite FTS5/BM25; an embedding index can be added behind `searchBrain` |
 | Autostart | Windows Startup-folder launcher, macOS LaunchAgent, systemd --user |
-| Defaults | autonomy `prepare`; ask before starting size L; draft PRs; Jira comments off |
+| Defaults | autonomy `prepare`; ask before starting size L; normal PRs (ready for review); CI fixed without asking; Jira comments off |
 | Team conventions | detected per repo: base branch (GitHub PR history), branch/commit style (git history), CLAUDE.md/AGENTS.md/CONTRIBUTING rules (given to every agent), PR template (filled by the Reporter), runnable lint/format/type checks (part of "done"), Jira ticket style; user overrides win; re-detected daily |
 | Project environment | reuses the repo's own virtualenv interpreter and links `node_modules` from the main clone into task workspaces; a broken venv pauses tasks with the repair command |
 | No AI attribution (hard rule) | commits use the developer's git identity; commit messages, PR text, Jira comments and the diff are checked and cleaned – nothing mentions Claude/AI; the local `.ai-workforce/` folder is never committed |
@@ -346,7 +381,7 @@ background service with its token checks and single-instance lock.
 ## Known limitations
 
 - Work only runs while the computer is on and awake. After sleep the service catches up.
-- Microsoft Teams messages contain links only. Approve in Claude Code, the dashboard or Slack.
+- Work (company) Teams is a one-way webhook with links only; two-way chat needs personal Teams with a bot account.
 - Background runs need an API key, an enterprise provider or the opt-in Claude Code login. Check the current
   Anthropic terms before powering the unattended service with a personal subscription.
 - Scanned (image-only) PDFs cannot be read; export them as text or .docx.

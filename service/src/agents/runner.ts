@@ -24,7 +24,7 @@ export interface AgentRequest {
   maxTurns?: number;
   maxBudgetUsd?: number;
   /** Give the agent the read-only lookup tools (Jira / GitHub PR / Figma / Notion) for the connected services. */
-  lookup?: { repo?: string; codeRepos?: string[] };
+  lookup?: import("./lookup.js").LookupScope;
   /** How hard the model thinks. Default: the agent's entry in the effort table (agents/catalog.ts). */
   effort?: Effort;
   /** Give the agent the compact run_tests / run_lint / git_diff_stat tools for its worktree (needs cwd). */
@@ -102,6 +102,13 @@ export function splitUsage(u: any): { tokensIn: number; tokensOut: number; fresh
 /** Production runner: Claude Agent SDK, headless, no persisted sessions, no user/project settings. */
 export class ClaudeSdkRunner implements Runner {
   async run(req: AgentRequest): Promise<AgentResult> {
+    // §9.1.8: a model / effort change the benchmark gate KEPT applies here (your own settings.cost.effort still wins)
+    try {
+      const { applyOverride } = await import("../bench/overrides.js");
+      const s = loadSettings();
+      const ov = applyOverride(req.agent, { tier: req.tier, effort: req.effort ?? effortFor(req.agent, undefined, s.cost?.effort) }, { userEffort: s.cost?.effort });
+      req = { ...req, tier: ov.tier, effort: ov.effort };
+    } catch { /* no overrides file: the defaults apply */ }
     const model = modelFor(req.tier);
     const { query } = await import("@anthropic-ai/claude-agent-sdk");
     const ctrl = new AbortController();
@@ -120,7 +127,8 @@ export class ClaudeSdkRunner implements Runner {
         lookupNames = L.lookupToolNames(req.lookup);
         if (lookupNames.length) {
           mcpServers = { [L.LOOKUP_SERVER]: await L.lookupServer(req.lookup) };
-          lookupRule = `\n\n${L.LOOKUP_RULE}${lookupNames.some((n) => n.endsWith("__code_query")) ? `\n\n${L.CODE_GRAPH_RULE}` : ""}`;
+          // the rule for the tools this run has: lookups, code graph and (on an item's run) the knowledge broker
+          lookupRule = `\n\n${L.lookupRuleFor(req.lookup)}`;
         }
       }
       // compact test / lint / diff tools for the implementer: failures with file:line only, never the full log
@@ -385,6 +393,23 @@ export class MockRunner implements Runner {
         architecture: "See the code map for the most important files.", standards: "Follow existing conventions in the codebase.",
         glossary: "", facts: [],
       };
+      // ----- Wave 4 agents (offline answers: ready / pass / nothing found, so every branch can run without a model)
+      case "goldfish-readiness": return { ready: true, understanding: "Mock: the document is enough to build this.", questions: [] };
+      case "goldfish-critic": return { pass: true, issues: [] };
+      case "design-check": return { differences: [], summary: "Matches the design (mock)." };
+      case "knowledge": return { answer: "", confidence: "low", kind: "fact", evidence: [], options: [], recommended: "" };
+      case "distiller": return { text: (/<untrusted[^>]*>([\s\S]*?)<\/untrusted>/.exec(p)?.[1] ?? p).slice(0, 2000) };
+      case "review-learner": return { worthIt: false, rule: "" };
+      case "auditor": return { summary: "Checked (mock).", criteria: [{ criterion: "Behaviour matches the ticket", status: "met", where: "", note: "" }], findings: [], followUps: [] };
+      case "gap-analyst": return { summary: "Branch started (mock).", acceptanceCriteria: [], done: ["The work on the branch"], remaining: ["The rest of the ticket"], approach: "", files: [], openPoints: [] };
+      case "scope-planner": case "overlap-checker": {
+        const keys = [...new Set((/TICKET KEYS: (.+)/.exec(p)?.[1] ?? "").split(",").map((k) => k.trim()).filter(Boolean))];
+        const repo = (/REPOSITORY IDS: (.+)/.exec(p)?.[1] ?? "").split(",").map((k) => k.trim()).filter(Boolean)[0] ?? "repo";
+        const tickets = keys.map((key) => ({ key, repo, areas: [], size: "M", dependsOn: [], contracts: [] }));
+        return req.agent.startsWith("scope-planner") ? { summary: "Build the tickets in waves", tickets, sharedContracts: [], missing: [] } : { tickets };
+      }
+      case "scope-reviewer": return { pass: true, issues: [] };
+      case "epic-checker": return { criteria: [] };
       default: return { summary: `Mock output for ${req.agent}`, items: [] };
     }
   }
@@ -394,6 +419,20 @@ let override: Runner | undefined;
 export function setRunner(r: Runner | undefined): void { override = r; }
 
 export function getRunner(): Runner {
-  if (override) return override;
-  return loadSettings().models.provider === "mock" ? new MockRunner() : new ClaudeSdkRunner();
+  return withExplicitEffort(override ?? (loadSettings().models.provider === "mock" ? new MockRunner() : new ClaudeSdkRunner()));
+}
+
+/**
+ * §9.1.1: every agent call names its effort. A caller that left it out gets the agent's entry from the effort table
+ * (your settings.cost.effort first), so the request – and the cost view – always says how hard the model thought.
+ */
+function withExplicitEffort(r: Runner): Runner {
+  return {
+    run: (req) => {
+      if (req.effort) return r.run(req);
+      let effort: Effort | undefined;
+      try { effort = effortFor(req.agent, undefined, loadSettings().cost?.effort); } catch { effort = effortFor(req.agent); }
+      return r.run(effort ? { ...req, effort } : req);
+    },
+  };
 }

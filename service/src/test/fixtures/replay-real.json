@@ -1,0 +1,174 @@
+{
+  "about": "Owner Teams messages from the local chat log, anonymised (names, emails, links, paths and anything token-like removed). Label each `expect` later (the fast-path intent or Conductor tool it should lead to).",
+  "count": 28,
+  "messages": [
+    {
+      "id": "real-01",
+      "at": "2026-11-13",
+      "text": "complete this ticket->KAN-52: [FR-019] Relevant questions only",
+      "expect": ""
+    },
+    {
+      "id": "real-02",
+      "at": "2026-11-13",
+      "text": "/aiw resume kan-52@nue-backend",
+      "expect": ""
+    },
+    {
+      "id": "real-03",
+      "at": "2026-11-13",
+      "text": "what is the status of kan-52 whether the plan is ready?",
+      "expect": ""
+    },
+    {
+      "id": "real-04",
+      "at": "2026-11-13",
+      "text": "plan for kan-52",
+      "expect": ""
+    },
+    {
+      "id": "real-05",
+      "at": "2026-11-13",
+      "text": "resume",
+      "expect": ""
+    },
+    {
+      "id": "real-06",
+      "at": "2026-11-13",
+      "text": "Work this ticket kan-52",
+      "expect": ""
+    },
+    {
+      "id": "real-07",
+      "at": "2026-11-13",
+      "text": "Okay based on the ticket and your idea start implementing this ticket correctly",
+      "expect": ""
+    },
+    {
+      "id": "real-08",
+      "at": "2026-11-13",
+      "text": "/aiw resume kan-52",
+      "expect": ""
+    },
+    {
+      "id": "real-09",
+      "at": "2026-11-13",
+      "text": "What is the progress so far?",
+      "expect": ""
+    },
+    {
+      "id": "real-10",
+      "at": "2026-11-13",
+      "text": "resume it dont stop or pause for token limit",
+      "expect": ""
+    },
+    {
+      "id": "real-11",
+      "at": "2026-11-13",
+      "text": "how many minutes it will take to plan for this ticket?",
+      "expect": ""
+    },
+    {
+      "id": "real-12",
+      "at": "2026-11-13",
+      "text": "Work on kan-52 ticket",
+      "expect": ""
+    },
+    {
+      "id": "real-13",
+      "at": "2026-11-13",
+      "text": "Question 1:\n\n1\n\nQuestion 2:\n\n3",
+      "expect": ""
+    },
+    {
+      "id": "real-14",
+      "at": "2026-11-13",
+      "text": "1.",
+      "expect": ""
+    },
+    {
+      "id": "real-15",
+      "at": "2026-11-13",
+      "text": "Raise the pr and after all the tests ci/cd test passes notify me",
+      "expect": ""
+    },
+    {
+      "id": "real-16",
+      "at": "2026-11-13",
+      "text": "Give me the pdfs of this tickets",
+      "expect": ""
+    },
+    {
+      "id": "real-17",
+      "at": "2026-11-13",
+      "text": "What are the tasks are in progress",
+      "expect": ""
+    },
+    {
+      "id": "real-18",
+      "at": "2026-11-13",
+      "text": "plan to do this ticket->KAN-40",
+      "expect": ""
+    },
+    {
+      "id": "real-19",
+      "at": "2026-11-13",
+      "text": "okay continue planning kan-40 with the figma present",
+      "expect": ""
+    },
+    {
+      "id": "real-20",
+      "at": "2026-11-13",
+      "text": "Whether the planning is ready for this ticket -kan 40",
+      "expect": ""
+    },
+    {
+      "id": "real-21",
+      "at": "2026-11-13",
+      "text": "1",
+      "expect": ""
+    },
+    {
+      "id": "real-22",
+      "at": "2026-11-13",
+      "text": "Whether the implementation done for kan 40?",
+      "expect": ""
+    },
+    {
+      "id": "real-23",
+      "at": "2026-11-13",
+      "text": "raise the pr",
+      "expect": ""
+    },
+    {
+      "id": "real-24",
+      "at": "2026-11-14",
+      "text": "1",
+      "expect": ""
+    },
+    {
+      "id": "real-25",
+      "at": "2026-11-14",
+      "text": "CI test completed?",
+      "expect": ""
+    },
+    {
+      "id": "real-26",
+      "at": "2026-11-14",
+      "text": "both frontend ad backend PR for KAN-40 completed?",
+      "expect": ""
+    },
+    {
+      "id": "real-27",
+      "at": "2026-11-14",
+      "text": "Is this for CI test failure?",
+      "expect": ""
+    },
+    {
+      "id": "real-28",
+      "at": "2026-11-14",
+      "text": "yes",
+      "expect": ""
+    }
+  ]
+}

@@ -11,6 +11,9 @@ import { costReport } from "../engine/budget.js";
 import { getPlaybook } from "../engine/playbooks.js";
 import { costText } from "../engine/steps.js";
 import { normaliseQuestions, questionTexts } from "../core/questions.js";
+import { costView, renderCostView } from "../bench/costView.js";
+import { listOverrides, renderOverrides } from "../bench/overrides.js";
+import { scopeLineFor } from "../engine/steps/scope.js";
 
 /** Read-side operations shared by the CLI, the MCP server, the hooks and the local API. */
 export function statusSnapshot() {
@@ -123,6 +126,9 @@ export function statusText(ref: string): string | undefined {
   const parts = t.playbook === "dev-lead" ? partsOf(t.id) : [];
   if (parts.length) blocks.push(`📦 **Repositories** (${t.data.order === "parallel" ? "built at the same time" : "built in order"})\n${parts.map((p) => `- ${p.project_id}: ${taskNow(p).now}${p.branch ? ` (branch ${p.branch})` : ""}`).join("\n")}`);
   else if (t.playbook === "dev-lead" && t.data.targets?.length) blocks.push(`📦 **Repositories:** ${t.data.targets.join(t.data.order === "parallel" ? " + " : " → ")}`);
+  // a child of an epic / sprint / batch: its wave and the merge order (W7 / W8)
+  const scope = scopeLine(t.id);
+  if (scope) blocks.push(`🧭 ${scope}`);
   return blocks.join("\n\n");
 }
 
@@ -162,7 +168,26 @@ export function inboxSummaryLine(): string {
   return parts.length ? `AIW: ${parts.join(" · ")}` : "AIW: all clear";
 }
 
-export function cost(days = 7) { return costReport(days); }
+/**
+ * Cost (§9.1.9): the old report (kept for older callers) plus the cost view – by day, ticket, agent and recipe, fresh
+ * input vs cache reads, cache-hit rate, alerts (e.g. a recipe with no cache hits) – and the model / effort overrides.
+ */
+export function cost(days = 7) {
+  const base = costReport(days);
+  let view: ReturnType<typeof costView> | undefined;
+  let overrides: ReturnType<typeof listOverrides> = [];
+  try { view = costView({ days }); } catch { view = undefined; }
+  try { overrides = listOverrides(); } catch { overrides = []; }
+  return { ...base, view, overrides };
+}
+
+/** `aiw cost` / MCP aiw_cost: the cost view as plain text, then the overrides. */
+export function costViewText(days = 7): string {
+  const parts: string[] = [];
+  try { parts.push(renderCostView(costView({ days }))); } catch (e: any) { parts.push(`Cost view unavailable: ${e.message}`); }
+  try { parts.push(renderOverrides()); } catch { /* no overrides file */ }
+  return parts.filter((x) => x.trim()).join("\n\n");
+}
 
 // ------------------------------------------------------------------ rules (directives), explain, items tree, engine
 
@@ -208,11 +233,42 @@ export async function explainItem(ref: string): Promise<{ ok: boolean; text: str
   if (t.data.stuck) lines.push(`Stuck: ${t.data.stuck.failed} (tried ${t.data.stuck.tried}).`);
   if (t.data.blockedBy) lines.push(`Waiting for: ${(t.data.blockedBy.connectors ?? []).join(", ")} to reconnect.`);
   if (t.data.takenOver && !t.data.handedBack) lines.push("You took it over – nothing runs until you hand it back.");
+  // why it is held (blocked / waiting): the error, the items it waits on, the code drift of a fix
+  if (["BLOCKED", "QUEUED", "WAITING_PARTS", "WAITING_CHILDREN", "PAUSED"].includes(t.state) && t.error) lines.push(`Held: ${t.error}`);
+  try {
+    const deps = db().prepare("SELECT e.dst, x.source_ref, x.state FROM edges e JOIN tasks x ON x.id=e.dst WHERE e.src=? AND e.type IN ('depends_on','stacks_on')").all(t.id) as any[];
+    const open = deps.filter((d) => !["DONE", "MERGED", "CANCELLED"].includes(d.state));
+    if (open.length) lines.push(`Waits on: ${open.map((d) => `${d.source_ref ?? d.dst} (${d.state.toLowerCase()})`).join(", ")}`);
+  } catch { /* no edges table on an old database */ }
+  if (t.data.codeDrift?.reason) lines.push(`Code since it was understood: ${t.data.codeDrift.reason}`);
+  // the merge order of a ticket with several PRs, or of a scope's children
+  try {
+    const { mergeOrderOf } = await import("../kernel/items.js");
+    const prs = mergeOrderOf((t as any).root_id ?? t.id).map((id) => getTask(id)).flatMap((x) => x?.data.prs?.length ? x.data.prs : x?.data.pr ? [x.data.pr] : [])
+      .filter((p: any) => p?.repo && p?.number);
+    if (prs.length > 1) lines.push(`Merge order: ${prs.map((p: any) => `${String(p.repo).split("/").pop()} #${p.number}`).join(" → ")}`);
+  } catch { /* no merge order */ }
+  const scope = scopeLine(t.id);
+  if (scope) lines.push(scope);
+  // the design document (W5a): its ≤ 10-line summary, and the decisions in force
+  try {
+    const { planSummary } = await import("../engine/steps/design_doc.js");
+    const sum = planSummary(t.data.leadId ?? t.id);
+    if (sum && !lines.some((l) => l.includes(sum.split("\n")[0]))) lines.push("", "Design document:", sum);
+    const { decisionsBlock } = await import("../knowledge/decisions.js");
+    const dec = decisionsBlock(t.id, 10);
+    if (dec.trim() && !(r.reply ?? "").includes(dec.split("\n")[0])) lines.push("", dec);
+  } catch { /* no document */ }
   try {
     const jobs = db().prepare("SELECT type, state, activity, error FROM jobs WHERE item_id=? ORDER BY created_at DESC LIMIT 5").all(t.id) as any[];
     if (jobs.length) lines.push(`Jobs: ${jobs.map((j) => `${j.type} ${j.state}${j.activity ? ` (${j.activity})` : ""}`).join(" · ")}`);
   } catch { /* v1: no jobs */ }
   return { ok: true, text: lines.filter(Boolean).join("\n") };
+}
+
+/** "Batch …, wave 2 – Merge 4 of 4 …" for a child of a scope (W7 / W8); undefined otherwise. */
+function scopeLine(itemId: string): string | undefined {
+  try { return scopeLineFor(itemId); } catch { return undefined; }
 }
 
 export interface TreeLine { id: string; ref: string; level: string; state: string; title: string; depth: number; job?: string }

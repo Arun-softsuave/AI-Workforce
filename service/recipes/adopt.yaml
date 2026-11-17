@@ -1,0 +1,23 @@
+name: adopt
+title: Finish my branch (W16) – build on your commits, never rewrite them, never force-push
+job: adopt
+steps:
+  - adopt_prepare         # ⚙ your branch fetched; a folder at your latest commit (your own copy untouched); your commits and uncommitted files read
+  - context_pack
+  - adopt_design          # 🔵 gap analysis: the ticket and criteria vs your diff → the design document; "already done" and "left to do"
+  - name: plan            # the rest only
+    when: "!data.adopt.nothingLeft"
+  - name: plan_review
+    when: "!data.adopt.nothingLeft"
+  - name: plan_gate       # the plan for the rest (approval per your settings)
+    when: "!data.adopt.nothingLeft"
+  - name: implement_test  # new commits on top of yours
+    when: "!data.adopt.nothingLeft"
+  - reviews: { reviewers: [code, security, qa] }
+  - adopt_sync            # you pushed meanwhile → only my unpushed commits go on top of yours; a conflict stops and tells you
+  - prepublish
+  - report
+  - adopt_pr_text         # your open PR keeps your own description; mine goes under it
+  - request_approval: { action: create_pr }
+  - publish               # a normal push to your branch (never forced); your PR is updated or one is raised
+  - record_memory

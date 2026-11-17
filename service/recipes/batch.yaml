@@ -1,0 +1,12 @@
+name: batch
+title: Several tickets at once (W7) – overlap check, waves, stacked PRs and merge order, one approval
+job: plan_scope
+steps:
+  - preview_scope        # one acknowledgement ("all my tickets" asks once)
+  - name: scope_plan     # overlap check (small tier): repos, areas and dependencies; code makes edges, waves, merge order
+    params:
+      mode: overlap
+  - scope_gate           # one approval for the batch, unless "no approvals"
+  - spawn_children
+  - merge_order
+  - epic_check           # the batch's summary (shipped, follow-ups, cost)

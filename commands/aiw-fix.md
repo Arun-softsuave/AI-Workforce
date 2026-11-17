@@ -10,4 +10,6 @@ Then explain briefly: every open comment and every failing CI check (only the ch
 - **Failing CI and lint checks** are fixed and pushed to the same PR without asking (setting `pr.autoFixCi`, on by default; turn it off with `aiw prefs --auto-fix-ci no`). Teams gets a short note of what was fixed. A check that fails again is fixed again, up to 3 rounds. Checks that need a person (a re-recorded baseline, a paid evaluation, a missing secret, a deployment) are reported, never faked.
 - **Review-comment fixes and QA issues** come to my Teams chat first; after I reply "1" they are pushed to the same PR and each comment gets its reply, then QA runs and CI is watched until every check passes.
 
+If I set the standing rule "fix review comments without asking" (`auto_resolve`) for this ticket or globally (`aiw rules` lists them), review-comment fixes are pushed without the Teams step too, and reported afterwards.
+
 Nothing is merged, and threads are left for the reviewer to resolve.

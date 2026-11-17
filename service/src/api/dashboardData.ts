@@ -5,6 +5,7 @@ import { readRuntime, VERSION } from "../core/runtime.js";
 import { normaliseQuestions, approvalChoices } from "../core/questions.js";
 import { getTask, listTasks, partsOf, stepsFor, type Task, type State } from "../engine/tasks.js";
 import { getPlaybook } from "../engine/playbooks.js";
+import { getRecipe } from "../kernel/recipes.js";
 import { isPaused } from "../engine/engine.js";
 import { latestApproval } from "../approvals/approvals.js";
 import { AGENTS } from "../agents/catalog.js";
@@ -114,7 +115,8 @@ export function agentTier(agent?: string | null, model?: string | null): string 
 }
 
 function steps(t: Task): string[] {
-  try { return getPlaybook(t.playbook ?? "").steps.map((s) => s.name); } catch { return []; }
+  try { return getPlaybook(t.playbook ?? "").steps.map((s) => s.name); } catch { /* a recipe-only flow (plan_scope, batch, ...) */ }
+  try { return getRecipe(t.playbook ?? "").steps.map((s) => s.name); } catch { return []; }
 }
 const currentStep = (t: Task) => steps(t)[t.step_index];
 
@@ -255,6 +257,8 @@ export interface BoardCard {
   id: string; ref: string; title: string; size: string | null; state: State; label: string; tone: Tone; stage: StageKey;
   now: string; parts: { repo: string; pct: number; state: string }[]; prs: { url: string; label: string }[];
   tokens: number; cost: number; updated: string; ticketUrl?: string;
+  /** Dashboard v2: the sprint / epic / batch it belongs to, its wave, merge position and the PR it is stacked on. */
+  scope?: { id: string; ref: string; level: string }; wave?: number; merge?: string; stackedOn?: string;
 }
 
 export function boardCard(t: Task): BoardCard {
@@ -269,16 +273,28 @@ export function boardCard(t: Task): BoardCard {
     prs: prUrls(t).map((url) => ({ url, label: prLabel(url) })),
     tokens: t.tokens_used + parts.reduce((n, p) => n + p.tokens_used, 0),
     cost: Math.round((t.cost_usd + parts.reduce((n, p) => n + p.cost_usd, 0)) * 100) / 100,
-    updated: t.updated_at, ticketUrl: t.data.ticket?.url,
+    updated: t.updated_at, ticketUrl: t.data.ticket?.url, ...scopeOfCard(t),
   };
 }
 
-/** The board: every lane with its cards. Finished work stays visible for `doneDays` days. */
-export function board(doneDays = 14): { stages: { key: StageKey; label: string; items: BoardCard[] }[] } {
+function scopeOfCard(t: Task): Pick<BoardCard, "scope" | "wave" | "merge" | "stackedOn"> {
+  const c = colsOf(t.id);
+  const root = c.root_id && c.root_id !== t.id ? getTask(c.root_id) : undefined;
+  const level = root ? colsOf(root.id).level : "";
+  const out: Pick<BoardCard, "scope" | "wave" | "merge" | "stackedOn"> = {};
+  if (root && CONTAINERS.includes(level)) out.scope = { id: root.id, ref: refOf(root), level };
+  if (t.data.scopeNote?.wave) out.wave = t.data.scopeNote.wave;
+  if (t.data.mergePos) out.merge = `${t.data.mergePos.n} of ${t.data.mergePos.of}`;
+  if (t.data.stackBase) out.stackedOn = t.data.stackBase.pr ? `#${t.data.stackBase.pr}` : t.data.stackBase.parentRef;
+  return out;
+}
+
+/** The board: every lane with its cards. Finished work stays visible for `doneDays` days. Containers show in scopes(); a filter keeps one sprint / epic / batch / repo. */
+export function board(doneDays = 14, f: ScopeFilter = {}): { stages: { key: StageKey; label: string; items: BoardCard[] }[] } {
   const since = new Date(Date.now() - doneDays * 86_400_000).toISOString();
-  const rows = (db().prepare(`SELECT id FROM tasks WHERE kind != 'part' AND state != 'CANCELLED' AND (state NOT IN ('DONE') OR updated_at >= ?)
+  const rows = (db().prepare(`SELECT id FROM tasks WHERE kind != 'part' AND COALESCE(level,'ticket') NOT IN ('sprint','epic','batch') AND state != 'CANCELLED' AND (state NOT IN ('DONE') OR updated_at >= ?)
     ORDER BY priority ASC, created_at ASC LIMIT 300`).all(since) as { id: string }[]);
-  const cards = rows.map((r) => getTask(r.id)).filter((t): t is Task => !!t).map(boardCard);
+  const cards = rows.map((r) => getTask(r.id)).filter((t): t is Task => !!t && inFilter(t, f)).map(boardCard);
   return { stages: STAGES.map(([key, label]) => ({ key, label, items: cards.filter((c) => c.stage === key) })) };
 }
 
@@ -355,8 +371,147 @@ export function itemTimeline(id: string) {
     agent: agentName(runningStep(t.id)?.agent ?? STEP_AGENT[currentStep(t) ?? ""]) || undefined,
     questions: normaliseQuestions(t.data.questions, 10),
     branch: t.branch, error: t.error ?? undefined, kind: t.kind,
-    timeline: entries, actions,
+    timeline: entries, actions, deps: dependencyView(t.id),
   };
+}
+
+// ------------------------------------------------------------------ dashboard v2: sprint / epic / batch trees (Phase 6)
+
+const CONTAINERS = ["sprint", "epic", "batch"];
+const LEVEL_NAME: Record<string, string> = { sprint: "Sprint", epic: "Epic", batch: "Batch" };
+const isMergedRow = (t: Pick<Task, "state" | "data">) => t.state === "MERGED" || !!t.data?.mergedAt || (t.state === "DONE" && prUrls(t).length > 0);
+interface ItemCols { level: string; parent_id: string | null; root_id: string | null }
+const colsOf = (id: string): ItemCols => (db().prepare("SELECT level, parent_id, root_id FROM tasks WHERE id=?").get(id) as any) ?? { level: "ticket", parent_id: null, root_id: null };
+
+/** A small card for the scope tree (one ticket of a wave). */
+export interface ScopeCard { id: string; ref: string; title: string; state: State; label: string; tone: Tone; repo: string; pr?: string; prUrl?: string; stackedOn?: string; merge?: string; wave?: number }
+
+function scopeCard(t: Task, wave?: number): ScopeCard {
+  const prs = prUrls(t);
+  const stack = t.data.stackBase;
+  return {
+    id: t.id, ref: refOf(t), title: t.title ?? "", state: t.state, label: isMergedRow(t) ? "Merged" : stateLabel(t), tone: isMergedRow(t) || t.state === "DONE" ? "ok" : stateTone(t),
+    repo: t.project_id, pr: prs[0] ? prLabel(prs[0]) : undefined, prUrl: prs[0], stackedOn: stack ? (stack.pr ? `#${stack.pr}` : stack.parentRef) : undefined,
+    merge: t.data.mergePos ? `${t.data.mergePos.n} of ${t.data.mergePos.of}` : undefined, wave,
+  };
+}
+
+/** Edges among a set of items (depends_on / stacks_on / same_area), by ref. */
+function edgesAmong(ids: string[]): { from: string; to: string; type: string }[] {
+  if (!ids.length) return [];
+  const ph = ids.map(() => "?").join(",");
+  const rows = db().prepare(`SELECT from_id, to_id, type FROM edges WHERE from_id IN (${ph}) AND to_id IN (${ph}) AND type IN ('depends_on','stacks_on','same_area')`).all(...ids, ...ids) as any[];
+  const ref = (id: string) => { const t = getTask(id); return t ? refOf(t) : id; };
+  return rows.map((r) => ({ from: ref(r.from_id), to: ref(r.to_id), type: r.type }));
+}
+
+/** Waves of a scope's children: Kahn levels over depends_on / stacks_on among them (what the scheduler enforces). */
+function wavesOf(kids: Task[]): Task[][] {
+  const ids = new Set(kids.map((k) => k.id));
+  const needs = new Map(kids.map((k) => [k.id, new Set<string>()]));
+  if (kids.length) {
+    const ph = kids.map(() => "?").join(",");
+    for (const r of db().prepare(`SELECT from_id, to_id FROM edges WHERE type IN ('depends_on','stacks_on') AND from_id IN (${ph})`).all(...kids.map((k) => k.id)) as any[]) {
+      if (ids.has(r.to_id) && r.to_id !== r.from_id) needs.get(r.from_id)!.add(r.to_id);
+    }
+  }
+  const done = new Set<string>();
+  const waves: Task[][] = [];
+  for (;;) {
+    const w = kids.filter((k) => !done.has(k.id) && [...needs.get(k.id)!].every((d) => done.has(d)));
+    if (!w.length) break;
+    waves.push(w);
+    w.forEach((k) => done.add(k.id));
+  }
+  const left = kids.filter((k) => !done.has(k.id));
+  if (left.length) waves.push(left);                  // a loop: shown as one last wave (the plan message names it)
+  return waves;
+}
+
+export interface ScopeFilter { sprint?: string; epic?: string; repo?: string; scope?: string }
+
+/** Does an item belong to the filter? sprint / epic / scope = the container's id or ref; repo = project id. */
+function inFilter(t: Task, f: ScopeFilter): boolean {
+  if (f.repo && t.project_id !== f.repo) return false;
+  const want = f.scope ?? f.sprint ?? f.epic;
+  if (!want) return true;
+  const c = colsOf(t.id);
+  const root = c.root_id ? getTask(c.root_id) : undefined;
+  return !!root && (root.id === want || root.source_ref === want) && (!f.sprint || colsOf(root.id).level === "sprint") && (!f.epic || colsOf(root.id).level === "epic");
+}
+
+/**
+ * Sprint / epic / batch trees for the dashboard: each scope with its waves, merge order, stacked PRs and dependency
+ * edges. Before the children exist the planned waves (ticket keys) are shown. Finished scopes stay `doneDays` days.
+ */
+export function scopes(f: ScopeFilter = {}, doneDays = 14) {
+  const since = new Date(Date.now() - doneDays * 86_400_000).toISOString();
+  const rows = db().prepare(`SELECT id FROM tasks WHERE level IN ('sprint','epic','batch') AND state != 'CANCELLED' AND (state NOT IN ('DONE') OR updated_at >= ?)
+    ORDER BY priority ASC, created_at DESC LIMIT 50`).all(since) as { id: string }[];
+  const out = [];
+  for (const r of rows) {
+    const c = getTask(r.id);
+    if (!c) continue;
+    const want = f.scope ?? f.sprint ?? f.epic;
+    if (want && c.id !== want && c.source_ref !== want) continue;
+    const level = colsOf(c.id).level;
+    if (f.sprint && level !== "sprint") continue;
+    if (f.epic && level !== "epic") continue;
+    const sc = c.data.scope ?? {};
+    const kids = (db().prepare("SELECT id FROM tasks WHERE parent_id=? AND state != 'CANCELLED' AND kind != 'part' ORDER BY created_at, rowid").all(c.id) as { id: string }[])
+      .map((x) => getTask(x.id)).filter((x): x is Task => !!x);
+    const shown = f.repo ? kids.filter((k) => k.project_id === f.repo) : kids;
+    if (f.repo && !shown.length && !(sc.plan?.tickets ?? []).some((t: any) => t.repo === f.repo)) continue;
+    const waves: { n: number; items: ScopeCard[] }[] = kids.length
+      ? wavesOf(kids).map((w, n) => ({ n: n + 1, items: w.filter((k) => shown.includes(k)).map((k) => scopeCard(k, n + 1)) })).filter((w) => w.items.length)
+      : (sc.plan?.waves ?? []).map((w: string[], n: number) => ({ n: n + 1, items: w.map((key: string) => {
+          const i = (sc.issues ?? []).find((x: any) => x.key === key) ?? {};
+          return { id: "", ref: key, title: i.title ?? "", state: "DETECTED" as State, label: "Planned", tone: "wait" as Tone, repo: (sc.plan?.tickets ?? []).find((t: any) => t.key === key)?.repo ?? c.project_id, wave: n + 1 };
+        }).filter((x: ScopeCard) => !f.repo || x.repo === f.repo) })).filter((w: { items: ScopeCard[] }) => w.items.length);
+    const byRef = new Map(kids.map((k) => [refOf(k), k]));
+    const orderRefs: string[] = sc.mergeOrder?.length ? sc.mergeOrder : sc.plan?.order ?? [];
+    const mergeOrder = orderRefs.map((ref, n) => {
+      const k = byRef.get(ref);
+      return { n: n + 1, ref, pr: k && prUrls(k)[0] ? prLabel(prUrls(k)[0]) : undefined, label: k ? (isMergedRow(k) ? "Merged" : stateLabel(k)) : "Planned",
+        tone: (k ? (isMergedRow(k) ? "ok" : stateTone(k)) : "wait") as Tone, stackedOn: k?.data.stackBase ? (k.data.stackBase.pr ? `#${k.data.stackBase.pr}` : k.data.stackBase.parentRef) : undefined };
+    }).filter((m: { ref: string }) => !f.repo || byRef.get(m.ref)?.project_id === f.repo || !byRef.get(m.ref));
+    const stacked = kids.filter((k) => k.data.stackBase).map((k) => ({ ref: refOf(k), pr: prUrls(k)[0] ? prLabel(prUrls(k)[0]) : undefined, on: k.data.stackBase.parentRef, onPr: k.data.stackBase.pr ? `#${k.data.stackBase.pr}` : undefined, branch: k.data.stackBase.branch }));
+    const done = kids.filter((k) => isMergedRow(k) || k.state === "DONE").length;
+    out.push({
+      id: c.id, ref: refOf(c), title: c.title ?? refOf(c), level, levelLabel: LEVEL_NAME[level] ?? level, state: c.state, label: stateLabel(c), tone: c.state === "DONE" ? "ok" : stateTone(c),
+      now: taskNow(c).now, done, total: kids.length || (sc.issues ?? []).length, pct: kids.length ? Math.round((done / kids.length) * 100) : 0,
+      waves, mergeOrder, stacked, edges: edgesAmong(kids.map((k) => k.id)),
+      repos: [...new Set(kids.length ? kids.map((k) => k.project_id) : (sc.plan?.tickets ?? []).map((t: any) => t.repo))],
+      tokens: c.tokens_used + kids.reduce((n, k) => n + k.tokens_used, 0), cost: Math.round((c.cost_usd + kids.reduce((n, k) => n + k.cost_usd, 0)) * 100) / 100,
+      ticketUrl: sc.epic?.url, warnings: (c.data.orderWarned ?? []).length,
+    });
+  }
+  return out;
+}
+
+/** Choices for the dashboard filters: open sprints, epics and batches, and the repositories. */
+export function scopeFilters() {
+  const rows = db().prepare(`SELECT id, source_ref, title, level FROM tasks WHERE level IN ('sprint','epic','batch') AND state NOT IN ('CANCELLED')
+    ORDER BY created_at DESC LIMIT 60`).all() as any[];
+  const pick = (lv: string) => rows.filter((r) => r.level === lv).map((r) => ({ id: r.id, ref: r.source_ref ?? r.id, title: r.title ?? r.source_ref ?? r.id }));
+  const repos = (db().prepare("SELECT DISTINCT project_id FROM tasks WHERE kind != 'part' ORDER BY project_id").all() as any[]).map((r) => r.project_id).filter(Boolean);
+  return { sprints: pick("sprint"), epics: pick("epic"), batches: pick("batch"), repos };
+}
+
+/** The drawer's dependency view: what this item needs, what waits for it, its scope and merge position. */
+export function dependencyView(id: string) {
+  const t = getTask(id);
+  if (!t) return undefined;
+  const rows = db().prepare("SELECT from_id, to_id, type FROM edges WHERE (from_id=?1 OR to_id=?1) AND type IN ('depends_on','stacks_on','same_area')").all(t.id) as any[];
+  const card = (oid: string, type: string) => { const o = getTask(oid); return o ? { id: o.id, ref: refOf(o), type, label: isMergedRow(o) ? "Merged" : stateLabel(o), pr: prUrls(o)[0] ? prLabel(prUrls(o)[0]) : undefined } : undefined; };
+  const needs = rows.filter((r) => r.from_id === t.id && r.type !== "same_area").map((r) => card(r.to_id, r.type)).filter(Boolean);
+  const neededBy = rows.filter((r) => r.to_id === t.id && r.type !== "same_area").map((r) => card(r.from_id, r.type)).filter(Boolean);
+  const sameArea = rows.filter((r) => r.type === "same_area").map((r) => card(r.from_id === t.id ? r.to_id : r.from_id, r.type)).filter(Boolean);
+  const c = colsOf(t.id);
+  const root = c.root_id && c.root_id !== t.id ? getTask(c.root_id) : undefined;
+  const scope = root && CONTAINERS.includes(colsOf(root.id).level) ? { id: root.id, ref: refOf(root), title: root.title ?? refOf(root), wave: t.data.scopeNote?.wave } : undefined;
+  if (!needs.length && !neededBy.length && !sameArea.length && !scope) return undefined;
+  return { needs, neededBy, sameArea, scope, mergeNote: t.data.mergeNote ?? undefined, stackedOn: t.data.stackBase ? { ref: t.data.stackBase.parentRef, pr: t.data.stackBase.pr ? `#${t.data.stackBase.pr}` : undefined, branch: t.data.stackBase.branch } : undefined };
 }
 
 // ------------------------------------------------------------------ agents, queue
@@ -513,7 +668,7 @@ export function overview() {
       waiting: n("DETECTED", "TRIAGED", "AWAITING_START"),
       connections: { ok: conns.filter((c) => c.tone === "ok").length, total: conns.length, toCheck: needConn.length },
     },
-    needs, working, board: b, feed: feed(), timers: timers(), connections: conns,
+    needs, working, board: b, feed: feed(), timers: timers(), connections: conns, scopes: scopes(), filters: scopeFilters(),
   };
 }
 
@@ -521,6 +676,12 @@ export function overview() {
 export const overviewSnapshot = () => snapshot(overview);
 
 // ------------------------------------------------------------------ routes for api/server.ts
+
+/** ?sprint=&epic=&scope=&repo= (ids or refs; anything else is ignored). */
+export function filterOf(u: URL): ScopeFilter {
+  const v = (k: string) => { const x = (u.searchParams.get(k) ?? "").trim(); return x && x.length < 80 && /^[\w@.-]+$/.test(x) ? x : undefined; };
+  return { sprint: v("sprint"), epic: v("epic"), scope: v("scope"), repo: v("repo") };
+}
 
 type Handler = (m: RegExpMatchArray, body: any, url: URL) => unknown;
 class NotFound extends Error { status = 404; }
@@ -530,7 +691,8 @@ export const dashboardRoutes: [string, RegExp, Handler][] = [
   ["GET", /^\/api\/overview$/, () => overview()],
   ["GET", /^\/api\/needs$/, () => needsYou()],
   ["GET", /^\/api\/working$/, () => workingNow()],
-  ["GET", /^\/api\/board$/, (_m, _b, u) => board(Number(u.searchParams.get("days") ?? 14) || 14)],
+  ["GET", /^\/api\/board$/, (_m, _b, u) => board(Number(u.searchParams.get("days") ?? 14) || 14, filterOf(u))],
+  ["GET", /^\/api\/scopes$/, (_m, _b, u) => ({ scopes: scopes(filterOf(u), Number(u.searchParams.get("days") ?? 14) || 14), filters: scopeFilters() })],
   ["GET", /^\/api\/items\/([^/]+)\/timeline$/, (m) => itemTimeline(decodeURIComponent(m[1])) ?? Promise.reject(new NotFound("item not found"))],
   ["GET", /^\/api\/agents$/, () => agents()],
   ["GET", /^\/api\/timers$/, () => timers()],

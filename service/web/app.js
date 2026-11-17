@@ -23,7 +23,8 @@
   };
   function svg(n, w) { w = w || 17; return '<svg viewBox="0 0 24 24" width="' + w + '" height="' + w + '" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + ICON[n] + '</svg>'; }
 
-  var VIEWS = [['overview', 'Overview', 'home'], ['tickets', 'Tickets', 'board'], ['agents', 'Agents', 'agents'], ['background', 'Background', 'clock'], ['connections', 'Connections', 'plug']];
+  ICON.tree = '<rect x="3" y="3" width="7" height="5" rx="1.2"/><rect x="14" y="10" width="7" height="5" rx="1.2"/><rect x="14" y="17" width="7" height="4" rx="1.2"/><path d="M6.5 8v10.5H14M6.5 12.5H14"/>';
+  var VIEWS = [['overview', 'Overview', 'home'], ['tickets', 'Tickets', 'board'], ['scopes', 'Sprints & epics', 'tree'], ['agents', 'Agents', 'agents'], ['background', 'Background', 'clock'], ['connections', 'Connections', 'plug']];
   var PALETTE = ['#1E4FD8', '#7C3AED', '#0E7490', '#B45309', '#BE123C', '#15803D', '#4D7C0F', '#9D174D'];
   var LOGO = { jira: ['#1868DB', 'J'], github: ['#24292F', 'G'], figma: ['#A259FF', 'F'], teams: ['#5B5FC7', 'T'], 'teams-personal': ['#5B5FC7', 'T'], notion: ['#37352F', 'N'], slack: ['#4A154B', 'S'], model: ['#C2410C', 'M'] };
 
@@ -127,6 +128,7 @@
     return {
       overview: needs().length ? { n: needs().length, you: 1 } : null,
       tickets: { n: active },
+      scopes: (d.scopes || []).filter(function (s) { return s.state !== 'DONE'; }).length ? { n: (d.scopes || []).filter(function (s) { return s.state !== 'DONE'; }).length } : null,
       agents: { n: (d.working || []).length },
       background: { n: (d.timers || []).length },
       connections: badConn ? { n: badConn, you: 1 } : { n: '✓' }
@@ -190,11 +192,87 @@
       (t.prs && t.prs.length ? '<div class="now">' + svg('pr', 13) + ' PR ' + esc(t.prs.map(function (p) { return p.label; }).join(', ')) + '</div>' : '') +
       '</button>';
   }
-  function boardHtml() {
+  function boardHtml(filtered) {
     return '<div class="board-scroll"><div class="board" id="board">' + S.data.board.stages.map(function (s) {
-      return '<div class="lane"><h3><span>' + esc(s.label) + '</span><span class="num">' + s.items.length + '</span></h3>' + (s.items.map(cardHtml).join('') || '<div class="none">Empty</div>') + '</div>';
+      var items = filtered ? s.items.filter(cardInFilter) : s.items;
+      return '<div class="lane"><h3><span>' + esc(s.label) + '</span><span class="num">' + items.length + '</span></h3>' + (items.map(cardHtml).join('') || '<div class="none">Empty</div>') + '</div>';
     }).join('') + '</div></div>';
   }
+
+  // ------------------------------------------------------------------ dashboard v2: sprints, epics, batches (filters kept per browser)
+  S.filter = { sprint: '', epic: '', repo: '' };
+  try { var sf = JSON.parse(store('aiw-filter') || '{}') || {}; ['sprint', 'epic', 'repo'].forEach(function (k) { if (typeof sf[k] === 'string') S.filter[k] = sf[k]; }); } catch (e) { /* none saved */ }
+  function scopeWanted() { return S.filter.sprint || S.filter.epic || ''; }
+  function cardInFilter(t) {
+    if (S.filter.repo && !(t.parts || []).some(function (p) { return p.repo === S.filter.repo; })) return false;
+    var w = scopeWanted(); return !w || (t.scope && (t.scope.id === w || t.scope.ref === w));
+  }
+  function filtersHtml() {
+    var f = (S.data && S.data.filters) || { sprints: [], epics: [], batches: [], repos: [] };
+    function sel(key, label, opts) {
+      return '<label style="display:flex;gap:6px;align-items:center;font-size:13px"><span class="muted">' + esc(label) + '</span><select data-filter="' + key + '" style="font:inherit;padding:4px 6px;border-radius:8px;border:1px solid currentColor;background:transparent;color:inherit;max-width:220px">' +
+        '<option value="">All</option>' + opts.map(function (o) { var v = o.id || o; return '<option value="' + esc(v) + '"' + (S.filter[key] === v ? ' selected' : '') + '>' + esc(o.title ? o.ref + ' – ' + o.title : o) + '</option>'; }).join('') + '</select></label>';
+    }
+    var any = S.filter.sprint || S.filter.epic || S.filter.repo;
+    return '<div class="banner" style="flex-wrap:wrap;gap:12px">' + svg('tree') + sel('sprint', 'Sprint', f.sprints) + sel('epic', 'Epic', f.epics.concat(f.batches)) + sel('repo', 'Repository', f.repos) +
+      (any ? '<button class="link" type="button" data-clearfilter="1">Clear</button>' : '') + '</div>';
+  }
+  function miniCard(c) {
+    var open = c.id ? ' data-open="' + esc(c.id) + '"' : '';
+    return '<' + (c.id ? 'button type="button"' : 'div') + ' class="card s-' + esc(c.tone) + '"' + open + ' style="text-align:left;width:100%">' +
+      '<div class="r1"><span class="ref">' + esc(c.ref) + '</span><span class="chip ' + esc(c.tone) + '">' + esc(c.label) + '</span></div>' +
+      '<div class="ttl">' + esc(c.title) + '</div>' +
+      '<div class="now">' + esc(c.repo) + (c.pr ? ' · ' + svg('pr', 12) + ' ' + esc(c.pr) : '') + (c.merge ? ' · merge ' + esc(c.merge) : '') + '</div>' +
+      (c.stackedOn ? '<div class="now">Stacked on ' + esc(c.stackedOn) + '</div>' : '') +
+      '</' + (c.id ? 'button' : 'div') + '>';
+  }
+  function scopeHtml(s) {
+    var arrows = (s.edges || []).filter(function (e) { return e.type !== 'stacks_on'; }).map(function (e) {
+      return '<li><span class="mono">' + esc(e.from) + '</span> ' + (e.type === 'same_area' ? '↔ same files as' : '→ needs') + ' <span class="mono">' + esc(e.to) + '</span></li>';
+    }).join('');
+    return '<section class="col" style="gap:10px"><div class="sec-h"><h2>' + esc(s.levelLabel) + ' <span class="mono muted">' + esc(s.ref) + '</span> · ' + esc(s.title) + '</h2>' +
+      '<span class="chip ' + esc(s.tone) + '">' + esc(s.label) + '</span><span class="sp"></span>' +
+      '<p class="num">' + s.done + '/' + s.total + ' done · ' + ktok(s.tokens) + ' tokens' + (s.cost ? ' · $' + Number(s.cost).toFixed(2) : '') + '</p>' +
+      (s.id ? '<button class="link" type="button" data-open="' + esc(s.id) + '">Details</button>' : '') + '</div>' +
+      '<div class="bar" aria-label="' + s.pct + '% done"><i style="width:' + s.pct + '%"></i></div>' +
+      (s.warnings ? '<div class="error-bar">Something was merged out of order. See the merge order below.</div>' : '') +
+      (s.waves.length ? '<div class="board-scroll"><div class="board">' + s.waves.map(function (w) {
+        return '<div class="lane"><h3><span>Wave ' + w.n + '</span><span class="num">' + w.items.length + '</span></h3>' + w.items.map(miniCard).join('') + '</div>';
+      }).join('') + '</div></div>' : '<div class="empty">' + esc(s.now || 'Planning…') + '</div>') +
+      '<div class="grid"><div class="col">' +
+      (s.mergeOrder.length ? '<div><div class="lbl">Merge order</div><ol class="tl">' + s.mergeOrder.map(function (m) {
+        return '<li class="' + (m.tone === 'ok' ? 'done' : m.tone === 'bad' ? 'bad' : 'todo') + '"><span class="m">' + (m.tone === 'ok' ? '✓' : m.n) + '</span><div><div class="st"><span class="mono">' + esc(m.ref) + '</span>' + (m.pr ? ' ' + esc(m.pr) : '') + '</div><div class="who">' + esc(m.label) + (m.stackedOn ? ' · stacked on ' + esc(m.stackedOn) : '') + '</div></div></li>';
+      }).join('') + '</ol></div>' : '') +
+      '</div><div class="col">' +
+      (s.stacked.length ? '<div><div class="lbl">Stacked PRs</div><ul class="feed">' + s.stacked.map(function (x) {
+        return '<li><span class="mono">' + esc(x.ref) + '</span>' + (x.pr ? ' ' + esc(x.pr) : '') + ' is built on <span class="mono">' + esc(x.on) + '</span>' + (x.onPr ? ' ' + esc(x.onPr) : '') + ' (' + esc(x.branch) + '). It moves to the base branch after that merges.</li>';
+      }).join('') + '</ul></div>' : '') +
+      (arrows ? '<div><div class="lbl">Dependencies</div><ul class="feed">' + arrows + '</ul></div>' : '') +
+      '<div class="muted" style="font-size:13px">Repositories: ' + esc((s.repos || []).join(', ') || '–') + '</div>' +
+      '</div></div></section>';
+  }
+  function scopesView() {
+    var w = scopeWanted(), r = S.filter.repo;
+    var list = (S.data.scopes || []).filter(function (s) { return (!w || s.id === w || s.ref === w) && (!r || (s.repos || []).indexOf(r) >= 0); });
+    return '<div class="col">' + filtersHtml() +
+      (list.length ? list.map(scopeHtml).join('') : '<div class="empty">No sprint, epic or batch is running. Ask in Teams, for example "build sprint 14" or "do KAN-45, KAN-47 and KAN-48".</div>') + '</div>';
+  }
+  function depsHtml(dp) {
+    if (!dp) return '';
+    function row(arrow, x) { return '<li><span>' + arrow + '</span> <button class="link mono" type="button" data-open="' + esc(x.id) + '">' + esc(x.ref) + '</button>' + (x.pr ? ' ' + esc(x.pr) : '') + ' <span class="muted">' + esc(x.label) + (x.type === 'stacks_on' ? ' · stacked' : '') + '</span></li>'; }
+    var items = (dp.needs || []).map(function (x) { return row('← needs', x); }).concat((dp.neededBy || []).map(function (x) { return row('→ needed by', x); })).concat((dp.sameArea || []).map(function (x) { return row('↔ same files', x); }));
+    return '<div><div class="lbl">Dependencies</div>' +
+      (dp.scope ? '<div class="sub">Part of <button class="link mono" type="button" data-open="' + esc(dp.scope.id) + '">' + esc(dp.scope.ref) + '</button> ' + esc(dp.scope.title) + (dp.scope.wave ? ' · wave ' + dp.scope.wave : '') + '</div>' : '') +
+      (dp.mergeNote ? '<div class="sub">' + esc(dp.mergeNote) + '</div>' : '') +
+      (dp.stackedOn ? '<div class="sub">Built on ' + esc(dp.stackedOn.ref) + (dp.stackedOn.pr ? ' ' + esc(dp.stackedOn.pr) : '') + ' (' + esc(dp.stackedOn.branch) + ')</div>' : '') +
+      (items.length ? '<ul class="feed">' + items.join('') + '</ul>' : '') + '</div>';
+  }
+  document.addEventListener('change', function (e) {
+    var el = e.target.closest && e.target.closest('[data-filter]'); if (!el) return;
+    var k = el.getAttribute('data-filter'); S.filter[k] = el.value;
+    if (k === 'sprint' && el.value) S.filter.epic = ''; if (k === 'epic' && el.value) S.filter.sprint = '';
+    store('aiw-filter', JSON.stringify(S.filter)); render();
+  });
 
   function feedHtml() {
     var f = S.data.feed || [];
@@ -227,7 +305,7 @@
   }
 
   function ticketsTable() {
-    var all = []; S.data.board.stages.forEach(function (s) { s.items.forEach(function (t) { all.push([s.label, t]); }); });
+    var all = []; S.data.board.stages.forEach(function (s) { s.items.filter(cardInFilter).forEach(function (t) { all.push([s.label, t]); }); });
     if (!all.length) return '<section class="panel"><div class="panel-h"><h2>All tickets</h2></div><div class="empty">No tickets yet.</div></section>';
     return '<section class="panel"><div class="panel-h"><h2>All tickets</h2></div><div class="tbl"><table><tr><th>Ticket</th><th>Stage</th><th>Status</th><th>Repos</th><th>Tokens</th><th>Cost</th><th>PR</th></tr>' +
       all.map(function (x) { var t = x[1]; return '<tr data-open="' + esc(t.id) + '"><td><span class="mono">' + esc(t.ref) + '</span><span class="sub">' + esc(t.title) + '</span></td><td>' + esc(x[0]) + '</td><td><span class="chip ' + esc(t.tone) + '">' + esc(t.label) + '</span></td><td>' + esc(t.parts.map(function (p) { return p.repo; }).join(' + ')) + '</td><td class="num">' + (t.tokens ? ktok(t.tokens) : '–') + '</td><td class="num">' + (t.cost ? '$' + Number(t.cost).toFixed(2) : '–') + '</td><td>' + esc(t.prs.map(function (p) { return p.label; }).join(', ')) + '</td></tr>'; }).join('') +
@@ -268,7 +346,9 @@
         '<section id="boardSec"><div class="sec-h"><h2>Ticket progress</h2><p>Each ticket moves left to right.</p></div>' + boardHtml() + '</section>' +
         '</div><div class="col">' + feedHtml() + jobsHtml(false) + '</div></div></div>';
     } else if (S.view === 'tickets') {
-      V.innerHTML = '<div class="col"><div class="banner">' + svg('board') + '<span><b>Tip:</b> click any ticket to see every step, who did it, and what it cost.</span></div>' + boardHtml() + ticketsTable() + '</div>';
+      V.innerHTML = '<div class="col"><div class="banner">' + svg('board') + '<span><b>Tip:</b> click any ticket to see every step, who did it, and what it cost.</span></div>' + filtersHtml() + boardHtml(true) + ticketsTable() + '</div>';
+    } else if (S.view === 'scopes') {
+      V.innerHTML = scopesView();
     } else if (S.view === 'agents') {
       V.innerHTML = agentsView();
     } else if (S.view === 'background') {
@@ -306,7 +386,7 @@
       }).join('') + '</div></div>' +
       (t.parts && t.parts.length > 1 ? '<div><div class="lbl">Repositories</div><div class="repos">' + t.parts.map(function (p) { return '<div class="repo ' + (p.pct >= 100 ? 'done' : '') + '" style="grid-template-columns:110px 1fr 40px;font-size:13px"><span>' + esc(p.repo) + '</span><div class="bar"><i style="width:' + p.pct + '%"></i></div><span class="num">' + p.pct + '%</span></div>'; }).join('') + '</div></div>' : '') +
       (qs.length ? '<div><div class="lbl">Open question' + (qs.length > 1 ? 's' : '') + '</div><div class="qa">' + qs.map(function (q) { return '<div><b>' + esc(q.question) + '</b>' + (q.options.length ? '<div class="muted">' + esc(q.options.join(' / ')) + '</div>' : '') + '</div>'; }).join('') + '</div></div>' : '') +
-      (t.error ? '<div class="error-bar">' + esc(t.error) + '</div>' : '') +
+      (t.error ? '<div class="error-bar">' + esc(t.error) + '</div>' : '') + depsHtml(t.deps) +
       '<div><div class="lbl">What happened</div><ol class="tl">' + (t.timeline || []).map(function (e) {
         return '<li class="' + esc(e.mark) + '"><span class="m">' + (e.mark === 'done' ? '✓' : e.mark === 'ask' ? '?' : e.mark === 'bad' ? '!' : '') + '</span><div><div class="st">' + esc(e.title) + '</div>' + (e.who ? '<div class="who">' + esc(e.who) + '</div>' : '') + '</div><time>' + esc(hhmm(e.at)) + '</time></li>';
       }).join('') + '</ol></div>' +
@@ -365,6 +445,7 @@
       return;
     }
     var o = e.target.closest('[data-open]'); if (o) { openTicket(o.getAttribute('data-open')); return; }
+    if (e.target.closest('[data-clearfilter]')) { S.filter = { sprint: '', epic: '', repo: '' }; store('aiw-filter', null); render(); return; }
     var g = e.target.closest('[data-go]'); if (g) { closeDrawer(); location.hash = g.getAttribute('data-go'); return; }
     if (e.target.closest('#closeD')) closeDrawer();
   });

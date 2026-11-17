@@ -1,6 +1,6 @@
 ---
 name: aiw-onboarding
-description: Guide the user through AI Workforce first-run setup (service, model access, roles, connectors, notifications incl. two-way Teams bot, projects, product documents, Brain, go live). Use when the user runs /aiw-setup, asks to set up or configure AI Workforce, or the SessionStart context says the plugin is not set up yet.
+description: Guide the user through AI Workforce first-run setup (service, model access, roles, connectors with Figma token first, notifications incl. two-way Teams bot, projects, team and reviewers, product documents, Brain, preferences, ready check, environment doctor, dashboard, go live). Use when the user runs /aiw-setup, asks to set up or configure AI Workforce, or the SessionStart context says the plugin is not set up yet.
 ---
 
 # AI Workforce onboarding
@@ -56,11 +56,11 @@ Run the `aiw` CLI with Bash. If `aiw` is not on PATH, use `node "<plugin root>/s
      AI Workforce may read, then Allow. Fallback: `aiw connect notion --browser` (integration token).
    - **Figma – token first.** Figma must stay connected all the time (also when the Figma app is closed), and Figma's online MCP
      server only admits approved apps, so there is no browser sign-in for AI Workforce. Options:
-     *Personal access token in the local page (Recommended)*: `aiw connect figma --browser` – the user creates a token in Figma
+     *Personal access token in the local page (Recommended)*: `aiw connect figma` – the user creates a token in Figma
      (Settings → Security → Personal access tokens, scopes File content: read-only + Current user: read) and pastes it into the local
      page, never into the chat. It reads any file and is checked regularly, with a Teams alert if it stops working.
-     *Also use the Figma desktop app (optional)*: open a file, Dev Mode (Shift+D) → "Enable desktop MCP server" (Dev or Full seat),
-     then `aiw connect figma`. Tasks then read the design that is open in the app.
+     *Figma desktop app instead (optional)*: open a file, Dev Mode (Shift+D) → "Enable desktop MCP server" (Dev or Full seat),
+     then `aiw connect figma --desktop`. Tasks then read the design that is open in the app, and only while it is open.
    - **Slack / work Teams webhook** – these services have no browser sign-in for outside apps (Slack requires an admin-approved Slack
      app; work Teams requires an Azure app). Say so in one line, offer *Skip (Recommended when using the Teams bot)*, otherwise
      `aiw connect <tool> --browser`.
@@ -167,11 +167,23 @@ Run the `aiw` CLI with Bash. If `aiw` is not on PATH, use `node "<plugin root>/s
     then per repo: push access and the base branch, reviewers, the rules card and CI checks, lint/format tools, the test runner and a
     temporary test database, and PR screenshots (Playwright). Show the result as it is; for each ✘ line give the printed fix and offer
     *Fix it now* · *Later*. Work still runs with open items – anything that can't run here is reported as "not tested locally".
-    Re-run `aiw ready <project>` after a fix. Coming later: a deeper **environment doctor** under `aiw doctor` (language versions,
-    installed dependencies, `.env` key names, database and services, a one-test smoke run) – today `aiw doctor` checks the prerequisites only.
+    Re-run `aiw ready <project>` after a fix.
+
+10f. **Environment doctor** – one sentence: it checks that each repo's tests can really run on this computer; it also runs by itself
+    before every build (cached for an hour). For each project: `aiw doctor <project> --smoke`. It checks, read-only: Python / Node
+    versions against the repo's files, the virtualenv / node_modules and that packages import, `.env` present with the needed keys
+    (NAMES only – values are never read), the database, the services the tests need (database, cache, queue), and a one-test smoke run.
+    Show ✅ ready, or each "tests can't run because …, fix: …" line, and offer *Fix it now* · *Later*. Never edit `.env` and never ask
+    for secret values in chat. Explain: a ticket never starts building on a broken environment – it waits as **Blocked: environment**
+    and resumes by itself when the doctor passes.
+
+10g. **Dashboard** – `aiw dashboard`. One sentence each: it is the live view of the work (what each agent is doing, ticket progress,
+    what needs the user, background timers, connections and cost); the link works only on this computer; actions there (answer,
+    approve, pause, reconnect) pass the same checks as Teams. Mention `/ai-workforce:aiw-dashboard` opens it later.
 
 11. **Go live** – options: *Go live now (Recommended)* · *Not yet*.
     `aiw resume-all` then `aiw live`. Explain: tickets assigned to the user (updated in the last 24 h) are picked up; older ones via `aiw run <KEY>`;
-    plans and PRs need explicit approval; nothing is ever merged or deployed. Offer `aiw dashboard`.
+    plans and PRs follow the user's preferences and rules (`/ai-workforce:aiw-rules`); failing CI is fixed without asking unless
+    they turned that off; nothing is ever merged or deployed. Useful next: `/ai-workforce:aiw-status`, `/ai-workforce:aiw-explain <KEY>`.
 
 Optional: suggest the Claude Code status line `"statusLine": { "type": "command", "command": "aiw statusline" }`.

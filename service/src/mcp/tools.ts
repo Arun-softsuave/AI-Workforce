@@ -136,15 +136,15 @@ server.registerTool("aiw_jira_search", {
   return text(items.length ? items.map((i) => `${i.key} [${i.status}] ${i.assigneeName ?? "unassigned"} · ${i.priority ?? "-"} · ${i.title}`).join("\n") : "No issues match.");
 });
 
-server.registerTool("aiw_cost", { description: "Token usage and cost by project, day and task.", inputSchema: { days: z.number().optional() } },
-  async ({ days }) => text(cost(days ?? 7)));
+server.registerTool("aiw_cost", { description: "Token usage and cost by day, ticket, agent and recipe: fresh input vs cache reads, cache-hit rate, alerts, and the model / effort overrides in force.", inputSchema: { days: z.number().optional() } },
+  async ({ days }) => text((await import("../api/ops.js")).costViewText(days ?? 7)));
 
 server.registerTool("aiw_bench_report", {
   description: "Token and cost baseline: the costliest steps, agents and tickets. With runA and runB, compares two benchmark runs ticket by ticket (lower is better; regressions are marked).",
   inputSchema: { runA: z.string().optional(), runB: z.string().optional() },
 }, async ({ runA, runB }) => {
   const B = await import("../bench/benchmark.js");
-  if (runA && runB) return text(B.renderComparison(B.compareRuns(runA, runB)));
+  if (runA && runB) return text(`${B.renderComparison(B.compareRuns(runA, runB))}\n\n${B.acceptSavingRuns(runA, runB).text}`);
   return text(B.renderBaseline(B.baselineReport()));
 });
 
@@ -182,6 +182,15 @@ server.registerTool("aiw_explain", {
   description: "Why an item is where it is: its plan and decisions (design document), the user's answers and feedback, the last steps, rules in force, and what it waits for. Use for \"why did you …\" about a ticket.",
   inputSchema: { ref: z.string() },
 }, async ({ ref }) => text((await (await import("../api/ops.js")).explainItem(ref)).text));
+
+server.registerTool("aiw_adopt", {
+  description: "Finish the user's own branch (engine v2): their commits stay as they are, new commits go on top, a normal push (never forced), their PR keeps its description. target = branch name, PR link or PR number; ticket = the Jira key. Only when the user asks.",
+  inputSchema: { target: z.string(), ticket: z.string().optional() },
+}, async ({ target, ticket }) => {
+  const { startAdoptFromText } = await import("../engine/steps/adopt.js");
+  const t = /^\d+$/.test(target) ? `PR ${target}` : /github\.com/.test(target) ? target : `branch ${target}`;
+  return text(await startAdoptFromText([t, ticket ?? ""].filter(Boolean).join(" "), "claude-code", "mcp"));
+});
 
 server.registerTool("aiw_items", {
   description: "Work items as a tree (sprint → epic → ticket → parts, plus PR and review items), each with its state and the job it runs. all=true includes finished ones; ref shows one item's tree.",

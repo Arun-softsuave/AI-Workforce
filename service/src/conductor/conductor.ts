@@ -31,7 +31,7 @@ const ARGS_SCHEMA = {
   properties: {
     ref: { type: "string" }, refs: { type: "array", items: { type: "string" } }, text: { type: "string" }, query: { type: "string" },
     decision: { type: "string", enum: ["approve", "reject", "answer", "approve_with_change"] }, delegated: { type: "boolean" },
-    action: { type: "string", enum: ["pause", "resume", "cancel", "priority", "takeover", "handback", "undo"] },
+    action: { type: "string", enum: ["pause", "resume", "cancel", "priority", "takeover", "handback", "undo", "revert"] },
     until: { type: "string" }, priority: { type: "number" }, due: { type: "string" },
     scope: { type: "string", enum: ["global", "item", "batch", "epic", "sprint"] }, rule: { type: "string" }, value: { type: "string" },
     key: { type: "string" }, name: { type: "string" }, github: { type: "string" },
@@ -54,14 +54,14 @@ export const CONDUCTOR_SCHEMA = {
 const TOOL_DOC = [
   "Tools (args in brackets; refs are ticket keys like KAN-45, item refs like TASK-7 or PR-90@shop, or PR links):",
   "- find [query]: look up tickets by key, Jira link, name or description, PRs, branches, and old work in the history.",
-  "- preview_scope [ref|text]: what an epic / sprint / batch would contain, before starting it.",
+  "- preview_scope [ref|text]: an epic / sprint / feature / \"all my tickets\": what it contains, then one plan and one approval for the whole scope. Use it for \"sprint 14\", \"the current sprint\", \"all my tickets\", \"build the <epic> epic\".",
   "- start [ref | refs | text, project, takeOver, again]: start work on tickets (refs = EVERY ticket named), or new work without a ticket (text, no ref). A ticket NAME goes in text (code finds it). takeOver=true only after the user agreed to take over someone else's ticket. again=true only if they asked to start over.",
   "- decide [decision, ref, text, delegated]: approve | reject (text = what to change) | answer (text = their answer in full; delegated=true for \"you decide\", \"your call\", \"check the code and choose\") | approve_with_change (\"yes but skip the email part\": text = the change). ref \"all\" with approve = approve everything waiting.",
   "- set_directive [rule, value, scope, ref]: a standing instruction. rules: plan_approval / pr_approval / start_approval / create_issues / create_tickets (value skip | ask), auto_fix_ci / auto_resolve / post_review / no_questions (value true | false), only / dont_touch (value = the area, e.g. \"backend\", \"tests\"), budget_tokens (number). scope item (with ref) for \"this ticket\", global for \"from now on\" / \"always\".",
   "- prefs [key, value | name, github]: settings: pr.draft, pr.autoFixCi, pr.autoReview, pr.autoPostReview, pr.autoQaIssues, workflow.planApproval (always|autonomy|skip), workflow.prApproval (ask|skip), workflow.qaAfterFix, workflow.ticketReport, notifications.quietHours (\"22:00-07:00\" or off), notifications.digestTime, profile.workingHours; team.add / team.remove (name, github).",
-  "- control [action, ref, until, priority, due]: pause | resume | cancel | priority (priority 1 = first; due = ISO date) | takeover (\"stop, I'll do it\") | handback (\"continue KAN-45\") | undo (the last action). No ref = everything.",
+  "- control [action, ref, until, priority, due]: pause | resume | cancel | priority (priority 1 = first; due = ISO date) | takeover (\"stop, I'll do it\") | handback (\"continue KAN-45\") | undo (the last action, or an item's last local step when ref is given). No ref = everything.",
   "- fix_pr [ref | text, mode]: fix your own PR: mode comments (review comments), ci (failing checks), issues (QA issues). text = the message (it holds the PR link or number).",
-  "- review [ref | text]: review a PR (yours or a teammate's). qa [ref | text]: run QA on a PR. adopt [ref | text]: finish your own branch.",
+  "- review [ref | text]: review a PR (yours or a teammate's); also old or merged work, a branch (\"review branch feat/x\"), a commit range, \"is the X epic complete\" and \"QA the X feature KAN-n\" (an audit: one verdict, then \"issues AUDIT-KAN-n\" files follow-ups). qa [ref | text]: run QA on a PR. adopt [ref | text]: finish your own branch (\"finish my branch feat/x\").",
   "- status [ref]: where an item, or everything, stands. explain [ref, query]: why something was done (plan, decisions, history). lookup [query, ref]: a question about the code, a ticket or the product (read-only assistant).",
 ].join("\n");
 

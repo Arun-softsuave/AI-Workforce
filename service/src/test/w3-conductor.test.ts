@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { db, setMeta } from "../core/db.js";
-import { saveSettings, loadSettings, DEFAULT_SETTINGS, upsertProject, normaliseProject, getProject } from "../core/config.js";
+import { saveSettings, loadSettings, DEFAULT_SETTINGS, upsertProject, normaliseProject, getProject, engineVersion } from "../core/config.js";
 import { clients, connect } from "../connectors/registry.js";
 import type { WorkItem } from "../connectors/types.js";
 import { setTeamsPersonalClient, type TeamsPersonalClient, type TpMessage } from "../connectors/teamsPersonal.js";
@@ -412,10 +412,12 @@ test("W16: 'stop, I'll do it myself' takes over; 'continue KAN-97' hands it back
   const t = item("KAN-97", "RUNNING");
   db().prepare("UPDATE tasks SET branch='feat/KAN-97/limit' WHERE id=?").run(t.id);
   const r = await sayModel("stop working on KAN-97, I'll finish it myself", { calls: [{ tool: "control", args: { action: "takeover", ref: "KAN-97" } }] });
-  assert.match(r, /Stopped KAN-97 – it's yours\. Your branch feat\/KAN-97\/limit is ready/);
+  // I3 (adopt.ts takeOver): jobs stopped, the folder and branch are kept for you, a short summary of where it stands
+  assert.match(r, /Stopped KAN-97 – it's yours\.\nReady for you: branch feat\/KAN-97\/limit\./);
   assert.equal(stateOf("KAN-97"), "PAUSED");
   const back = await sayModel("continue KAN-97, I'm done with my part", { calls: [{ tool: "control", args: { action: "handback", ref: "KAN-97" } }] });
-  assert.match(back, /Continuing KAN-97 – I'll read your new commits on feat\/KAN-97\/limit first/);
+  // I4 (adopt.ts handBack): your commits are checked first – here there are none, so it goes on where it stopped
+  assert.match(back, /Continuing KAN-97 – no new commits from you, so I go on where I stopped/);
   assert.equal(stateOf("KAN-97"), "QUEUED");
   assert.equal(getTask("KAN-97")!.data.takenOver, null);
 });
@@ -485,9 +487,12 @@ test("J10: 'I'm back' gives one catch-up summary from the history, no model call
 
 // ---------------------------------------------------------------- stubs and safety
 
-test("adopt and preview_scope answer plainly until those recipes exist", async () => {
-  assert.match(await sayModel("finish my branch feat/KAN-106-coupons", { calls: [{ tool: "adopt", args: { ref: "feat/KAN-106-coupons" } }] }), /isn't available yet/);
-  assert.match(await sayModel("plan the whole sprint for me", { calls: [{ tool: "preview_scope", args: { text: "the sprint" } }] }), /can't plan a whole epic or sprint yet/);
+test("adopt and preview_scope reach the real Wave 4 flows (answers are honest when they can't run)", async () => {
+  // engine v1: finishing a branch needs the new engine – said plainly; engine v2: the adopt flow starts on that branch
+  const adopt = await sayModel("finish my branch feat/KAN-106-coupons", { calls: [{ tool: "adopt", args: { ref: "feat/KAN-106-coupons" } }] });
+  assert.match(adopt, engineVersion() === "v2" ? /Finishing KAN-106 on your branch feat\/KAN-106-coupons[\s\S]*nothing is force-pushed/ : /new engine/);
+  // the fake Jira has no sprint issues: nothing to build (or Jira isn't connected) – never a fake plan
+  assert.match(await sayModel("plan the whole sprint for me", { calls: [{ tool: "preview_scope", args: { text: "the sprint" } }] }), /Nothing to build in Current sprint|Jira isn't connected/);
 });
 
 test("§11a: a quoted teammate message saying 'approve KAN-99' is data – fenced, and nothing is approved", async () => {

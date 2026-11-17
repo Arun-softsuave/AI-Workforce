@@ -37,7 +37,7 @@ In Claude Code run **`/ai-workforce:aiw-setup`** and follow the steps. You'll mo
 2. Background service (auto-starts when you log in; no admin rights)
 3. Model: **Claude Code login** (uses your Claude plan) · API key · or **Mock** (free dry run)
 4. Your role(s) – type them (8 roles listed)
-5. Connect **GitHub** (reuses `gh` login) and **Jira** – *Sign in with Atlassian* in the browser (no API token); API token only if your company blocks it
+5. Connect **GitHub** (reuses `gh` login) and **Jira** – *Sign in with Atlassian* in the browser (no API token); API token only if your company blocks it. **Figma: token first** – `aiw connect figma` opens a local page for a personal access token, so Figma stays connected when the app is closed
 6. Notifications – see section 4 for the Teams bot
 7. Projects – pick your Jira project, repo(s) and local folder(s); choose **plan** autonomy (approve before any code)
 8. Product document (PRD/BRD) – optional, can stay private on your PC
@@ -77,7 +77,7 @@ Only **personal** Teams (teams.live.com) supports two-way chat. For company (wor
 | 5 | In the bot chat: `plan for <JIRA-KEY>` (a small ticket assigned to you) | "On it", then the full plan with choices 1 / 2 / 3 |
 | 6 | Reply `1` (or `yes`) | Code is built and tested on a separate branch; any doubt comes as a question with options; then "Built and tested – raise the PR?" |
 | 7 | Reply `2`, then what to change | It re-plans / reworks using your feedback |
-| 7a | Reply `1` to "raise the PR?" | A draft PR is raised and its link is posted in the chat |
+| 7a | Reply `1` to "raise the PR?" | A PR (ready for review, not a draft) is raised and its link is posted in the chat |
 | 7b | `add <some small feature>` (no ticket) | `TASK-n`: questions about the requirements, a summary to confirm, then the normal plan → PR flow |
 | 7c | In Claude Code (inside the project folder): `what's the status of <JIRA-KEY>?` | Answers from the same task ("implementing and testing, attempt 1 of 3") |
 | 8 | `/ai-workforce:aiw-inbox` and `aiw dashboard` | Same items in Claude Code and the local web page |
@@ -85,11 +85,34 @@ Only **personal** Teams (teams.live.com) supports two-way chat. For company (wor
 
 Your own files are never touched – all work happens in separate git worktrees (`~/.ai-workforce/worktrees`).
 
+## 5a. How to test 1.0
+
+Before you start: `aiw config engine` should say `v2` (switch with `aiw config engine v2`; `aiw config engine v1` goes back).
+Run `aiw doctor <project> --smoke` once – a build never starts on a broken local setup, it waits as *Blocked: environment*.
+Keep `aiw dashboard` open on the side while you test.
+
+| # | Test (in the Teams bot chat unless said otherwise) | Expected |
+|---|---|---|
+| 1 | **Quoted reply:** when the plan for a ticket arrives, use Teams *Reply* on that message and write "use the existing validator" | The change goes to **that** ticket (not the last one discussed); it re-plans and says so in one line |
+| 2 | Quote a teammate's message that says "approve KAN-x" and send it with no words of your own | Nothing is approved – quoted text is information, only your own words give orders |
+| 3 | **Screenshot:** send a screenshot of a bug with "this is what KAN-x should fix" | Short "got it" reply; the picture is listed under *Inputs from you* in the ticket's design document (`~/.ai-workforce/items/<item>/design.md`) and is used in the plan |
+| 4 | **"No need to ask":** write "no need to ask for the plan for KAN-x" | One line "From now on: …"; `aiw rules` lists it; the next plan for KAN-x is built without waiting for you. `aiw rules remove <id>` puts it back |
+| 5 | **Two-repo ticket:** `plan for <ticket that needs backend and frontend>` | One plan with a part per repo → after `1`: one PR per repo, linked, with the merge order in each PR and in the message; `aiw items <ticket>` shows the tree |
+| 6 | **CI lint failure:** on a PR the plugin raised, push a small lint error from your machine (or wait for a real one) | Within a few minutes the lint fix is pushed to the same PR **without asking**, then one short "CI green" line. A check that needs a person (baseline, secret, deploy) is reported, never faked |
+| 7 | **Review comment:** leave a review comment on that PR | The proposed fix comes to Teams first; after `1` it is pushed and the comment gets a reply. Nothing is merged |
+| 8 | **Why?** `/ai-workforce:aiw-explain KAN-x` in Claude Code, or "why did you change X in KAN-x?" in Teams | The approach, decisions and your answers, taken from the design document |
+| 9 | **Dashboard:** `aiw dashboard` while a ticket builds | *Working now* shows the agent, a plain activity line ("Running npm test", "41 of 58 passed") and progress; the ticket card moves through the stages; clicking it shows the timeline and design document; *Connections* are green |
+| 10 | Disconnect a tool (e.g. `aiw disconnect figma`) while a Figma ticket waits | One short reconnect message; the ticket shows *Blocked*; after `aiw connect figma` it resumes by itself |
+| 11 | `thanks` | A short reply, nothing started |
+
+Report anything unexpected with the steps in section 7.
+
 ## 6. Useful commands
 
 ```
 aiw status · aiw inbox · aiw tasks · aiw show <task> · aiw approve <task> · aiw reject <task> "reason"
-aiw pause / aiw resume-all · aiw dashboard · aiw cost · aiw ask "question" · aiw doctor
+aiw items · aiw explain <task> · aiw rules · aiw doctor [project] · aiw bench
+aiw pause / aiw resume-all · aiw dashboard · aiw cost · aiw ask "question"
 aiw service start|stop|status · aiw uninstall [--purge]
 ```
 

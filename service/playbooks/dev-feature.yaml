@@ -7,10 +7,12 @@ steps:
   - context_pack
   - analyse
   - plan
+  - doc_readiness        # W5 6a: a fresh 'goldfish' reads the design document (M: readiness; L / two-repo: + critic); product questions go to you once
   - plan_review
   - plan_gate            # pauses for plan approval (settings.workflow.planApproval: always, or project autonomy = plan)
   - implement_test
   - reviews: { reviewers: [code, security, qa] }
+  - design_check         # C6: frontend with Figma frames only – screenshots vs the frame, at most 2 fix rounds; skipped (no tokens) otherwise
   - propose_memory       # proposed Handbook facts travel inside the PR for team review
   - prepublish
   - report

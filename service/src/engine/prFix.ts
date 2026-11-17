@@ -19,6 +19,7 @@ import { detectCiPipeline } from "../brain/ciPipeline.js";
 import { classifyCheck, checkWord, type CiClass } from "./steps/ciClass.js";
 import { startCiWatch, runCiWatches } from "./steps/ci_watch.js";
 import { AFTER_PR_STEPS } from "./steps/index.js";
+import { noteForPrompt } from "../knowledge/codeNote.js";
 import { jobScoped, runningJob, jobEvents, prOf, jobFolderId } from "./steps/common.js";
 
 /**
@@ -158,6 +159,29 @@ function jobFix(ctx: StepCtx): Record<string, any> | undefined {
     ciRound = Math.max(evRound || 1, pushed + 1);
   }
   return { ...base, ciRound, mode: adaptOnly ? "requests" : base.mode, requests: [...new Set([...(base.requests ?? []), ...requests])] };
+}
+
+/**
+ * The code note of the ticket this fix belongs to (written when it was understood) with its drift check (§9.1):
+ * unchanged → the note is the map, nothing is explored again; changed → only the changed files are listed to re-read;
+ * full / missing → the agent explores as usual.
+ */
+export function codeNoteBlock(ctx: StepCtx): { block: string; status?: string; reason?: string } {
+  const wt = ctx.task.worktree;
+  if (!wt) return { block: "" };
+  const key = ctx.task.data.ticket?.key ?? ctx.task.data.fix?.ticket;
+  const ids = [ctx.task.id, ctx.task.data.fix?.itemId, ctx.task.data.leadId].filter(Boolean) as string[];
+  if (key) {
+    const r = dbHandle().prepare("SELECT id FROM tasks WHERE source_ref=? OR source_ref LIKE ? ORDER BY created_at DESC LIMIT 5").all(key, `${key}@%`) as any[];
+    for (const x of r) if (!ids.includes(x.id)) ids.push(x.id);
+  }
+  for (const id of ids) {
+    const n = noteForPrompt(id, ctx.project.id, wt);
+    if (n.drift.status === "missing") continue;
+    const reason = n.drift.reason;
+    return { status: n.drift.status, reason, block: n.text ?? "" };
+  }
+  return { block: "" };
 }
 
 export const FIX_STEPS: Record<string, (ctx: StepCtx) => Promise<StepResult>> = {
@@ -312,6 +336,9 @@ export const FIX_STEPS: Record<string, (ctx: StepCtx) => Promise<StepResult>> = 
 
   /** Decide every item from the Brain, ticket, PRD and code; ask the developer only for real product decisions. */
   async fix_plan(ctx) {
+    // §9.1 drift check: the code note from when the ticket was understood – unchanged code is not explored again
+    const drift = codeNoteBlock(ctx);
+    if (drift.reason) ctx.save({ codeDrift: { status: drift.status, reason: drift.reason, at: new Date().toISOString() } });
     const d = ctx.task.data;
     const pr: PrReviewInfo = d.prInfo;
     const all: FixItem[] = d.fixItems ?? [];
@@ -333,6 +360,7 @@ export const FIX_STEPS: Record<string, (ctx: StepCtx) => Promise<StepResult>> = 
       d.contract ? `## Contract between the repositories\n${contractText(d.contract)}` : "",
       others.length ? `## Other repositories of this product (read-only, for context)\n${others.map((o) => `- ${o.id}: ${o.local.path}`).join("\n")}` : "",
       `## The pull request #${pr.number}: ${pr.title}\n${untrusted(`pr-description:${pr.number}`, truncate(pr.body, 3000))}\n\n## Its change\n${untrusted("diff", diff)}`,
+      drift.block,
       `## Items to handle (${items.length})\n${list}`,
       (d.feedback ?? []).length ? `## What the developer wants changed in your previous decisions\n${d.feedback.map((x: string) => `- ${x}`).join("\n")}` : "",
       "If a comment asks for something the ticket does not cover (new scope), use action needs_decision, start the question with \"Outside the ticket:\" and offer the options \"Do it in this PR\" and \"Suggest a separate ticket\".",
@@ -373,7 +401,7 @@ export const FIX_STEPS: Record<string, (ctx: StepCtx) => Promise<StepResult>> = 
       // the implementer gets the failing CI output itself, not only the instruction
       ciFailures: items.filter((i) => i.kind === "check" && fixes.some((x: any) => x.n === i.n)).map((i) => truncate(i.body, 8000)),
     });
-    return { status: "ok", note: `${fixes.length} to fix, ${final.length - fixes.length} replies only` };
+    return { status: "ok", note: `${fixes.length} to fix, ${final.length - fixes.length} replies only${drift.reason ? ` · code note: ${drift.reason}` : ""}` };
   },
 
   /** Make the code changes (the normal implement + test loop), only when something needs a change. */

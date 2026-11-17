@@ -25,6 +25,7 @@ import { getTask, type Task } from "../engine/tasks.js";
 import { latestApproval } from "../approvals/approvals.js";
 import { projectForPath } from "../engine/requests.js";
 import { taskDetail, statusText } from "../api/ops.js";
+import { detailsReply } from "../messenger/details.js";
 
 // ---------------------------------------------------------------- fakes: Jira, GitHub, the Teams bot chat, the model
 
@@ -183,11 +184,18 @@ test("ticket from Teams: plan approval -> question while building -> PR approval
   assert.equal(planWait.state, "AWAITING_APPROVAL", planWait.error ?? "");
   assert.equal(latestApproval(planWait.id)!.action, "implement_plan", "the plan is approved first, even in 'prepare' autonomy");
   assert.match(lastMessage(), /Plan ready – PAY-7/);
-  assert.match(lastMessage(), /Steps\*\*\n1\. /);
+  // W5a: the plan is written into the design document; Teams gets its ≤ 10-line summary, "details" gives the whole document
+  assert.match(lastMessage(), /Approach: Implement the requested change/);
+  assert.match(lastMessage(), /Reply "details PAY-7" for the full document/);
   assert.match(lastMessage(), /1️⃣  Approve the plan and build it\n\n2️⃣  Change something \(tell me what\)\n\n3️⃣  Cancel this task/);
   assert.equal(runner.calls.filter((c) => c.agent === "implementer").length, 0, "nothing is implemented before the plan is approved");
-  assert.deepEqual(runner.calls.find((c) => c.agent === "planner")?.lookup, { repo: "acme/shop", codeRepos: ["shop"] }, "the planner may look up linked tickets, PRs and designs");
-  assert.deepEqual(runner.calls.find((c) => c.agent === "analyst")?.lookup, { repo: "acme/shop", codeRepos: ["shop"] });
+  for (const agent of ["planner", "analyst"]) {
+    const l = runner.calls.find((c) => c.agent === agent)?.lookup;
+    assert.deepEqual({ repo: l?.repo, codeRepos: l?.codeRepos }, { repo: "acme/shop", codeRepos: ["shop"] }, `the ${agent} may look up linked tickets, PRs and designs`);
+    assert.equal(l?.itemId, planWait.id, `the ${agent} also gets the knowledge broker for this item`);
+    assert.equal(l?.projectId, "shop");
+  }
+  assert.match(detailsReply("details PAY-7") ?? "", /1\. Locate relevant code/, "the whole plan is one reply away");
   assert.equal(runner.calls.find((c) => c.agent.startsWith("plan-reviewer"))?.lookup, undefined, "reviewers judge only what they are given");
 
   // approvals are Teams-only

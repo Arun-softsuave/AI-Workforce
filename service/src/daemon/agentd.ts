@@ -50,7 +50,8 @@ async function main(): Promise<void> {
   });
   slack.start().catch(() => {});
 
-  let lastPoll = 0, lastLoop = Date.now(), lastHousekeeping = 0, lastGraph = 0, lastBatch = 0, lastEnvCheck = 0;
+  let lastPoll = 0, lastLoop = Date.now(), lastHousekeeping = 0, lastGraph = 0, lastBatch = 0, lastEnvCheck = 0, lastFigma = 0, lastTeam = 0;
+  let scopeDigestDay = "";
   // Code graphs (Graphify): installed once in the background, then refreshed when a repository moves – no AI tokens.
   void (async () => {
     try {
@@ -86,8 +87,30 @@ async function main(): Promise<void> {
     if (now - lastGraph > 15 * 60_000) { lastGraph = now; void import("../brain/graph.js").then((G) => runTimed("Graph refresh", () => G.refreshGraphs())).catch(() => {}); }
     if (now - lastBatch > 5 * 60_000) {
       lastBatch = now;
-      void import("../agents/batch.js").then(async (B) => { if (B.batchAvailable()) await runTimed("Batch calls", () => B.tickBatches()); })
-        .catch((e) => logger.warn("batch tick failed", { error: e?.message }));
+      void import("../agents/batch.js").then(async (B) => {
+        if (!B.batchAvailable()) return;
+        await runTimed("Batch calls", () => B.tickBatches());
+        // O3: rule ideas worded through the Batch API become proposals ("add rule R1" / "skip rule R1")
+        const { collectLearning } = await import("../engine/steps/close_out.js");
+        const { loadProjects } = await import("../core/config.js");
+        for (const p of loadProjects()) await collectLearning(p.id).catch((e) => logger.warn("learning collect failed", { project: p.id, error: e?.message }));
+      }).catch((e) => logger.warn("batch tick failed", { error: e?.message }));
+    }
+    // W13: the Figma frames of active items – one version call per file; a changed frame becomes a design_changed event
+    if (now - lastFigma >= interval) {
+      lastFigma = now;
+      void import("../knowledge/figma.js").then((F) => runTimed("Figma watch", () => F.watchActiveFrames())).catch((e) => logger.warn("figma watch failed", { error: e?.message }));
+    }
+    // W8: one daily digest per active epic / sprint / batch (deduplicated per day)
+    const today = new Date().toISOString().slice(0, 10);
+    if (scopeDigestDay !== today) {
+      scopeDigestDay = today;
+      void import("../engine/steps/scope.js").then((S) => S.sendScopeDigests()).catch((e) => logger.warn("scope digest failed", { error: e?.message }));
+    }
+    // A9: once a week, who joined or went quiet on your repositories (one message, nothing changed without you)
+    if (now - lastTeam > 3_600_000) {
+      lastTeam = now;
+      void import("../core/team.js").then((T) => runTimed("Team check", () => T.weeklyTeamCheck())).catch((e) => logger.warn("team check failed", { error: e?.message }));
     }
     if (now - lastEnvCheck > 5 * 60_000) {
       lastEnvCheck = now;
@@ -129,6 +152,8 @@ function registerTimers(s: ReturnType<typeof loadSettings>): void {
     registerTimer("Housekeeping", 3_600_000, "Tidies old data");
     registerTimer("Graph refresh", 15 * 60_000, "Re-reads repositories that changed");
     registerTimer("Environment re-check", 5 * 60_000, "Restarts work that waited for the local setup to be fixed");
+    registerTimer("Figma watch", s.limits.pollMinutes * 60_000, "Design changes in the Figma frames of active work");
+    registerTimer("Team check", "weekly", "Who joined or went quiet on your repositories");
     setNextRun("Digest", nextDaily(s.workflow?.checkupTime));
   } catch (e: any) { logger.warn("timer registry failed", { error: e.message }); }
 }

@@ -1,326 +1,194 @@
-# AI Workforce – Current Architecture (v0.6.9)
+# AI Workforce – Architecture (1.0)
 
-How the plugin works today: what runs where, what happens when a Teams message arrives, how a Jira ticket goes
-from "assigned" to a draft PR, and how PR review / fixing / CI / QA work. Everything below is taken from the code in
-`service/src` and `service/playbooks` (file references in `code font`).
+How the plugin is built: what runs where, how work moves, what keeps it safe and what keeps it cheap.
+Code references are under `service/src`. The full design is in `IMPLEMENTATION-PLAN.md`; the behaviour for 150 real
+situations is in `SITUATIONS.md`.
 
 ---
 
 ## 1. The big picture
 
 ```
-                    ┌──────────────────────── your computer (nothing runs in the cloud) ─────────────────────────┐
-                    │                                                                                             │
-  Microsoft Teams ◄─┼──► Teams bot chat poller ──┐                                                                │
-  (personal, bot    │    every 10 s (30 s idle)  │                                                                │
-   account)         │                            ▼                                                                │
-                    │                    ┌──────────────────┐     ┌───────────────────────┐                       │
-  Jira Cloud ◄──────┼──► intake poller ──►   SQLite state   ◄────►   Engine (scheduler)   │──► AI agents          │
-  GitHub   ◄────────┼──► every 3 min     │   ~/.ai-workforce│     │   tick every 15 s     │    (Claude Agent SDK, │
-  Figma / Notion ◄──┼──── read only      │   /aiw.db        │     │   playbooks + steps   │     your Claude login)│
-                    │                    └──────────────────┘     └───────────┬───────────┘                       │
-                    │                                                         │                                   │
-  Claude Code ◄─────┼──► MCP tools, /aiw-* commands, hooks, `aiw` CLI         ▼                                   │
-  Dashboard ◄───────┼──► local web page (http://127.0.0.1:47821)       git worktrees (one per task)               │
-                    │                                                  ~/.ai-workforce/worktrees/<project>/<task>│
-                    │                                                  temp test DBs (local Postgres / Docker)   │
-                    └─────────────────────────────────────────────────────────────────────────────────────────────┘
+          ┌──────────────────────────── your computer (no cloud server) ────────────────────────────┐
+          │                                                                                         │
+ Teams ◄──┼─► Messenger ◄── fast path (rules) ◄── Conductor (one model call) ◄── your message        │
+          │        ▲                                   │ tools                                      │
+ Jira  ◄──┼─► intake ─► events ─► reactions ─► jobs (mailbox) ─► scheduler ─► runner ─► steps       │
+ GitHub◄──┼─► (ETag / 304)          (data)        one per item     (code)       recipes   agents    │
+ Figma ◄──┼─► knowledge: context cache · design document · Brain · Graphify graph · ask-desk         │
+          │                                                                                         │
+          │   policy gate (every push, PR, comment, issue, Jira write)  ·  SQLite ~/.ai-workforce/aiw.db │
+ Claude ◄─┼─► /aiw-* commands · MCP tools · hooks · `aiw` CLI · dashboard http://127.0.0.1 (token)  │
+ Code     └─────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-| Part | What it is | Code |
+Three rules shape everything:
+1. **Code drives, agents decide.** Polling, events, scheduling, gates, merge order and messages are plain code with
+   no model calls. Agents only read, write code and choose among fixed options (structured output).
+2. **Outside text is data, never orders.** Only your typed Teams messages, the dashboard and the CLI on this computer
+   can start, approve, cancel or change rules (§7).
+3. **Nothing leaves the machine without the gate.** Never merge, never force-push, never push to main/dev, hooks always
+   run, secrets only in the OS vault, no AI mention anywhere.
+
+| Part | Job | Code |
 |---|---|---|
-| **Background service** `aiw-agentd` | One Node process per computer; auto-starts at login. Owns the scheduler, pollers and the local API (port 47821) | `daemon/agentd.ts`, `daemon/service.ts` |
-| **State** | SQLite database: tasks, steps, approvals, events, notifications, chat log, meta | `core/db.ts`, `engine/tasks.ts` |
-| **Config** | `~/.ai-workforce/config/settings.yaml` (you) and `projects.yaml` (Jira key ↔ repo ↔ local folder) | `core/config.ts` |
-| **Secrets** | OS credential vault only (Windows Credential Manager), long values chunked – never in files or `.env` | `core/secrets.ts` |
-| **Brain** | Per-project code map, conventions, Handbook (facts/lessons), PRD/BRD documents, past-task diaries | `brain/*` |
-| **Engine** | Picks queued tasks, runs their playbook step by step, stops at questions/approvals | `engine/engine.ts`, `engine/steps.ts` |
-| **Agents** | 27 role prompts with JSON output schemas, run on 3 model tiers | `agents/catalog.ts`, `agents/runner.ts` |
-| **Connectors** | Jira (Atlassian sign-in), GitHub (`gh` login/token), Teams (personal, Graph), Figma (token), Notion (sign-in) | `connectors/*` |
-| **Notifications** | One router; "exclusive" mode sends everything to the Teams chat only; inbox always records | `notify/router.ts`, `notify/channels.ts` |
-| **Claude Code side** | Plugin: slash commands, MCP server, SessionStart / UserPrompt hooks, status line | `commands/`, `mcp/`, `hooks/` |
-
-**Model tiers** (`settings.yaml → models`, provider `claude-login` = your Claude Code plan):
-small = `claude-haiku-5-5` (triage, intent, short reports) · medium = `claude-sonnet-5-5` (implementer, reviewers, planner)
-· large = `claude-opus-5-5` (lead, PR reviewer, comment resolver). `mock` runs everything offline for tests.
-
-**Your current settings** (verified): maxParallel 3 tasks, maxPerProject 2 builds, poll every 3 min, ask before
-starting size-L, 3 implement attempts, 2 review rounds, plan approval **always**, decisions **only in Teams**,
-notifications **exclusive to teams-personal**, question rounds 4, working hours 11:00–22:00 IST.
+| Service `aiw-agentd` | One Node process, starts at login; timers, pollers, local API | `daemon/` |
+| State | SQLite (`node:sqlite`, WAL): items, jobs, events, steps, approvals, decisions, directives, docs, chat log | `core/db.ts` |
+| Kernel | Items, events, reactions, mailbox, scheduler, runner, recipes | `kernel/` |
+| Conductor | Understands your Teams messages and calls tools | `conductor/` |
+| Messenger | Short messages, merging, quiet hours, digest, "details" | `messenger/` |
+| Knowledge | Design documents, Figma exact values, your pictures and files, context cache | `knowledge/`, `agents/lookup.ts` |
+| Brain | Code map, Graphify graph, Handbook, rules card, search index, diaries | `brain/` |
+| Policy | Gate, directives, untrusted-text handling | `policy/` |
+| Dashboard | Live page, SSE stream, plain-English activity | `api/`, `live/`, `service/web/` |
+| Cost | Effort per step, tiers, caches, batch API, budgets, benchmark | `agents/`, `engine/budget.ts`, `bench/` |
 
 ---
 
-## 2. The two background loops
+## 2. Kernel (engine v2)
 
-`daemon/agentd.ts` starts two timers:
+The kernel runs every piece of work. `engine.version` picks it (`aiw config engine v1|v2`); v1 is the old task engine,
+kept until every flow passes on v2.
 
-| Timer | Interval | Does |
-|---|---|---|
-| **Main loop** | every 15 s | `pollAll()` when the poll interval (3 min) has passed, then `tick()` |
-| **Teams loop** | every 10 s (30 s when you haven't chatted for 10 min) | `pollTeamsCommands()` – read new chat messages and answer |
+- **Items** (`kernel/items.ts`) – a work item is a `tasks` row with a level (`sprint`, `epic`, `batch`, `ticket`, `part`, `request`, `pr`, `branch`, `audit`),
+  a parent and root, areas it touches, an owner and a due date. Two-repo tickets are a ticket with one `part` per
+  repository. `edges` hold `depends_on` and `stacks_on`; **merge order** is computed from them.
+- **Events** (`kernel/events.ts`) – everything that happens (ticket changed, CI failed, comment, PR merged, connector
+  down) is one row, de-duplicated by key.
+- **Reactions** (`kernel/reactions.ts`) – a table, as data: event + guard → job type, or "notify / ask / block". Guards
+  read only the event, the item and settings.
+- **Mailbox** (`kernel/mailbox.ts`) – one active job per item; new work waits as queued jobs, and repeats fold into
+  one (ten CI failures before the fix starts give one fix job).
+- **Scheduler** (`kernel/scheduler.ts`) – pure code. Holds a job with a plain reason: paused, blocked, connector down,
+  budget, waiting for its current job, waiting for another ticket (waves), same area, repo limit, all slots busy.
+  Starts by priority, due date, then age.
+- **Runner + recipes** (`kernel/runner.ts`, `kernel/recipes.ts`) – a recipe is an ordered list of steps. Every v1
+  playbook is a recipe of the same name; the after-PR recipes live in `service/recipes/*.yaml` (`ci_fix`,
+  `comment_fix`, `ci_watch`, `rebase`, `replan`, `close`). Step functions keep one contract (`StepCtx` in,
+  `StepResult` out): `engine/steps.ts` and `engine/steps/*.ts`.
 
-**`pollAll()`** (`intake/intake.ts`)
-1. **Jira** – tickets in the configured projects. A ticket newly assigned to you (not Done) → `assigned` event → a task
-   in `DETECTED`. Also: unassigned / closed / status changes, epics for a business-analyst role. Many new tickets at
-   once (> `burstThreshold` 5) → "7 new tasks arrived at once", each waits in `AWAITING_START`.
-2. **GitHub CI** (`pollCi`) – failed Actions runs on `aiw/*` branches (+ base branch for devops) → `ci_failed` task.
-3. **PR activity** (`pollPrActivity`) – new comments/reviews on PRs this plugin raised → told in Teams.
-4. **Reviewed PRs** (`pollReviewedPrs`) – a PR you reviewed got new commits → told in Teams.
-5. **CI watches** (`pollCiWatches`) – PRs whose fixes were pushed: green → "✅ CI passes"; red → next fix round.
-6. Daily digest / 10:00 check-up.
+**A ticket, end to end (`build`):** understand → plan → goldfish checks on the design document (M/L) → plan approval
+(per your rules) → environment doctor → implement + test → reviews (code, security, QA in parallel) → report →
+PR approval (per your rules) → normal PR → `ci_watch`. After the PR: CI failure → `ci_fix` (pushed without asking,
+3 rounds, checks that need a person are never faked) · review comments → `comment_fix` (shown first unless your rule
+says otherwise) · base moved or conflict → `rebase` (merge commit, never a force-push) · ticket or Figma changed →
+`replan` · merged → `close` (dependents start, stacked PRs re-targeted, worktree cleaned).
 
-**`tick()`** (`engine/engine.ts`) – the scheduler
-1. Expire approvals older than 72 h → `STALE`.
-2. Paused (holidays)? stop here.
-3. `DETECTED` tasks → **triage**.
-4. Wake lead tasks whose parts are ready.
-5. Start `QUEUED` tasks, up to **3 at once**; build steps (`implement_test`, `reviews`, `prepublish`, `report`) at
-   most **2 per repository**. Planning only reads code, so it never waits for a build slot.
-
----
-
-## 3. When you send a message in the Teams bot chat
-
-```
- Teams message
-      │
-      ▼
- pollTeamsCommands  (intake/teamsCommands.ts)
-   • only messages from the configured owner; never the bot's own
-   • each message handled once (seen-key), max 10 per poll, logged to chat_log (secrets blanked)
-   • "qa token …" → saved straight into the OS vault, never shown back
-      │
-      ▼
- exact command? ("status", "inbox", "help", "approve KAN-42@nue-backend" …) ──yes──► executeCommand
-      │ no
-      ▼
- handleChatMessage  (intake/teamsIntent.ts)
-   1. a follow-up we are waiting for?  ("What should I change?" → your text is the feedback;
-      "Here's what I understood… reply yes" → yes runs the actions)
-   2. word rules – ONLY short replies (≤ 12 words / 90 chars):
-        "1" / "yes" / "go ahead"  → approve the item in focus
-        "2" / "no – use X"        → reject with feedback       "3" / "cancel" → cancel
-        "start KAN-47", "status of KAN-52", "resume", "review PR 90", "fix PR 134", "PR 134 CI failed, fix it",
-        "QA PR 90", "fix the QA issues on PR 90", "post 1, 3", "create 1, 3", "give me the PDF of KAN-52"
-   3. otherwise Claude reads it ("intent" agent, medium tier) WITH the last 20 chat messages, the item in focus
-      and every waiting question/approval. It may return several actions from one message.
-        • approve / reject / cancel, or 2+ actions → repeated back first: "Here's what I understood … reply yes"
-        • one safe action (start, status, review, fix, QA, report) → done at once
-   4. nothing actionable → the read-only assistant answers the question from the Brain, the code and Jira
-      │
-      ▼
- reply posted FIRST (holdTicks), then the background work it started may send its own messages
-```
-
-**Intents** the chat understands (`IntentName`): `start_ticket` (one or many keys), `start_request` (work without a
-ticket), `approve`, `reject`, `answer` (incl. "you decide" = delegated), `cancel`, `status`, `resume`, `review_pr`,
-`resolve_comments`, `fix_ci`, `fix_qa`, `qa_pr`, `send_report`, `question`.
-
-**Focus**: the last item the bot asked about (or you named). A bare "1" or "yes" goes to that item.
-Approve/reject/cancel never happen when it is unclear which item is meant – the bot asks instead.
-
-**Decisions only in Teams**: `decisionRefused()` refuses approvals/answers from Claude Code, the CLI or the dashboard
-when `decisionsVia: primary` and the primary channel is Teams. Status, reports and starting work are allowed anywhere.
-
-**Message format**: sections with bold headings and blank lines; options as spaced keycap numbers 1️⃣ 2️⃣ 3️⃣ with
-⭐ on the recommended one (personal Teams has no buttons); long messages split at section boundaries.
+**Two repos:** one plan, one contract, one part per repo built in the decided order, an integration check, then one
+PR per repo with the merge order in each PR and message.
 
 ---
 
-## 4. Task lifecycle (states)
+## 3. Conductor (your Teams messages)
 
-```
-DETECTED ─triage─► TRIAGED ─┬─► NEEDS_INFO ──(you answer)──► DETECTED / QUEUED
-                            ├─► AWAITING_START ──("start")──► QUEUED          (size L, or a burst of tickets)
-                            └─► QUEUED ─► RUNNING ─┬─► NEEDS_INFO          (a step asked a question)
-                                                   ├─► AWAITING_APPROVAL ─┬─ approved ─► QUEUED ─► RUNNING (publish)
-                                                   │                      ├─ rejected ─► REJECTED ─► QUEUED (re-run with feedback)
-                                                   │                      └─ 72 h / code changed ─► STALE
-                                                   ├─► WAITING_PARTS / PART_READY / ASKING_LEAD   (multi-repo)
-                                                   ├─► PAUSED  (conflict, budget, broken env with untestedWork=pause)
-                                                   ├─► FAILED  (retried a few times first)
-                                                   └─► DONE
-```
-Every step result is one of: `ok` (next step) · `need_info` (ask you) · `await_approval` · `wait` · `pause` · `fail` ·
-`done` · `retriage`. A task resumes **at the step that stopped** – an answered question re-runs only that step.
+1. **Fast path** (rules, no model): "1", "yes", "thanks", "status KAN-45", "details KAN-45" – answered in under a second.
+2. **Conductor** (`conductor/conductor.ts`, one medium-tier call): a cached prefix (instructions, tools, your
+   preferences, rules in force, team, projects) + one line per active item + the last 20 chat turns. It answers with
+   tool calls: `find`, `start`, `decide`, `set_directive`, `prefs`, `control`, `fix_pr`, `review`, `qa`, `adopt`,
+   `status`, `explain`, `lookup`, `preview_scope`. Code runs them; destructive or unclear calls come back as one
+   short question.
+3. **Quoted replies, pictures and files** (`knowledge/inputs.ts`): a quoted bot message points at its item; a
+   screenshot or file is stored, described once and added to the item's design document as an input.
+4. **Directives** (`policy/directives.ts`): "no need to ask for KAN-45", "only backend", "don't touch tests". Stored
+   per scope (item > batch > epic > sprint > global > settings), echoed once, listed by `aiw rules`.
 
 ---
 
-## 5. A Jira ticket from start to PR (single repository)
+## 4. Messenger (what reaches Teams)
 
-**Trigger**: a ticket assigned to you in Jira (seen within ~3 min), or "work on KAN-42" in Teams, or
-`/aiw-run KAN-42` / `aiw_run_ticket` in Claude Code. Several keys in one message start them all in parallel.
-
-**Triage** (`triageTask`, small model): size S/M/L, clear or not, questions. Unclear → questions in Teams first.
-Size L → "start this size-L task?" first. Playbook: `dev-small-change` (S) or `dev-feature` (M/L);
-with plan approval "always" every ticket gets a plan approval.
-
-**Playbook `dev-feature`** (`playbooks/dev-feature.yaml`):
-
-| # | Step | What happens | You see in Teams |
-|---|---|---|---|
-| 1 | `prepare_workspace` | Fresh **git worktree** from the latest base branch (`dev`), branch named by the team's convention (e.g. `feat/KAN-42/slug`); test profile detected/refreshed; disk check | – |
-| 2 | `context_pack` | Brain context: Handbook facts, PRD sections, past tasks, code map hits; ticket links: **Figma** frame (from the link, or the default file's frame named after the ticket), **Notion** pages | – |
-| 3 | `analyse` | **Explorer** finds the relevant code (code graph first); **analyst** turns ticket + code into requirements and acceptance criteria. Only real product decisions become questions | Questions with options, if any |
-| 4 | `plan` | **Planner**: steps, files, tests, risks | – |
-| 5 | `plan_review` | Independent **plan reviewer**; one re-plan round if it finds gaps | – |
-| 6 | `plan_gate` | **Approval 1 – `implement_plan`** | "📋 Plan for KAN-42" → 1️⃣ build 2️⃣ change 3️⃣ cancel |
-| 7 | `implement_test` | **Implementer** (only agent that writes code) in the worktree → commit (team format, no AI mention) → project lint/format/type checks → **tests run by the plugin**: targeted test files for the change, on a **temporary database** (never the `.env` DB). Up to 3 attempts, test output fed back. Questions stop and ask | Questions, if any |
-| 8 | `reviews` | Code, security and QA reviewers (fresh context, only ticket + plan + diff); up to 2 fix rounds; leftovers flagged | – |
-| 9 | `propose_memory` | Facts/lessons proposed to the local Handbook (unverified) | – |
-| 10 | `prepublish` | Rebase on latest base; hard rules: no Claude/AI mention in code, commits or authors; secret scan; protected paths (CI/infra) flagged; diff size | – |
-| 11 | `report` | Frontend: screenshots (desktop + mobile) of changed pages from the live local stack; **reporter** writes PR title/body from the team's PR template | – |
-| 12 | `request_approval` | **Approval 2 – `create_pr`**, bound to repo, branch, base SHA, head SHA and diff hash | "✅ KAN-42 built and tested – raise the PR?" with files, tests, reviews, cost |
-| 13 | `publish` | Binding re-checked (any change → STALE); push branch; **draft PR to `dev`**; screenshots on branch `pr-screenshots/<KEY>`; never merged | "🚀 PR #… raised (draft)" + link |
-| 14 | `ticket_report` | PDF report (flow, contract, timeline diagrams) built with Edge headless, shared via OneDrive link | PDF link |
-| 15 | `record_memory` | Task diary + memory for next time | – |
-
-`dev-small-change` is the same without `analyse` / `plan_review` and with one combined reviewer.
-
-**Rejecting** ("2" + what to change): the feedback is stored and the task re-runs from the plan (or from
-implementing for the fast lane); the new plan/result comes back for approval.
+`messenger/` sits inside the notification router:
+- **Short templates** – at most 10 lines; the rest behind "details KAN-45" (questions are never shortened).
+- **60 s merging** of routine updates about the same item.
+- **Quiet hours** – non-urgent messages held, then one catch-up message.
+- **Morning digest** – ≤ 10 lines: done, in progress, waiting on you, blocked, merge next, connections.
+- **Connector health** (`intake/health.ts`) – a cheap check per tool every 5 minutes; a tool that goes down blocks only
+  the work that needs it and sends one reconnect line (repeated at most every 6 h); work resumes on reconnect.
 
 ---
 
-## 6. A ticket that spans several repositories (frontend + backend)
+## 5. Knowledge
 
-Projects grouped as one product (`nue-frontend` + `nue-backend`) get **one lead task** (`dev-lead`) and one **part
-task** per repository (`dev-part`):
-
-```
-lead: understand ─► contract ─► lead_plan ─► plan_review ─► plan_gate (ONE plan approval)
-         │  reads ticket + Brain + code of EVERY repo; decides which repos change and the order
-         ▼
-      run_parts ── starts part tasks (backend-first / frontend-first / parallel) ── WAITING_PARTS
-         │           part: prepare_workspace → context_pack → implement_test → reviews → prepublish → report → part_ready
-         │           a part's question goes to the lead (ASKING_LEAD); the coordinator answers from code + contract;
-         │           only product decisions reach you
-         ▼
-      integration_check  (both diffs + contract + each repo's tests; mismatches sent back to the parts, ≤ 2 rounds)
-         ▼
-      request_approval (ONE PR approval for all repos) ─► publish_parts (one draft PR per repo, linked to each other)
-         ▼
-      ticket_report ─► record_memory
-```
+- **Design document** (`knowledge/designDoc.ts`) – one per item at `~/.ai-workforce/items/<item>/design.md`, outside
+  the repo, never pushed, every version recorded in `docs`. Sections: problem and goal, acceptance criteria, how the
+  system works today, approach, alternatives rejected, files, contract, decisions, tests, inputs from you, open
+  questions. It is the source of truth: understand and plan write it, **goldfish checks** (fresh sessions that see only
+  the document) test it before code is written, every later step and restart starts from it, and `aiw explain` shows
+  it. The Claude Code helper agents (`aiw-planner`, `aiw-reviewer`, `aiw-memory-keeper`) read and write the same file.
+- **Ask-desk** – an agent's question goes to the knowledge service first (Brain, graph, code, earlier decisions); only
+  product decisions reach you, and every answer is written into the document.
+- **Context broker** (`agents/lookup.ts`, `context_cache`) – Figma frames, tickets, PRs and code notes fetched once per
+  source version. Figma values are kept exact (`knowledge/figma.ts`), never condensed.
+- **Brain** (`brain/`) – code map, Graphify code graph (no tokens), Handbook facts (verified / unverified), a short
+  rules card of the team's own conventions, FTS search, task diaries.
 
 ---
 
-## 7. Work without a ticket
+## 6. Dashboard
 
-"add a CSV export to the orders page" → `start_request` → playbook `dev-request`:
-`requirements_interview` (questions round by round, up to 5) → `requirements_confirm` (**approval**: "is this what you
-want?") → `requirements_handoff` → the task is re-triaged and continues exactly like a Jira ticket (§5/§6).
+`aiw dashboard` opens `http://127.0.0.1:<port>/?t=<token>` – this computer only, host-checked, CSP `'self'`, no secrets
+sent to the page. Producers call `live.publish` (`live/bus.ts`); `GET /api/stream` (Server-Sent Events) sends a snapshot,
+then small deltas. Activity lines come from fixed rules (`live/activity.ts`: "Running npm test", "41 of 58 passed"),
+no model. Sections: Needs you · Working now · Ticket progress (one bar per repo) · ticket drawer (timeline, design
+document, merge order) · Activity · Agents and queue reasons · Background timers · Connections · Cost. Actions on the
+page go through the same gate as Teams and are echoed there.
 
 ---
 
-## 8. Pull-request flows (any developer, any project)
+## 7. Policy and untrusted text
 
-PRs are found from a link, "PR 90 [repo]", a ticket key (local tasks → GitHub search → branch names) or a person
-("Eric's PR") – `engine/targets.ts`.
+- **Gate** (`policy/gate.ts`) – every push, PR, comment, issue and Jira write asks here. Order: hard rails (never merge,
+  force-push, push to main/dev, secrets, orders from outside text) → protected paths (always your OK) → directives →
+  settings. The gate never reads model text to decide. Approvals are bound to the exact commit.
+- **Untrusted text** (`policy/untrusted.ts`) – Jira, PR and issue comments (also teammates'), commit messages, Figma,
+  documents and text inside images are cleaned (hidden HTML, comments, zero-width text) and passed to agents as marked
+  data. Text that tries to give orders is flagged in the activity feed. Agents can't reach the tools that approve,
+  merge, change rules or message new places.
+- **Environment doctor** (`engine/envDoctor.ts`) – before every build (cached 1 h): versions, packages, `.env` key
+  **names**, database, services, optional smoke test. A broken environment means **Blocked: environment**, not a
+  failed build.
 
-### 8a. Review a PR – `pr-review` (yours or a teammate's)
-`fetch_pr` (PR, files, CI state, existing comments, the Jira ticket and its comments, PRD/Brain) → `review_pr`
-(**PR reviewer**, large model: correctness, requirements check against the ticket/PRD, line comments only on
-commentable lines) → `review_gate` (**shown first**: verdict + every comment; "post", "post 1, 3", "drop 2",
-"change 2: …") → `post_review` (posted as a plain **COMMENT** review – never approve / request-changes).
-Later commits by the author → "X pushed new commits to PR #… you reviewed".
+---
 
-### 8b. Fix your own PR – `pr-fix`
-Only the PR's author (or a PR this plugin raised). Modes: **comments** (review threads + general comments +
-failing CI checks), **ci** (failing checks only), **issues** (GitHub issues QA created).
+## 8. Cost
 
-| Step | What happens |
+| Control | How |
 |---|---|
-| `fix_prepare` | Open review threads not yet answered by you, general comments, **failing CI checks of the PR's head commit with the failing step, its command and the end of its log** (and whether it also fails on the base branch); PR branch checked out in its own worktree. Nothing open and CI still running → watch CI; nothing at all → "👍 Nothing to fix" |
-| `fix_plan` | **Comment resolver** (large) decides each item from the code, ticket and PRD: fix / answer / disagree / other repository / your decision / skip. External CI causes (quota, outage) → explained, not "fixed" |
-| `fix_apply` | Normal implement + checks + tests loop; the CI log is given to the implementer |
-| `fix_review` | Combined reviewer |
-| `fix_gate` | **Shown first** – per item what was done and the reply text, changed files, test result. Approval `push_fixes` |
-| `fix_publish` | Rebase onto the PR branch if it moved (never force-push), push to the **same PR**, reply under each thread, then **QA starts** (comments mode) and **CI is watched** |
-
-**CI watch** (`pollCiWatches`): all checks on the pushed commit pass → "✅ CI passes on PR #…"; a check fails →
-next fix round in `ci` mode (shown first again), at most 3 rounds; still red or running > 3 h → "please take a look".
-
-### 8c. QA a PR – `pr-qa` (also runs automatically after fixes are pushed)
-`qa_prepare` → `qa_plan` (**QA planner**: risk, areas, test files, browser checks) → `qa_run` (targeted tests on a
-temporary DB; browser checks against the live local app when a session exists) → `qa_triage` (every failure
-classified: product bug / test bug / flaky / environment) → `qa_gate` (**shown first** with issue drafts:
-"create 1, 3", "create all", "report only") → `qa_publish` (report comment on the PR + GitHub issues you chose).
+| Stable prefixes | role + tools → rules card + Brain → item slice → step input; prompt cache serves the first parts; `cache_read` recorded |
+| Model tiers | small (Haiku 5.5) for triage, distilling, CI and comment classification; medium (Sonnet 5.5) for Conductor, reviews, fixes; large (Opus 5.5) only for understand / plan / implement on M/L work |
+| Effort per step | set explicitly: low for triage, medium for review and fixes, high for M/L planning and implementing |
+| Small tool outputs | tests, lint, CI logs and diffs return failures and the first error only (`agents/tools/compact.ts`) |
+| Short sessions | each step is its own session starting from the design document; one model per job (keeps the cache) |
+| Fetch once, never pay twice | `context_cache`, `agent_cache`, the decision log |
+| Batch API | non-urgent single calls (handbook, rules card, close-out learning, digests) at half price (`agents/batch.ts`) |
+| Budgets | per item, scope and day; 80 % warning |
+| Measured | `aiw cost`; `aiw bench` baseline, runs and comparisons gate every release |
 
 ---
 
-## 9. Testing on this computer (any project)
-
-**Test profile** (`engine/testProfile.ts`, detected by the stack-profiler agent, refreshed every 14 days, override in
-`projects.yaml → qa.profile`): how to start, build, migrate and test the repo, which env vars hold the database /
-cache, the login endpoints, and settings that must be switched off against a shared DB.
-
-**Databases** (`engine/localStack.ts`):
-- **Test suites always get a temporary database**: a local Postgres (saved `qa.<p>.dbUrl` or the `.env` login on a
-  local host) → otherwise Docker (pgvector image when needed). Dropped afterwards. **Never the `.env` database.**
-- **Running the app** (screenshots / browser QA): the `.env` database first if it accepts `SELECT 1`, with quiet
-  settings (background workers off, email stubbed); otherwise a temporary one.
-- Cache: `.env` → local 6379/6380 → Docker valkey. Docker Desktop is started when needed. Free ports always.
-
-**Sign-in for live checks** (`engine/qaSession.ts`): saved session → refresh token → demo account + TOTP (RFC 6238) →
-ask **once** in Teams ("qa token …"); no session → the check is marked "not tested locally" and the work continues.
-
-**Targeted tests**: test files changed by the task + tests named after changed modules; the whole suite only when none
-match. pytest results read from JUnit XML; "only the coverage minimum failed" on a partial run counts as passed.
-
----
-
-## 10. Safety rules built into the code
-
-- Local only; secrets only in the OS vault; tokens blanked in chat logs and messages.
-- Nothing outward without your approval: plan, PR, review comments, pushes, replies, GitHub issues – all **shown first**.
-- Approvals bound to the exact commit/diff; any change → STALE. First decision wins.
-- Draft PRs to `dev` only; **never merges**; never force-pushes; never resolves review threads.
-- No Claude/AI mention in code, commits, authors or PR text (checked in `prepublish` / `fix_publish`).
-- Secret scan on every diff; CI/infra/Docker paths flagged for extra attention.
-- Each task in its own worktree – your own checkout is never touched.
-- Backend tests never run against a shared or `.env` database.
-
----
-
-## 11. Claude Code integration
-
-- **Slash commands**: `/aiw-setup` (onboarding), `/aiw-status`, `/aiw-inbox`, `/aiw-tasks`, `/aiw-run`, `/aiw-pr-review`,
-  `/aiw-fix`, `/aiw-qa`, `/aiw-brain`, `/aiw-connect`, `/aiw-project`, `/aiw-cost`, `/aiw-pause`, `/aiw-dashboard`,
-  `/aiw-approve`, `/aiw-reject` (the last two are refused while decisions are Teams-only).
-- **MCP tools** (`mcp/tools.ts`): status, inbox, list tasks, task report, run ticket, start request, review PR,
-  Brain ask/summary/add-doc, Jira search, cost, pause, task control.
-- **Hooks**: SessionStart shows what is waiting; UserPromptSubmit routes "work on KAN-42" in a project folder to the
-  workforce instead of coding inline; status line shows counts.
-- **CLI** `aiw`: `status`, `inbox`, `tasks`, `show`, `review|fix|qa <PR>`, `qa account|token|env|database`, `service
-  start|stop`, `dashboard`, `cost`, `pause`, `doctor`, `uninstall`.
-
----
-
-## 12. Where things live
+## 9. Where things live
 
 ```
 ~/.ai-workforce/
-  aiw.db                       tasks, steps, approvals, events, notifications, chat log, meta
-  config/settings.yaml         your settings          config/projects.yaml   projects + figma.fileKeys + qa
-  projects/<id>/               code-map.json, test-profile.json, task diaries
-  worktrees/<project>/<task>/  one git worktree per task (removed when done)
-  logs/aiw-agentd.log          service log
-<repo>/.ai-workforce/knowledge Handbook facts (local, never committed into PRs)
-OS credential vault            GitHub/Jira/Figma/Teams tokens, qa.<project>.* test logins and sessions
+  aiw.db                      items, jobs, events, steps, approvals, decisions, directives, docs, chat log
+  items/<item>/design.md      design document per item (never pushed)
+  config/settings.yaml        your settings and preferences      config/projects.yaml   projects and groups
+  projects/<id>/              code map, graph, test profile, diaries
+  worktrees/<project>/<item>/ one git worktree per item – your own checkout is never touched
+  logs/aiw-agentd.log         service log
+<repo>/.ai-workforce/knowledge Handbook (yours to commit and share)
+OS credential vault           every token and test login
 ```
+
+Claude Code side: `commands/` (slash commands), `skills/` (onboarding, Brain), `agents/` (planner, reviewer,
+memory keeper), `.mcp.json` (MCP tools such as `aiw_status`, `aiw_items`, `aiw_explain`, `aiw_rules`, `aiw_doctor`,
+`aiw_bench_report`), `hooks/` (SessionStart inbox, prompt routing), `bin/` (`aiw`).
 
 ---
 
-## 13. Known limits (as of 0.6.9)
+## 10. Known limits
 
-- **The service must be running** (`aiw service start`); it auto-starts at login. While it is stopped nothing is polled
-  and Teams messages wait until it starts.
-- Two-way chat needs **personal** Teams (teams.live.com) with a separate bot account; work Teams is one-way webhook.
-- Local tests are **targeted**, not the whole suite; CI remains the full check – which is why pushes are followed by
-  the CI watch.
-- CI checks that need special data or paid model calls (e.g. a regression replay that needs a re-baseline, a live
-  model eval with an exhausted quota) can be diagnosed and explained, but the fix flow can't regenerate such artefacts
-  by itself; it asks you.
-- Screenshots / live browser QA need a saved test session; without one they are marked "not tested locally".
-- Figma frame search needs the Figma API token mode.
+- Work runs only while the computer is on and the service is running; after sleep it catches up.
+- Two-way chat needs personal Teams (teams.live.com) with a separate bot account; work Teams is a one-way webhook.
+- Local tests are targeted; CI stays the full check, which is why every push is watched.
+- CI checks that need a person (a new baseline, a paid evaluation, a secret, a deployment) are explained, never faked.
+- Not supported: Jira Server / Data Center, GitLab, Bitbucket, Azure DevOps.

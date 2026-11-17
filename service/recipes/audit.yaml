@@ -1,0 +1,9 @@
+name: audit
+title: Review old work (W15) – a merged ticket, an epic, a branch or a commit range against its criteria and today's code; never comments on a PR
+job: audit
+steps:
+  - audit_find            # ⚙ the ticket(s) and criteria; PRs and commits by key (GitHub search, git log --grep, branch names); later commits to the same files. A branch / range: the diff against its base
+  - audit_review          # 🔵 auditor: each criterion × the work × today's code → met / partial / missing / regressed (verdict by code)
+  - name: audit_qa        # H7: the project's tests on today's code (only when asked, e.g. "QA the refunds feature")
+    when: data.audit.qa
+  - audit_report          # ⚙ one short verdict; details and GitHub issues only on request

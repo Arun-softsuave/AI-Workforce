@@ -7,6 +7,7 @@ steps:
   - context_pack          # + the shared contract, this part's plan and what the other parts already built
   - implement_test        # questions go to the lead (not the user); the lead asks the user only for product decisions
   - reviews: { reviewers: [code, security, qa] }
+  - design_check         # C6: frontend with Figma frames only – screenshots vs the frame, at most 2 fix rounds; skipped (no tokens) otherwise
   - prepublish
   - report
   - part_ready            # waits for the lead (integration check, one PR approval, publish)

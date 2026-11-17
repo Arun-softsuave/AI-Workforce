@@ -32,6 +32,10 @@ import { stripAttribution, attributionHits, attributionInDiff, NO_ATTRIBUTION_RU
 import { captureScreenshots, screenshotsLine, withScreenshots } from "./screenshots.js";
 import { isPythonBackend, findPython, profileTestCommand, testEnvironment, testsNeedDatabase, testsForChange, withResults, testRunPassed } from "./localStack.js";
 import { ensureProfile, profileOf } from "./testProfile.js";
+import { writePlan, writeUnderstanding, writeContract, docBlock } from "./steps/design_doc.js";
+import { readDoc as readDesignDoc } from "../knowledge/designDoc.js";
+const docVersion = (id: string) => { try { return readDesignDoc(id)?.version ?? 0; } catch { return 0; } };
+import { writeCodeNote } from "../knowledge/codeNote.js";
 
 /** tokensIn = freshIn + cacheRead + cacheWrite (the split is also written to the running step row call by call). */
 export interface Usage { tokensIn: number; tokensOut: number; cost: number; agents: string[]; model?: string; freshIn?: number; cacheRead?: number; cacheWrite?: number; effort?: string }
@@ -67,6 +71,23 @@ export class BudgetPause extends Error {}
 /** Agents that get the read-only lookup tools. Reviewers deliberately don't: they judge only the ticket, plan and diff. */
 export const LOOKUP_AGENTS = new Set(["pr-reviewer", "comment-resolver", "qa-planner", "qa-triager", "explorer", "analyst", "planner", "implementer", "interviewer", "lead", "contract", "lead-planner", "coordinator", "integration-reviewer"]);
 
+/**
+ * Agents that understand, plan, build or fix an item also get the knowledge broker (W5 / §9.1: figma, code_search,
+ * code_read, code_map, ticket, prd, contract, history, ask) scoped to this item. Reviewers never do.
+ */
+export const BROKER_AGENTS = new Set(["explorer", "analyst", "planner", "implementer", "lead", "contract", "lead-planner", "coordinator", "comment-resolver", "interviewer"]);
+
+/** The lookup scope of one agent call: the same fields in the same order every time, so the tool list stays byte-stable. */
+export function lookupScopeFor(ctx: StepCtx, base: string): import("../agents/lookup.js").LookupScope {
+  const lead = ctx.task.playbook === "dev-lead";
+  const scope: import("../agents/lookup.js").LookupScope = { repo: ctx.project.github?.repo, codeRepos: lead ? groupMembers(ctx.project).map((m) => m.id) : [ctx.project.id] };
+  if (!BROKER_AGENTS.has(base)) return scope;
+  const repos: Record<string, string> = {};
+  if (lead) for (const m of groupMembers(ctx.project)) repos[m.id] = m.local.path;
+  repos[ctx.project.id] = ctx.task.worktree ?? ctx.project.local.path;
+  return { ...scope, itemId: ctx.task.id, projectId: ctx.project.id, repos };
+}
+
 /** Budget-checked agent call used by every AI step. */
 export function makeAgentCaller(ctxRef: () => StepCtx) {
   return async (name: string, prompt: string, opts: Parameters<StepCtx["agent"]>[2] = {}): Promise<AgentResult> => {
@@ -88,7 +109,7 @@ export function makeAgentCaller(ctxRef: () => StepCtx) {
       compact: opts.cwd ? opts.compact : undefined,
       // the agents that understand and build the change may look up linked tickets, PRs, designs and pages (read-only)
       // code graph: a lead task may look at every repository of the product, a single task at its own
-      lookup: LOOKUP_AGENTS.has(base) ? { repo: ctx.project.github?.repo, codeRepos: ctx.task.playbook === "dev-lead" ? groupMembers(ctx.project).map((m) => m.id) : [ctx.project.id] } : undefined,
+      lookup: LOOKUP_AGENTS.has(base) ? lookupScopeFor(ctx, base) : undefined,
     });
     ctx.usage.tokensIn += r.tokensIn; ctx.usage.tokensOut += r.tokensOut; ctx.usage.cost += r.costUsd;
     ctx.usage.agents.push(name); ctx.usage.model = r.model;
@@ -112,7 +133,11 @@ export function makeAgentCaller(ctxRef: () => StepCtx) {
 export function ticketText(t: Task): string {
   const k = t.data.ticket ?? {};
   const comments = (k.comments ?? []).map((c: any) => `- ${c.author}: ${truncate(c.body, 400)}`).join("\n");
-  const answers = [...(t.data.leadClarifications ?? []), ...(t.data.clarifications ?? [])].map((c: any) => `- Q: ${c.questions?.join(" / ") || "(general)"}\n  A (${c.by}): ${c.answer}`).join("\n");
+  const answers = [
+    ...[...(t.data.leadClarifications ?? []), ...(t.data.clarifications ?? [])].map((c: any) => `- Q: ${c.questions?.join(" / ") || "(general)"}\n  A (${c.by}): ${c.answer}`),
+    // answered from the decision log before it reached you (O4)
+    ...(t.data.decided ?? []).map((d: any) => `- Q: ${d.question}\n  A (decided earlier): ${d.answer}`),
+  ].join("\n");
   return `${k.key ?? t.source_ref ?? ""}: ${k.title ?? t.title ?? ""}\n\n${k.description ?? ""}${comments ? `\n\nRecent comments:\n${comments}` : ""}${answers ? `\n\nClarifications from the assignee (use these – they override assumptions):\n${answers}` : ""}`.trim();
 }
 
@@ -124,6 +149,50 @@ export const clarifyRoundsLeft = (t: Task, s: Settings = loadSettings()) => s.wo
 
 export const ticketBlock = (t: Task) => untrusted(`ticket:${t.source_ref ?? t.id}`, truncate(ticketText(t), 8000));
 const json = (o: unknown) => JSON.stringify(o, null, 1);
+
+/** The design document is the source of truth (W5a). Writing it never stops the work. */
+function docWrite(fn: () => unknown): void {
+  try {
+    const r = fn() as any;
+    if (r && typeof r.catch === "function") r.catch((e: any) => logger.error("design document write failed", { error: e?.message }));
+  } catch (e: any) { logger.error("design document write failed", { error: e?.message }); }
+}
+/**
+ * W7 / W8 stacked PRs: a child that needs its parent's work branches from the parent's branch and opens its PR against
+ * it (close.ts retarget_stacked moves it to the base branch after the parent merges). Undefined = the base branch.
+ */
+export async function stackBaseOf(t: Task): Promise<string | undefined> {
+  if (t.data.stackBase?.branch) return String(t.data.stackBase.branch);
+  if (!(t as any).parent_id && !(t as any).root_id && !t.data.scope) return undefined;
+  try { const { stackBaseFor } = await import("./steps/scope.js"); return stackBaseFor(t.id)?.branch; } catch { return undefined; }
+}
+/** The PR body with the scope's merge order (between hidden markers), when the item is part of a batch / epic / sprint. */
+async function withMergeOrder(t: Task, body: string): Promise<string> {
+  try {
+    const { mergeNoteFor, prBodyWithMergeOrder } = await import("./steps/scope.js");
+    const note = mergeNoteFor(t.id);
+    return note ? prBodyWithMergeOrder(body, note) : body;
+  } catch { return body; }
+}
+
+/** The design document block for a step (a part reads its lead's document). Empty when there is none. */
+export function designDocFor(t: Task, role: string): string {
+  try { return docBlock(t.data.leadId ?? t.id, role); } catch { return ""; }
+}
+/** The scope plan's note for one child of an epic / sprint / batch (W8): title, wave, shared contracts. */
+const scopeNoteBlock = (t: Task) => (t.data.scopeNote ? `\n\n## Part of a larger scope (follow its shared contracts)\n${truncate(typeof t.data.scopeNote === "string" ? t.data.scopeNote : JSON.stringify(t.data.scopeNote), 2000)}` : "");
+/** After understanding: a short code note per repository, so a fix days later re-reads only what changed (§9.1 drift check). */
+function noteCode(t: Task, findings: any, roots: Record<string, string>): void {
+  docWrite(() => {
+    const ids = Object.keys(roots);
+    for (const r of (Array.isArray(findings?.repos) ? findings.repos : []) as any[]) {
+      const id = r.repo && roots[r.repo] ? r.repo : ids.length === 1 ? ids[0] : undefined;
+      if (!id || !roots[id] || !fs.existsSync(roots[id])) continue;
+      const files = [...new Set<string>((r.relevant ?? []).map((x: any) => String(x.file ?? "")).filter(Boolean))];
+      if (files.length) writeCodeNote(t.id, id, roots[id], findingsText({ repos: [r] }, id), files);
+    }
+  });
+}
 /**
  * The test command of a project. A Python backend whose configured command uses a broken environment gets one with its
  * WORKING Python instead (e.g. .venv-local). Its tests always run through runTests (a temporary database).
@@ -333,8 +402,21 @@ const numbered = (items: unknown) => (Array.isArray(items) ? items : []).map((x,
 /** A section of a chat message: a bold heading on its own line, then its content (a blank line separates sections). */
 const section = (title: string, body: string) => (body.trim() ? `**${title}**\n${body}` : "");
 
-/** The whole plan, readable in a chat: nothing is cut off (long messages are split into parts by the Teams sender). */
+/**
+ * The plan message: the whole plan (the Messenger sends it as ≤ 10 lines with "details <KEY>" for the rest, W11), and
+ * when the item has a design document (W5a) one line pointing at it – its ≤ 10-line summary is in `aiw explain`.
+ */
 export function planMessage(t: Task): string {
+  const full = planDetails(t);
+  const v = docVersion(t.data.leadId ?? t.id);
+  if (!v) return full;
+  const doc = `📘 Design document v${v} – \`aiw explain ${t.source_ref ?? t.id}\` shows it.`;
+  const at = full.lastIndexOf("\n\n💰 ");
+  return at >= 0 ? `${full.slice(0, at)}\n\n${doc}${full.slice(at)}` : `${full}\n\n${doc}`;
+}
+
+/** The whole plan, readable in a chat: nothing is cut off (long messages are split into parts by the Teams sender). */
+export function planDetails(t: Task): string {
   const p = t.data.plan ?? {};
   if (Array.isArray(p.parts)) return leadPlanMessage(t);
   const sections: string[] = [];
@@ -709,8 +791,10 @@ export const STEPS: Record<string, StepFn> = {
     await ensureProfile(ctx.project, ctx.agent);
     const free = G.freeDiskBytes(paths.worktrees());
     if (free !== undefined && free < 1024 ** 3) return { status: "pause", reason: "Less than 1 GB of free disk space for task workspaces" };
-    const baseBranch = ctx.project.github?.baseBranch ?? "main";
+    const stacked = await stackBaseOf(ctx.task);
+    const baseBranch = stacked ?? ctx.project.github?.baseBranch ?? "main";
     const base = G.resolveBase(repo, baseBranch);
+    if (stacked) ctx.save({ stackBase: { ...(ctx.task.data.stackBase ?? {}), branch: stacked } });
     if (ctx.task.worktree && fs.existsSync(ctx.task.worktree) && ctx.task.data.baseSha) return { status: "ok", note: "workspace reused" };
     const key = jiraKey(ctx.task) || ctx.task.id;                    // branch names use the plain ticket key (no "@repo" suffix)
     // Branch name follows the team's detected convention (e.g. feat/KAN-42/input-guard).
@@ -751,6 +835,8 @@ export const STEPS: Record<string, StepFn> = {
     const r = await ctx.agent("analyst", `${ticketBlock(ctx.task)}\n\n## Code Explorer findings (from the code itself)\n${findingsText(findings)}\n\n## Project context\n${ctx.task.data.contextPack ?? ""}${feedbackBlock(ctx.task)}\n\nWork from the findings; read code only to confirm a specific point. Do not modify anything.`,
       { cwd: ctx.task.worktree ?? ctx.project.local.path, tools: ["Read", "Grep", "Glob"], maxTurns: 10 });
     ctx.save({ requirements: r.data });
+    docWrite(() => writeUnderstanding(ctx.task, { requirements: r.data, findings }));
+    noteCode(ctx.task, findings, { [ctx.project.id]: ctx.task.worktree ?? ctx.project.local.path });
     const open = normaliseQuestions(r.data.openQuestions, 3);
     if (open.length && clarifyRoundsLeft(ctx.task, ctx.settings) > 0) return { status: "need_info", questions: open, context: "While analysing the requirements" };
     if (open.length) ctx.save({ assumptions: questionTexts(open) });   // cap reached: proceed, but say so in the plan
@@ -761,19 +847,30 @@ export const STEPS: Record<string, StepFn> = {
     const prior = ctx.task.data.planIssues?.length ? `\n## Issues found in the previous plan (fix them)\n${json(ctx.task.data.planIssues)}` : "";
     const assumptions = ctx.task.data.assumptions?.length ? `\n\n## Unanswered questions – choose a sensible assumption for each and list it under risks\n${ctx.task.data.assumptions.map((q: string) => `- ${q}`).join("\n")}` : "";
     const r = await ctx.agent("planner",
-      `${ticketBlock(ctx.task)}\n\n## Requirements\n${json(ctx.task.data.requirements ?? {})}${ctx.task.data.findings ? `\n\n## Code Explorer findings (files, symbols and lines to build on)\n${findingsText(ctx.task.data.findings)}` : ""}\n\n## Project context\n${ctx.task.data.contextPack ?? ""}${feedbackBlock(ctx.task)}${prior}${assumptions}\n\nPlan from the findings; read files only to confirm a location they leave open. Do not modify anything.`,
+      `${ticketBlock(ctx.task)}\n\n## Requirements\n${json(ctx.task.data.requirements ?? {})}${ctx.task.data.findings ? `\n\n## Code Explorer findings (files, symbols and lines to build on)\n${findingsText(ctx.task.data.findings)}` : ""}\n\n## Project context\n${ctx.task.data.contextPack ?? ""}${feedbackBlock(ctx.task)}${prior}${assumptions}\n\n${scopeNoteBlock(ctx.task)}${ctx.task.data.planIssues?.length ? `\n\n${designDocFor(ctx.task, "plan")}` : ""}\n\nPlan from the findings; read files only to confirm a location they leave open. Do not modify anything.`,
       { cwd: ctx.task.worktree ?? ctx.project.local.path, tools: ["Read", "Grep", "Glob"], maxTurns: 20, tier: ctx.params.tier });
     ctx.save({ plan: r.data, planAt: new Date().toISOString() });
+    // finishing a developer's branch (W16): the plan covers only the rest, and the document keeps what was left to do
+    const left: string[] = ctx.task.data.adopt?.gap?.remaining ?? [];
+    docWrite(() => writePlan(ctx.task, left.length ? { ...r.data, summary: `Left to do on ${ctx.task.data.adopt.branch ?? "your branch"}:\n${left.map((x) => `- ${x}`).join("\n")}\n\n${r.data.summary ?? ""}`.trim() } : r.data));
     return { status: "ok" };
   },
 
   async plan_review(ctx) {
     const lead = Array.isArray(ctx.task.data.plan?.parts);
-    const review = async () => (await ctx.agent("plan-reviewer",
-      `${ticketBlock(ctx.task)}\n\n## Requirements\n${json(ctx.task.data.requirements ?? {})}${ctx.task.data.contract ? `\n\n## Contract between the repositories (check every part follows it)\n${contractText(ctx.task.data.contract)}` : ""}\n\n## Plan\n${json(ctx.task.data.plan)}`)).data;
+    // the reviewer reads the design document (the source of truth) when there is one, else the JSON the steps saved
+    const review = async () => {
+      const doc = designDocFor(ctx.task, "plan_review");
+      return (await ctx.agent("plan-reviewer", doc
+        ? `${ticketBlock(ctx.task)}\n\n${doc}`
+        : `${ticketBlock(ctx.task)}\n\n## Requirements\n${json(ctx.task.data.requirements ?? {})}${ctx.task.data.contract ? `\n\n## Contract between the repositories (check every part follows it)\n${contractText(ctx.task.data.contract)}` : ""}\n\n## Plan\n${json(ctx.task.data.plan)}`)).data;
+    };
     let r = await review();
     if (!r.pass) {
       ctx.save({ planIssues: r.issues });
+      // the issues go into the document first, then the plan is made again from it
+      const { applyFeedbackToDoc } = await import("../knowledge/goldfish.js");
+      docWrite(() => applyFeedbackToDoc(ctx.task, { text: (r.issues ?? []).map((x: any) => `[${x.severity}] ${x.description}`).join("\n"), by: "plan reviewer", kind: "change" }));
       await (lead ? STEPS.lead_plan : STEPS.plan)(ctx);   // one re-plan round, then proceed with issues recorded
       r = await review();
     }
@@ -834,6 +931,7 @@ export const STEPS: Record<string, StepFn> = {
       const unavailable = ctx.task.data.testsUnavailable;
       const prompt = [
         ticketBlock(ctx.task),
+        designDocFor(ctx.task, "implement_test"),
         `## Plan\n${json(ctx.task.data.plan ?? { summary: "Make the minimal change the ticket asks for." })}`,
         ctx.task.data.findings ? `## Code Explorer findings (exact files and lines – open these directly, no need to search again)\n${findingsText(ctx.task.data.findings, ctx.project.id)}` : "",
         `## Project context\n${ctx.task.data.contextPack ?? ""}`,
@@ -909,8 +1007,9 @@ export const STEPS: Record<string, StepFn> = {
     const contract = `${leadTask?.data.contract ? `\n\n## Contract with the other repositories (this repository's side must match it)\n${contractText(leadTask.data.contract)}` : ""}${untested}`;
     for (let round = 0; round <= rounds; round++) {
       const diff = truncate(G.diffAgainst(wt, ctx.task.data.baseSha), 30_000);
+      const doc = designDocFor(ctx.task, "reviews");
       const out = await Promise.all(pending.map((k) => ctx.agent(`reviewer:${k}`,
-        `${focus[k] ?? ""}\n\n${rulesBlock(ctx.project, 3000)}\n\n${ticketBlock(ctx.task)}\n\n## Acceptance criteria\n${json(ctx.task.data.requirements?.acceptanceCriteria ?? [])}\n\n## Plan\n${json(ctx.task.data.plan ?? {})}${contract}\n\n## Diff\n${untrusted("diff", diff)}`)));
+        `${focus[k] ?? ""}\n\n${rulesBlock(ctx.project, 3000)}\n\n${ticketBlock(ctx.task)}${doc ? `\n\n${doc}` : ""}\n\n## Acceptance criteria\n${json(ctx.task.data.requirements?.acceptanceCriteria ?? [])}\n\n## Plan\n${json(ctx.task.data.plan ?? {})}${contract}\n\n## Diff\n${untrusted("diff", diff)}`)));
       pending.forEach((k, i) => (results[k] = out[i].data));
       const asked = normaliseQuestions(pending.flatMap((k) => results[k].questions ?? []), 3);
       if (asked.length && clarifyRoundsLeft(ctx.task, ctx.settings) > 0) {
@@ -948,7 +1047,7 @@ export const STEPS: Record<string, StepFn> = {
   async prepublish(ctx) {
     { const missing = needWorkspace(ctx); if (missing) return missing; }
     const wt = ctx.task.worktree!;
-    const baseBranch = ctx.project.github?.baseBranch ?? "main";
+    const baseBranch = (await stackBaseOf(ctx.task)) ?? ctx.project.github?.baseBranch ?? "main";
     const latest = G.resolveBase(ctx.project.local.path, baseBranch);
     if (latest.sha !== ctx.task.data.baseSha) {
       if (!G.rebaseOnto(wt, latest.ref)) return { status: "pause", reason: `Conflicts while rebasing onto the latest ${baseBranch}. Resolve in ${wt} and run \`aiw resume ${ctx.task.source_ref}\`.` };
@@ -1090,13 +1189,14 @@ export const STEPS: Record<string, StepFn> = {
       return { status: "pause", reason: refused };
     }
     const raw = ctx.task.data.report ?? { title: ctx.task.title, body: "" };
-    const report = { title: stripAttribution(raw.title ?? ""), body: stripAttribution(raw.body ?? "") };
+    const report = { title: stripAttribution(raw.title ?? ""), body: await withMergeOrder(ctx.task, stripAttribution(raw.body ?? "")) };
+    const stackedOn = await stackBaseOf(ctx.task);
     if (attributionHits(`${report.title}\n${report.body}`).length) return { status: "fail", reason: "Hard rule: PR text still mentions Claude/AI – fix the report and refresh" };
     report.body = withScreenshots(ctx.task, ctx.project, report.body, gh.gitAuthHeader());     // own branch pr-screenshots/<ticket>
     const existing = await gh.findOpenPr(repo, ctx.task.branch!);
     const pr = existing
       ? await gh.updatePr(repo, existing.number, { title: report.title, body: report.body })
-      : await gh.createPr(repo, { title: report.title, body: report.body, head: ctx.task.branch!, base: ctx.project.conventions?.baseBranch ?? ctx.project.github!.baseBranch, draft: !!ctx.settings.pr?.draft });   // never merged by AI Workforce
+      : await gh.createPr(repo, { title: report.title, body: report.body, head: ctx.task.branch!, base: stackedOn ?? ctx.project.conventions?.baseBranch ?? ctx.project.github!.baseBranch, draft: !!ctx.settings.pr?.draft });   // never merged by AI Workforce
     ctx.save({ pr, prOpenedAt: ctx.task.data.prOpenedAt ?? new Date().toISOString() });
     audit("service", "publish.pr", ctx.task.id, { approvalId: a.id, pr: pr.url, head: a.head_sha });
     const asked = existing ? [] : await requestPrReviewers(ctx.project, repo, pr.number, G.changedFiles(wt, ctx.task.data.baseSha));
@@ -1156,6 +1256,7 @@ export const STEPS: Record<string, StepFn> = {
       `## Project Brain notes per repository\n${brain}`,
       docs.trim(),
       feedbackBlock(ctx.task),
+      scopeNoteBlock(ctx.task).trim(),
       "Decide from the findings. Read code yourself only to confirm a specific point they leave open. Do not modify anything.",
     ].filter(Boolean).join("\n\n");
     const r = await ctx.agent("lead", prompt, { cwd: f.cwd, dirs: f.dirs, tools: ["Read", "Grep", "Glob"], maxTurns: 15 });
@@ -1168,6 +1269,8 @@ export const STEPS: Record<string, StepFn> = {
       requirements: { requirements: r.data.requirements ?? [], acceptanceCriteria: r.data.acceptanceCriteria ?? [], openQuestions: [] },
       contextPack: `${brain}${docs}`,
     });
+    docWrite(() => writeUnderstanding(ctx.task, { understanding: r.data, findings }));
+    noteCode(ctx.task, findings, Object.fromEntries(members.map((m) => [m.id, m.local.path])));
     const open = normaliseQuestions(r.data.questions, 3);
     if (open.length && clarifyRoundsLeft(ctx.task, ctx.settings) > 0) return { status: "need_info", questions: open, context: "While understanding the ticket (I read the ticket, the linked documents and the code of every repository)" };
     if (open.length) ctx.save({ assumptions: questionTexts(open) });
@@ -1188,6 +1291,7 @@ export const STEPS: Record<string, StepFn> = {
       "Base the contract on the findings and keep the existing names; read code only to confirm an exact type or field the findings leave open. Do not modify anything.",
     ].filter(Boolean).join("\n\n"), { cwd: f.cwd, dirs: f.dirs, tools: ["Read", "Grep", "Glob"], maxTurns: 15 });
     ctx.save({ contract: { ...r.data, version: 1, changes: [] } });
+    docWrite(() => writeContract(ctx.task, ctx.task.data.contract));
     return { status: "ok", note: `${(r.data.items ?? []).length} contract items` };
   },
 
@@ -1216,6 +1320,7 @@ export const STEPS: Record<string, StepFn> = {
       plan: { summary: r.data.summary, parts, risks: r.data.risks ?? [], steps: parts.flatMap((p) => tag(p.repo, p.steps)), files: parts.flatMap((p) => tag(p.repo, p.files)), tests: parts.flatMap((p) => tag(p.repo, p.tests)) },
       planAt: new Date().toISOString(),
     });
+    docWrite(() => writePlan(ctx.task, ctx.task.data.plan));
     return { status: "ok" };
   },
 
@@ -1272,6 +1377,7 @@ export const STEPS: Record<string, StepFn> = {
     }).join("\n\n");
     const r = await ctx.agent("integration-reviewer", [
       ticketBlock(ctx.task),
+      designDocFor(ctx.task, "integration_check"),
       `## Acceptance criteria\n${json(ctx.task.data.requirements?.acceptanceCriteria ?? [])}`,
       ctx.task.data.contract ? `## Contract\n${contractText(ctx.task.data.contract)}` : "",
       `## Repositories (current directory = ${parts[0].project_id}; additional folders: ${parts.slice(1).map((p) => `${p.project_id} = ${p.worktree}`).join(", ")})`,
@@ -1322,13 +1428,28 @@ export const STEPS: Record<string, StepFn> = {
       items.push({ part, project, b });
     }
     const prs: { project: string; repo: string; number: number; url: string; title: string; body: string; existing: boolean }[] = [];
+    // F9: every repository is pushed BEFORE any PR is opened – a refused push stops with one clear message and no half-done pair
+    const pushed: string[] = [];
+    for (const { part, project } of items) {
+      const repo = project.github!.repo;
+      const raw = part.data.report ?? { title: part.title, body: "" };
+      if (attributionHits(`${stripAttribution(raw.title ?? "")}\n${stripAttribution(raw.body ?? "")}`).length) return { status: "fail", reason: `Hard rule: the ${part.project_id} PR text still mentions Claude/AI` };
+      try { G.pushBranch(part.worktree!, repo, part.branch!, gh.gitAuthHeader()); pushed.push(repo); }
+      catch (e: any) {
+        const refused = G.pushRefusal(e, repo, part.branch ?? undefined);
+        if (!refused) throw e;
+        const info = { at: new Date().toISOString(), repo, part: part.project_id, reason: refused, pushed };
+        ctx.save({ pushRefused: info });
+        mergeData(part.id, { pushRefused: info });
+        return { status: "pause", reason: `${refused}${pushed.length ? ` (already pushed: ${pushed.join(", ")} – no PR is opened until every repository can be pushed)` : " No PR was opened."}` };
+      }
+    }
+    if (ctx.task.data.pushRefused) ctx.save({ pushRefused: null });
     for (const { part, project } of items) {
       const repo = project.github!.repo;
       const raw = part.data.report ?? { title: part.title, body: "" };
       const report = { title: stripAttribution(raw.title ?? ""), body: stripAttribution(raw.body ?? "") };
       if (attributionHits(`${report.title}\n${report.body}`).length) return { status: "fail", reason: `Hard rule: the ${part.project_id} PR text still mentions Claude/AI` };
-      try { G.pushBranch(part.worktree!, repo, part.branch!, gh.gitAuthHeader()); }
-      catch (e: any) { const refused = G.pushRefusal(e, repo, part.branch ?? undefined); if (!refused) throw e; return { status: "pause", reason: refused }; }
       report.body = withScreenshots(part, project, report.body, gh.gitAuthHeader());
       const existingPr = await gh.findOpenPr(repo, part.branch!);
       const pr = existingPr

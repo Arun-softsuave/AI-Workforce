@@ -30,11 +30,11 @@ export const READ_TOOLS = new Set<string>(["find", "preview_scope", "status", "e
 export interface ToolArgs {
   ref?: string; refs?: string[]; text?: string; query?: string;
   /** decide */ decision?: "approve" | "reject" | "answer" | "approve_with_change"; delegated?: boolean;
-  /** control */ action?: "pause" | "resume" | "cancel" | "priority" | "takeover" | "handback" | "undo"; until?: string; priority?: number | string; due?: string;
+  /** control */ action?: "pause" | "resume" | "cancel" | "priority" | "takeover" | "handback" | "undo" | "revert"; until?: string; priority?: number | string; due?: string;
   /** set_directive */ scope?: "global" | "item" | "batch" | "epic" | "sprint"; rule?: string; value?: string;
   /** prefs */ key?: string; name?: string; github?: string;
   /** fix_pr */ mode?: "comments" | "ci" | "issues";
-  /** start */ project?: string; takeOver?: boolean; again?: boolean;
+  /** start */ project?: string; takeOver?: boolean; again?: boolean; /** several keys on v2: one per ticket instead of one batch */ separately?: boolean;
 }
 export type ToolCall = ConductorCall & { tool: ToolName | "clone_repo"; args: ToolArgs };
 
@@ -176,6 +176,9 @@ async function startOne(key: string, args: ToolArgs, ctx: ToolCtx): Promise<Star
   } catch (e: any) { return { kind: "error", detail: e.message }; }
 }
 
+/** Words that ask for several tickets as one batch (W7) rather than side by side. */
+export const BATCH_WORDS = /\b(as (a|one) batch|batch|together|in (the right )?order|one plan|stack(ed)?|depends? on|dependenc(y|ies)|merge order)\b/i;
+
 /** Start one or more tickets ("plan for KAN-42", "work on KAN-60, KAN-61 and KAN-62", "do the invite email task"). */
 export async function toolStart(args: ToolArgs, ctx: ToolCtx): Promise<ToolResult> {
   let keys = [...new Set([...(args.refs ?? []), ...(args.ref ? [args.ref] : [])].flatMap((r) => keysIn(String(r))))];
@@ -201,6 +204,15 @@ export async function toolStart(args: ToolArgs, ctx: ToolCtx): Promise<ToolResul
       : r.kind === "error" ? (/isn't set up/.test(r.detail) ? r.detail : `I couldn't start ${keys[0]}: ${r.detail}`)
       : r.kind === "started" ? `👍 Starting ${r.ref}. The plan comes here for your approval.`
       : `👍 On it – **${r.ref}**: ${r.title}\n\nI'll read the ticket, the PRD and the code, and send you the plan here for approval before writing any code.`, r.kind !== "error");
+  }
+  // W7 (engine v2): several tickets asked for TOGETHER ("as a batch", "in order", "they depend on each other") become ONE
+  // batch – overlap check, waves, stacked PRs, merge order, one approval. A plain list still starts each ticket on its own.
+  if (engineVersion() === "v2" && keys.length >= 2 && !args.separately && BATCH_WORDS.test(`${ctx.original} ${text}`)) {
+    const { startBatch } = await import("../engine/steps/scope.js");
+    const r = await startBatch(keys, ctx.who, ctx.original);
+    if (r.itemId) { const t = getTask(r.itemId); if (t) setFocus(refOf(t)); await tick(); }
+    if (r.ask) return { ok: r.ok !== false, reply: r.reply, ask: { question: r.ask.question, calls: r.ask.calls as ToolCall[] } };
+    return said(r.reply, r.ok !== false);
   }
   // several tickets: each becomes its own item with its own plan, questions and PR – worked on side by side
   const lines: string[] = [];
@@ -480,24 +492,39 @@ export async function toolControl(args: ToolArgs, ctx: ToolCtx): Promise<ToolRes
       return setPriority(t, args);
     }
     case "takeover": {
+      // I3: jobs stopped, folder and branch kept, unsent notices cancelled, a short summary of where it stands
       if (!t) return said("Which item do you want to take over?", false);
-      const ref = refOf(t);
-      const { stopItemJobs } = await import("../kernel/runner.js");
-      stopItemJobs(t.id, "taken over by you");
-      if (canTransition(t, "PAUSED")) transition(t.id, "PAUSED", "taken over by you");
-      mergeData(t.id, { takenOver: { by: ctx.who, at: new Date().toISOString() } });
-      audit(`user:${ctx.who}`, "item.takeover", t.id, {});
-      const where = [t.branch ? `branch ${t.branch}` : "", t.worktree ? `folder ${t.worktree}` : ""].filter(Boolean).join(", ");
-      return said(`✋ Stopped ${ref} – it's yours. ${where ? `Your ${where} is ready. ` : ""}Now: ${taskNow(getTask(t.id)!).now}. Say "continue ${ref}" to hand it back.`);
+      const { takeOver } = await import("../engine/steps/adopt.js");
+      return said(await takeOver(refOf(t), ctx.who));
     }
     case "handback": {
+      // I4: your commits become the new base (uncommitted changes refuse it); the item resumes itself
       if (!t) return said("Which item should I continue?", false);
-      mergeData(t.id, { takenOver: null, handedBack: { at: new Date().toISOString() } });
-      const r = resumeTask(refOf(t));
+      const { handBack } = await import("../engine/steps/adopt.js");
+      const r = await handBack(refOf(t), ctx.who);
       await tick();
-      return said(`▶️ Continuing ${refOf(t)}${t.branch ? ` – I'll read your new commits on ${t.branch} first` : ""}. ${r ? taskNow(r).now : ""}`.trim());
+      return said(r);
     }
-    case "undo": return undoLast(ctx);
+    case "revert": {
+      // J14: pushed work is never rewritten – a revert commit on a new PR, only after you said yes
+      if (!t || !args.value) return said("Which change should I revert?", false);
+      if (!ctx.confirmed) return asking(`Revert ${String(args.value).slice(0, 7)} on ${refOf(t)} with a new commit (nothing is rewritten)?`, { calls: [{ tool: "control", args: { action: "revert", ref: refOf(t), value: args.value } }] });
+      const { createRevertPr } = await import("../engine/steps/adopt.js");
+      return said(await createRevertPr(refOf(t), String(args.value), ctx.who));
+    }
+    case "undo": {
+      // J14 for an item: un-start it, or remove my last local unpushed commit; pushed work asks first (revert, never rewrite)
+      const u = lastUndo();
+      const ref = t ? refOf(t) : u?.kind === "start" ? u.ref : undefined;
+      if (ref && (t || u?.kind === "start")) {
+        if (u?.kind === "start" && u.ref === ref) clearUndo();
+        const { undoForItem } = await import("../engine/steps/adopt.js");
+        const r = await undoForItem(ref, ctx.who);
+        if (r.ask) return asking(r.ask.question, { calls: [{ tool: "control", args: { action: "revert", ref, value: r.ask.sha } }] });
+        return said(r.reply);
+      }
+      return undoLast(ctx);
+    }
     default: return said(`I can pause, resume, cancel, move first, take over, hand back or undo.`, false);
   }
 }
@@ -597,9 +624,30 @@ async function toolFixPr(args: ToolArgs, ctx: ToolCtx): Promise<ToolResult> {
   return said(r);
 }
 
+/** W15: a review of old or merged work, a branch, a commit range, "is the X epic complete" or "QA the X feature KAN-n". */
+export function wantsAudit(text: string, ref?: string): boolean {
+  const t = String(text ?? "");
+  if (/\bbranch\s+[\w./-]+/i.test(t) || /\b[0-9a-f]{7,40}\.\.\.?[0-9a-f]{7,40}\b/i.test(t)) return true;
+  if (/\bepic\b[\s\S]*\b(complete|done|finished)\b|\b(complete|done|finished)\b[\s\S]*\bepic\b/i.test(t)) return true;
+  if (/\bQA\b[\s\S]*\bfeature\b/i.test(t)) return true;
+  if (/\b(merged|old|last (month|week|sprint)|already (shipped|merged|done))\b/i.test(t)) return true;
+  if (ref) {
+    const it = taskFor(ref);
+    if (it && ["DONE", "MERGED"].includes(it.state)) return true;
+  }
+  return false;
+}
+
 async function toolReview(args: ToolArgs, ctx: ToolCtx): Promise<ToolResult> {
-  const { startReviewFromText } = await import("../engine/prReview.js");
   const ref = args.ref && keysIn(args.ref).length ? keysIn(args.ref)[0].split("@")[0] : undefined;
+  const text = [args.text ?? ctx.original, args.ref && !ref ? args.ref : ""].filter(Boolean).join(" ");
+  if (!/github\.com\/[^\s]+\/pull\/\d+|\bPR[\s#-]*\d+\b/i.test(text) && wantsAudit(text, ref)) {
+    const { startAuditFromText } = await import("../engine/steps/audit.js");
+    const r = await startAuditFromText(ref && !text.includes(ref) ? `${text} ${ref}` : text, ctx.who);
+    await tick();
+    return said(r);
+  }
+  const { startReviewFromText } = await import("../engine/prReview.js");
   const r = await startReviewFromText([args.text ?? ctx.original, args.ref && !ref ? args.ref : ""].filter(Boolean).join(" "), ref, ctx.who);
   await tick();
   return said(r);
@@ -618,16 +666,25 @@ async function optional(spec: string, fn: string): Promise<((...a: any[]) => any
   try { const m: any = await import(spec); return typeof m?.[fn] === "function" ? m[fn] : undefined; } catch { return undefined; }
 }
 
+/** W16: finish my branch – build on your commits, never rewrite them, never force-push (v2 only; v1 answers honestly). */
 async function toolAdopt(args: ToolArgs, ctx: ToolCtx): Promise<ToolResult> {
-  const adopt = await optional("../engine/adopt.js", "startAdoptFromText");
-  if (adopt) return said(String(await adopt(args.text ?? args.ref ?? ctx.original, ctx.who)));
-  return said(`Finishing your own branch isn't available yet. I can review it instead ("review ${args.ref ?? "my branch"}"), or start the ticket fresh.`);
+  const { startAdoptFromText } = await import("../engine/steps/adopt.js");
+  const text = [ctx.original, args.text, args.ref].filter(Boolean).join(" ");
+  const r = await startAdoptFromText(text, ctx.who);
+  await tick();
+  return said(String(r));
 }
 
+/** W8 step 1 / B9–B12: the scope preview (engine/steps/scope.ts). A sprint or "all my tickets" asks once to start. */
 async function toolPreviewScope(args: ToolArgs, ctx: ToolCtx): Promise<ToolResult> {
-  const preview = await optional("../engine/scopes.js", "previewScope");
-  if (preview) return said(String(await preview(args.ref ?? args.text ?? ctx.original, ctx.who)));
-  return said(`I can't plan a whole epic or sprint yet. Name the tickets instead, e.g. "do KAN-45, KAN-47 and KAN-48".`);
+  const { previewScope } = await import("../engine/steps/scope.js");
+  // the owner's own words decide sprint / epic / batch and "no approvals"; the args only name the target
+  const target = [args.ref, ...(args.refs ?? []), args.text].filter(Boolean).join(" ");
+  const r = await previewScope(target && !ctx.original.includes(target) ? `${ctx.original} ${target}` : ctx.original || target, ctx.who);
+  if (r.itemId) { const t = getTask(r.itemId); if (t) setFocus(refOf(t)); }
+  if (r.ask) return { ok: r.ok !== false, reply: r.reply, ask: { question: r.ask.question, calls: r.ask.calls as ToolCall[] }, data: { itemId: r.itemId } };
+  if (r.itemId) await tick();
+  return said(r.reply, r.ok !== false, r.itemId ? { itemId: r.itemId } : undefined);
 }
 
 // ------------------------------------------------------------------ read tools: find, status, explain, lookup

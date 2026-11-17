@@ -5,6 +5,7 @@ import { aiwHome, ensureDir } from "../core/paths.js";
 import { getSecret } from "../core/secrets.js";
 import { log } from "../core/log.js";
 import { nowIso, sha256 } from "../core/util.js";
+import { priceUsd } from "../bench/costView.js";
 
 /**
  * Batch API for work that isn't urgent (module 5.8b, §9.1.6): single calls that can wait a few hours (handbook and
@@ -41,6 +42,8 @@ export interface BatchResult {
   at: string;
   /** set when the call could not be done at all */
   error?: string;
+  /** its usage is already in the steps table (recordBatchUsage) */
+  recorded?: boolean;
 }
 
 interface QueuedCall extends Required<Omit<BatchCall, "waitMs" | "system">> {
@@ -243,12 +246,86 @@ export async function tickBatches(d?: BatchDeps): Promise<{ sent: number; stored
   try { sent = (await flushBatch(d)).length; } catch (e: any) { log("warn", "batch send failed", { error: String(e?.message ?? e).slice(0, 200) }); }
   try { stored = await pollBatches(d); } catch (e: any) { log("warn", "batch check failed", { error: String(e?.message ?? e).slice(0, 200) }); }
   const ranDirect = await runOverdue(d);
+  try { await recordBatchUsage(d); } catch { /* cost recording never breaks the work */ }
   const s = load(d);
   const cutoff = now(d) - RESULT_KEEP_MS;
   let dropped = false;
   for (const [k, r] of Object.entries(s.results)) if (Date.parse(r.at) < cutoff) { delete s.results[k]; dropped = true; }
   if (dropped) save(s, d);
   return { sent, stored, ranDirect };
+}
+
+// ------------------------------------------------------------------ which calls may wait (§9.1.6)
+
+/** The only kinds of call that go through the Batch API. Agent loops and anything someone waits for never do. */
+export const NON_URGENT_KINDS = ["handbook", "rules_card", "doc_summary", "close_out_learning", "digest_draft", "audit_summary"] as const;
+export type NonUrgentKind = typeof NON_URGENT_KINDS[number];
+
+export function isNonUrgent(kind: string): kind is NonUrgentKind {
+  return (NON_URGENT_KINDS as readonly string[]).includes(kind);
+}
+
+/** Default wait before the fallback runs the call normally, by kind (a digest must still be ready the same morning). */
+export const WAIT_BY_KIND: Record<NonUrgentKind, number> = {
+  handbook: 6 * 3_600_000, rules_card: 6 * 3_600_000, doc_summary: 8 * 3_600_000,
+  close_out_learning: 6 * 3_600_000, digest_draft: 2 * 3_600_000, audit_summary: 4 * 3_600_000,
+};
+
+export interface RouteOpts {
+  /** settings.models.provider: only "claude" (an API key) can use batches; a sign-in or the mock runs normally */
+  provider?: string;
+  /** someone is waiting for this answer now */
+  urgent?: boolean;
+  deps?: BatchDeps;
+}
+
+/** "batch" when the call may wait and batches can be used here, else "direct". Pure apart from the key check. */
+export function routeFor(kind: string, o: RouteOpts = {}): "batch" | "direct" {
+  if (o.urgent || !isNonUrgent(kind)) return "direct";
+  if (o.provider && o.provider !== "claude") return "direct";
+  return batchAvailable(o.deps) ? "batch" : "direct";
+}
+
+/** Batch key with the kind in front, so the cost view can group by it: "close_out_learning:<key>". */
+export const kindKey = (kind: NonUrgentKind, key: string): string => `${kind}:${key}`;
+
+/**
+ * Queue a non-urgent call with the right deadline for its kind. Returns the full key to read the answer with
+ * getResult(), or undefined when the kind may not wait (the caller runs it normally then).
+ */
+export function queueNonUrgent(kind: string, call: Omit<BatchCall, "key" | "waitMs"> & { key: string; waitMs?: number }, d?: BatchDeps): string | undefined {
+  if (!isNonUrgent(kind)) return undefined;
+  const key = kindKey(kind, call.key);
+  queueBatchCall({ ...call, key, waitMs: call.waitMs ?? WAIT_BY_KIND[kind] }, d);
+  return key;
+}
+
+/** What one stored answer cost, as a steps-row usage (batch answers are half price; unknown models stay $0). */
+export function usageOfResult(r: BatchResult): { model: string; tokensIn: number; tokensOut: number; freshIn: number; cacheRead: number; cacheWrite: number; costUsd: number; error?: string } {
+  const u = r.usage;
+  const freshIn = Number(u?.input_tokens ?? 0), cacheRead = Number(u?.cache_read_input_tokens ?? 0), cacheWrite = Number(u?.cache_creation_input_tokens ?? 0);
+  return { model: r.model, tokensIn: freshIn + cacheRead + cacheWrite, tokensOut: Number(u?.output_tokens ?? 0), freshIn, cacheRead, cacheWrite,
+    costUsd: priceUsd(r.model, u, { batch: r.via === "batch" }) ?? 0, ...(r.error ? { error: r.error } : {}) };
+}
+
+/**
+ * Record every stored answer's usage once (in the steps table as "batch:<kind>", so the cost view shows the batch
+ * spend and its saving). `record` defaults to engine/tasks recordUsage. Returns how many were recorded.
+ */
+export async function recordBatchUsage(d?: BatchDeps, record?: (scope: string, u: ReturnType<typeof usageOfResult>) => void): Promise<number> {
+  const s = load(d);
+  const todo = Object.values(s.results).filter((r) => !r.recorded && (r.usage || r.error));
+  if (!todo.length) return 0;
+  let rec: (scope: string, u: ReturnType<typeof usageOfResult>) => void;
+  if (record) rec = record;
+  else { const m = await import("../engine/tasks.js"); rec = (scope, u) => m.recordUsage(scope, u, { agent: "batch" }); }
+  for (const r of todo) {
+    const kind = r.key.split(":")[0];
+    try { rec(`batch:${isNonUrgent(kind) ? kind : "other"}`, usageOfResult(r)); } catch { /* cost recording never breaks the work */ }
+    r.recorded = true;
+  }
+  save(s, d);
+  return todo.length;
 }
 
 /** The answer for a key, once there is one. */

@@ -19,7 +19,7 @@ import { getRunner, type Runner, type AgentRequest, type AgentResult } from "../
 import { STEPS, BudgetPause, type StepResult, type StepCtx } from "../engine/steps.js";
 import { getTask, transition, mergeData, updateTask, startStep, canTransition, type Task, type State } from "../engine/tasks.js";
 import {
-  buildStepCtx, flushUsage, keepWorkspace, applyTicketChange, pause, fail, retryOrFail, finish, askUser, liveStep, noteConnectorError,
+  buildStepCtx, flushUsage, keepWorkspace, applyTicketChange, pause, fail, retryOrFail, finish, askUser, liveStep, noteConnectorError, runWithAskDesk,
 } from "../engine/stepRun.js";
 import { notify, markInboxRead } from "../notify/router.js";
 import { clearActivity, progressFrom } from "../live/activity.js";
@@ -308,7 +308,7 @@ async function runLoop(start: Job): Promise<Job> {
       save: owned ? undefined : jobSave(job.id) });
     let result: StepResult;
     try {
-      result = await fn(ctx);
+      result = await runWithAskDesk(fn, ctx);
     } catch (e: any) {
       flushUsage(ctx, sid, e instanceof BudgetPause ? "paused" : "error", e.message);
       keepJobWorkspace(job, owned, viewTask, ctx);

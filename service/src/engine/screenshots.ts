@@ -118,6 +118,22 @@ export function screenshotsLine(s: Screenshots | undefined): string {
   return `${ok.length} page(s), desktop + mobile – added to the PR when it is raised\n${lines.join("\n")}`;
 }
 
+/** One picture of a page, for the design check (W5 step 10): which page, which screen size, where it is on disk. */
+export interface ShotFile { page: string; route: string; state: string; view: "desktop" | "mobile"; file: string }
+
+/** The pictures that exist on disk, desktop first (the design check compares them with the Figma frames). */
+export function shotFiles(s: Screenshots | undefined): ShotFile[] {
+  if (!s?.taken) return [];
+  const out: ShotFile[] = [];
+  for (const view of ["desktop", "mobile"] as const) {
+    for (const p of s.pages) {
+      const f = p[view];
+      if (f && fs.existsSync(f)) out.push({ page: p.name, route: p.route, state: p.state, view, file: f });
+    }
+  }
+  return out;
+}
+
 /** Take the screenshots for a frontend task (best effort; the result is saved on the task as data.screenshots). */
 export async function captureScreenshots(ctx: StepCtx): Promise<Screenshots | undefined> {
   const app = webApp(ctx.project);

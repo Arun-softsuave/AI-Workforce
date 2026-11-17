@@ -67,13 +67,13 @@ test("needsOf: PR jobs need GitHub, coding needs the model, publish needs GitHub
   const it = { id: "x", state: "QUEUED", title: "KAN-1" };
   assert.deepEqual([...needsOf(it, job("ci_fix", "ci_fix"))].sort(), ["github", "model"]);
   assert.deepEqual([...needsOf(it, job("ci_watch", "ci_watch"))], ["github"]);
-  assert.deepEqual([...needsOf(it, job("build", "dev-feature", 6))], ["model"]);           // implement_test
-  assert.deepEqual([...needsOf(it, job("build", "dev-feature", 12))], ["github"]);         // publish
+  assert.deepEqual([...needsOf(it, job("build", "dev-feature", 7))], ["model"]);           // implement_test (after plan, doc_readiness, plan_review, plan_gate)
+  assert.deepEqual([...needsOf(it, job("build", "dev-feature", 14))], ["github"]);         // publish
   assert.deepEqual([...needsOf(it, job("build", "dev-feature", 0))].sort(), ["github"]);   // prepare_workspace
   // a linked Figma design is needed while the ticket is understood, not later
   const fig = { ...it, data: { issue: { description: "see https://www.figma.com/design/AbCdEf123456/x" } } };
   assert.ok(needsOf(fig, job("build", "dev-feature", 2)).has("figma"));                    // analyse
-  assert.ok(!needsOf(fig, job("build", "dev-feature", 6)).has("figma"));
+  assert.ok(!needsOf(fig, job("build", "dev-feature", 7)).has("figma"));
   assert.deepEqual([...needsOf({ id: "y", state: "PR_OPEN" })], ["github"]);
 });
 

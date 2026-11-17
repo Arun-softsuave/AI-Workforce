@@ -6,6 +6,7 @@ steps:
   - understand            # reads the ticket, links, Brain and the code of EVERY repository; decides repos + build order
   - contract              # the agreement between the repositories (endpoints, fields, types, errors) – skipped for one repo
   - lead_plan             # one plan with a part per repository
+  - doc_readiness         # W5 6a: goldfish readiness + critic on the lead's design document (parts are covered by it)
   - plan_review
   - plan_gate             # ONE plan approval for all repositories
   - run_parts             # builds each repository's part in the decided order; answers the parts' questions itself

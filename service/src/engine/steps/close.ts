@@ -70,7 +70,8 @@ export const CLOSE_STEPS: Record<string, (ctx: StepCtx) => Promise<StepResult>> 
     const wt = it?.worktree;
     if (wt && fs.existsSync(wt)) {
       try { G.removeWorktree(ctx.project.local.path, wt); } catch { /* best effort */ }
-      if (it?.branch) G.git(ctx.project.local.path, ["branch", "-D", it.branch], { allowFail: true });
+      // a finished branch of yours (W16 adopt) is your own: only our folder goes, never your branch
+      if (it?.branch && !it.data?.adopt) G.git(ctx.project.local.path, ["branch", "-D", it.branch], { allowFail: true });
     }
     if (it?.worktree) updateTask(ctx.task.id, { worktree: null });
     endCiWatch(ctx.task.id);
