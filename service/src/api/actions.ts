@@ -9,7 +9,8 @@ import { getTask, mergeData, type Task } from "../engine/tasks.js";
 import { latestApproval } from "../approvals/approvals.js";
 import { normaliseQuestions, approvalChoices } from "../core/questions.js";
 import { truncate } from "../core/util.js";
-import { audit } from "../core/db.js";
+import { audit, db } from "../core/db.js";
+import { prEnded, reopenForOpenPr } from "../kernel/prs.js";
 import { notify } from "../notify/router.js";
 import { logChat } from "../notify/chatLog.js";
 import type { Action } from "./dashboardData.js";
@@ -27,6 +28,29 @@ const act = (t: Task, action: ActionKey, label: string, more: Partial<Action> & 
   const { value, ...rest } = more;
   return { label, method: "POST", path: "/api/act", body: { id: t.id, action, ...(value !== undefined ? { value } : {}) }, ...rest };
 };
+
+/** The PR number an item raised (data.pr / data.prs[0]). */
+function prNumber(t: Task): number | undefined {
+  const p = t.data?.pr ?? (t.data?.prs ?? [])[0];
+  const n = Number(p?.number ?? p?.num);
+  return Number.isFinite(n) && n > 0 ? n : undefined;
+}
+
+/**
+ * The item's own PR is still open: state PR_OPEN, or DONE from the old engine (it ended a ticket at DONE as soon as its
+ * PR was raised) with a PR that was not merged or closed. Acting on it reopens it (kernel/prs.ts reopenForOpenPr).
+ */
+export function prOpen(t: Task): boolean {
+  if (t.state === "PR_OPEN") return true;
+  return t.state === "DONE" && !!prNumber(t) && !prEnded(t.data ?? {});
+}
+
+/** For a two-repo lead: its repository parts whose PR is still open (each gets its own PR buttons). */
+export function prParts(t: Task): Task[] {
+  if (t.playbook !== "dev-lead" && t.kind !== "lead") return [];
+  const rows = db().prepare("SELECT id FROM tasks WHERE (parent_id = ? OR json_extract(data,'$.leadId') = ?) AND state != 'CANCELLED' ORDER BY project_id").all(t.id, t.id) as { id: string }[];
+  return rows.map((r) => getTask(r.id)).filter((x): x is Task => !!x && prOpen(x));
+}
 
 /** The next steps for an item in its current state – the same choices Teams offers, as buttons. */
 export function actionsFor(t: Task): (Action & { confirm?: string })[] {
@@ -52,15 +76,24 @@ export function actionsFor(t: Task): (Action & { confirm?: string })[] {
     if (t.data.takenOver) out.push(act(t, "handback", "Hand back to the plugin"));
     else out.push(act(t, "takeover", "Take over"));
     out.push(act(t, "cancel", "Cancel", { confirm: `Cancel ${ref}?` }));
-  } else if (t.state === "PR_OPEN") {
-    const conflict = t.data.conflict?.state === "open";
-    if (conflict) out.push(act(t, "resolve_conflicts", "Resolve conflicts myself", { primary: true, confirm: `Resolve the conflicts on ${ref}'s PR yourself? You'll see the result before anything is pushed. Lock files and test baselines stay with you.` }));
-    out.push(act(t, "rebase", "Bring the base branch in", { primary: !conflict }));
-    out.push(act(t, "fix_ci", "Fix failing CI"));
-    out.push(act(t, "resolve_comments", "Resolve review comments"));
-    if (t.data.takenOver) out.push(act(t, "handback", "Hand back to the plugin"));
-    else out.push(act(t, "takeover", "Take over"));
-    out.push(act(t, "pause", "Pause"));
+  } else if (prOpen(t) || prParts(t).length) {
+    // a two-repo ticket: one set of PR buttons per repository's PR (the work happens on that repository's part)
+    const parts = prParts(t);
+    const targets = parts.length ? parts : [t];
+    for (const x of targets) {
+      const pr = prNumber(x);
+      const where = parts.length ? ` – ${x.project_id}${pr ? ` PR #${pr}` : ""}` : "";
+      const conflict = x.data.conflict?.state === "open";
+      if (conflict) out.push(act(x, "resolve_conflicts", `Resolve conflicts myself${where}`, { primary: true, confirm: `Resolve the conflicts on ${refOf(x)}'s PR yourself? You'll see the result before anything is pushed. Lock files and test baselines stay with you.` }));
+      out.push(act(x, "rebase", `Bring the base branch in${where}`, { primary: !conflict }));
+      out.push(act(x, "fix_ci", `Fix failing CI${where}`));
+      out.push(act(x, "resolve_comments", `Resolve review comments${where}`));
+    }
+    if (!parts.length) {
+      if (t.data.takenOver) out.push(act(t, "handback", "Hand back to the plugin"));
+      else out.push(act(t, "takeover", "Take over"));
+      out.push(act(t, "pause", "Pause"));
+    }
   } else if (WORKING.has(t.state)) {
     out.push(act(t, "pause", "Pause"));
     out.push(act(t, "cancel", "Cancel", { confirm: `Cancel ${ref}? Work in progress stops; nothing published is changed.` }));
@@ -84,6 +117,8 @@ export async function runDashboardAction(o: { id: string; action: ActionKey; tex
   const t = getTask(o.id);
   if (!t) return { ok: false, message: "That item no longer exists." };
   const ref = refOf(t);
+  // PR work on an item the old engine ended at DONE while its PR is still open: look after it again first
+  if (PR_ACTIONS.has(o.action) && prOpen(t) && t.state === "DONE") { try { reopenForOpenPr(t.id); } catch { /* acted on as it is */ } }
   const { runTool } = await import("../conductor/tools.js");
   const tctx = { who: o.who, original: o.text ?? WHAT[o.action], confirmed: true, channel: "dashboard" };
   const tool = async (call: Parameters<typeof runTool>[0]) => {
@@ -140,6 +175,7 @@ export async function runDashboardAction(o: { id: string; action: ActionKey; tex
 }
 
 const WAS_ANSWER = new Set<ActionKey>(["option", "answer", "change"]);
+const PR_ACTIONS = new Set<ActionKey>(["fix_ci", "resolve_comments", "rebase", "resolve_conflicts"]);
 
 /** One short line in Teams (and the inbox) about what was just done on the dashboard. Never throws. */
 export async function echoToTeams(t: Task, what: string, result?: string): Promise<void> {

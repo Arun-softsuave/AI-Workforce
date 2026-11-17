@@ -607,7 +607,9 @@ async function undoLast(ctx: ToolCtx): Promise<ToolResult> {
 
 async function toolFixPr(args: ToolArgs, ctx: ToolCtx): Promise<ToolResult> {
   const { startFixFromText } = await import("../engine/prFix.js");
-  const ref = args.ref && keysIn(args.ref).length ? keysIn(args.ref)[0].split("@")[0] : undefined;
+  // "KAN-52@nue-backend" names one repository's part – keep it; "KAN-52" is the ticket
+  const ref = args.ref && keysIn(args.ref).length ? (/@[w.-]+/.test(args.ref) ? args.ref.trim().split(/s+/)[0] : keysIn(args.ref)[0].split("@")[0]) : undefined;
+  const ticketKey = ref?.split("@")[0];
   const text = [args.text ?? ctx.original, args.ref && !ref ? args.ref : ""].filter(Boolean).join(" ");
   // engine v2: a ticket of yours with an open PR gets the fix as a job on its own item (W9/W10, G8 "recheck and resolve")
   // "resolve the conflicts yourself / by yourself": your explicit OK for bigger conflicts (still shown before any push)
@@ -619,7 +621,7 @@ async function toolFixPr(args: ToolArgs, ctx: ToolCtx): Promise<ToolResult> {
   if (!item && command && engineVersion() === "v2") {
     try {
       const { resolvePrTargets } = await import("../engine/targets.js");
-      const found = await resolvePrTargets(text, ref);
+      const found = await resolvePrTargets(text, ticketKey);
       if (!("error" in found) && found.targets.length === 1) {
         const { itemForPr, reopenForOpenPr } = await import("../kernel/prs.js");
         const hit = itemForPr(found.targets[0].repo, found.targets[0].num);
@@ -627,11 +629,22 @@ async function toolFixPr(args: ToolArgs, ctx: ToolCtx): Promise<ToolResult> {
       }
     } catch { /* fall back to the fix task below */ }
   }
-  if (item && command && item.state === "PR_OPEN" && ((item as any).owner ?? "me") === "me") {
+  // the PRs to act on: a two-repo ticket acts on each repository's open PR; a ticket the old engine ended at DONE
+  // while its PR is still open is looked after again first (DONE → PR_OPEN)
+  let targets: Task[] = [];
+  if (item && command) {
+    const { prParts, prOpen } = await import("../api/actions.js");
+    const { reopenForOpenPr } = await import("../kernel/prs.js");
+    const parts = prParts(item as Task);
+    targets = (parts.length ? parts : prOpen(item as Task) ? [item as Task] : [])
+      .map((x) => (x.state === "DONE" ? ((reopenForOpenPr(x.id) as any) ?? x) : x))
+      .filter((x) => x.state === "PR_OPEN" && ((x as any).owner ?? "me") === "me");
+  }
+  if (targets.length) {
     const { emit } = await import("../kernel/events.js");
-    emit({ type: "user_command", idemKey: `cmd:${item.id}:${command}:${Date.now()}`, itemId: item.id, payload: { command, by: ctx.who, ours: true, ...(command === "rebase" && resolveAll ? { resolveAll: true } : {}) } });
+    for (const x of targets) emit({ type: "user_command", idemKey: `cmd:${x.id}:${command}:${Date.now()}`, itemId: x.id, payload: { command, by: ctx.who, ours: true, ...(command === "rebase" && resolveAll ? { resolveAll: true } : {}) } });
     await tick();
-    const r = refOf(item);
+    const r = targets.map(refOf).join(" and ");
     return said(command === "fix_ci"
       ? `🛠️ Fixing the failing CI checks on ${r}'s PR. You'll hear from me here when it's done.`
       : command === "rebase"
@@ -641,7 +654,7 @@ async function toolFixPr(args: ToolArgs, ctx: ToolCtx): Promise<ToolResult> {
         : `🛠️ Fixing the review comments (and any failing check) on ${r}'s PR. You'll hear from me here when the fixes are ready.`, true, { ref: r });
   }
   if (command === "rebase") return said("❓ Which PR should I update from its base branch? Give me the PR link or the ticket key.");
-  const r = await startFixFromText(text, ref, ctx.who, (args.mode === "rebase" ? undefined : args.mode) ?? "comments");
+  const r = await startFixFromText(text, ticketKey, ctx.who, (args.mode === "rebase" ? undefined : args.mode) ?? "comments");
   await tick();
   return said(r);
 }

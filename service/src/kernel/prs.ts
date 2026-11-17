@@ -13,7 +13,7 @@ import type { Item, Job } from "./types.js";
 const same = (a?: string | null, b?: string | null) => !!a && !!b && a.toLowerCase() === b.toLowerCase();
 
 /** Does the item's data say its PR(s) were merged or closed? */
-function prEnded(data: Record<string, any>): boolean {
+export function prEnded(data: Record<string, any>): boolean {
   const prs = [data.pr, ...(data.prs ?? []), data.prRef].filter(Boolean);
   return !!(data.merged || data.prMerged || data.closedAt || prs.some((p: any) => p.merged || p.mergedAt || p.state === "merged" || p.state === "closed"));
 }

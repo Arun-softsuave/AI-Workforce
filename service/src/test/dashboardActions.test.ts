@@ -93,3 +93,24 @@ test("the message box is handled like a Teams message and kept in the conversati
   assert.ok(sentTitles().some((x) => x === "🖥️ From the dashboard: \"thanks\""), "Teams sees the exchange");
   assert.equal((await dashboardMessage("   ", "Sneha")).ok, false);
 });
+
+test("KAN-52 case: a two-repo lead the old engine ended at DONE shows PR buttons for each repository's open PR", async () => {
+  const lead = item("DONE");
+  db().prepare("UPDATE tasks SET playbook='dev-lead' WHERE id=?").run(lead.id);
+  const mkPart = (repo: string, state: string, data: Record<string, any>) => {
+    const p = createTask({ projectId: repo, source: "jira", sourceId: `${lead.id}-${repo}`, sourceRef: `${lead.source_ref}@${repo}`, title: "part", kind: "part", state: state as any, data: { leadId: lead.id, ...data } });
+    return p;
+  };
+  const back = mkPart("nue-backend", "PR_OPEN", { pr: { number: 131, repo: "o/back" }, conflict: { state: "open", files: ["a.py"], base: "dev", at: new Date().toISOString() } });
+  const front = mkPart("nue-frontend", "DONE", { pr: { number: 90, repo: "o/front" } });
+  mkPart("nue-merged", "DONE", { pr: { number: 7, repo: "o/m", merged: true } });
+  const acts = actionsFor(getTask(lead.id)!);
+  const labels = acts.map((a) => a.label);
+  assert.equal(labels[0], "Resolve conflicts myself – nue-backend PR #131");
+  assert.ok(labels.includes("Bring the base branch in – nue-frontend PR #90"));
+  assert.ok(!labels.some((l) => /nue-merged/.test(l)), "a merged PR gets no buttons");
+  assert.ok(!labels.includes("Review this work"));
+  // the buttons act on the repository's part, not on the lead
+  assert.equal((acts.find((a) => a.label === "Bring the base branch in – nue-frontend PR #90")!.body as any).id, front.id);
+  assert.equal((acts[0].body as any).id, back.id);
+});

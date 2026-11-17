@@ -427,8 +427,18 @@ test("W16: 'stop, I'll do it myself' takes over; 'continue KAN-97' hands it back
 test("'recheck and resolve' (the focus item's PR) → fix the review comments", async () => {
   setFocus("KAN-98");
   const r = await sayModel("recheck and resolve", { calls: [{ tool: "fix_pr", args: { ref: "KAN-98", mode: "comments" } }] });
-  assert.match(r, /Fixing the review comments[\s\S]*FIX-98@shop/);
-  assert.equal(getTask("FIX-98@shop")!.data.fix.mode, "comments");
+  if (engineVersion() === "v2") {
+    // 1.0.4: the ticket's PR is still open, so the ticket itself is looked after again (DONE → PR_OPEN) and the fix
+    // runs as a job with the ticket's own context – not as a separate FIX task
+    assert.match(r, /Fixing the review comments[\s\S]*KAN-98's PR/);
+    assert.equal(getTask("KAN-98")!.state, "PR_OPEN");
+    const cmd = db().prepare("SELECT payload FROM events WHERE type='user_command' AND item_id=? ORDER BY received_at DESC LIMIT 1").get(getTask("KAN-98")!.id) as any;
+    assert.equal(JSON.parse(cmd.payload).command, "resolve");
+    assert.equal(getTask("FIX-98@shop"), undefined, "no separate fix task");
+  } else {
+    assert.match(r, /Fixing the review comments[\s\S]*FIX-98@shop/);
+    assert.equal(getTask("FIX-98@shop")!.data.fix.mode, "comments");
+  }
 });
 
 test("a review request with a PR link stays on the fast path", async () => {
