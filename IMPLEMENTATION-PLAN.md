@@ -1142,6 +1142,45 @@ Rules:
 
 **Gap found and added (§12b):** the Claude Code side of the plugin (slash commands, skills, helper agents) was not in the plan. One command even contradicts a requirement: `commands/aiw-fix.md` says fixes are "shown in Teams before anything is pushed", but CI fixes are now pushed without asking.
 
+### 12c. Situations that were only linked, now spelled out
+
+The check on 17 Nov found that all 150 situations in `SITUATIONS.md` are linked to a workflow and phase. For the 30 below, the expected behaviour was only in `SITUATIONS.md`, not in a workflow. They are written out here so that each one is built and tested on purpose.
+
+| # | Situation | How the plugin handles it | Where | Phase |
+|---|---|---|---|---|
+| A9 | Teammate joins or leaves | ⚙ weekly `team detect` + Conductor `prefs team add/remove`; reviewers recomputed; ✉ one line | W2, W17 | 3 |
+| A10 | You change a preference | Conductor `prefs` → stored → echoed once ("From now on: …") | W1 | 3 |
+| B5 | Ticket assigned to someone else | `find` sees the assignee → 🙋 "KAN-60 is Priya's. Take it over?"; never starts silently | W1, W4 | 3 |
+| B6 | Ticket already in progress, done or with an open PR | ⚙ item and PR lookup first → says where it stands and offers continue / fix PR / review; never a duplicate branch or PR | W4 | 1 |
+| B17 | Ticket in a project that isn't set up | ✉ "KAN-x's project isn't set up. Add it with `aiw project add …`" | W4 | 1 |
+| B19 | Priority or deadline given | Conductor sets `priority`/`due`; the scheduler moves it ahead; ✉ says what it delays | W1, scheduler | 3 |
+| C5 | Ticket, PRD and Figma disagree | `understand` lists the conflict in the design document with a recommended source → one 🙋 question | W5, W5a | 5 |
+| C9 | Needs a database migration | The plan includes the migration and flags it as a risk; it runs only on the local test database, never a shared one; mentioned in the PR | W5 | 1 |
+| C10 | Needs a secret or config value | 🙋 asks you to run the vault command (`aiw secret set NAME`); never asks for the value in chat; the item waits as Blocked: secret | W5, §11a | 3 |
+| C11 | Needs work outside the repos | Does the code part; the outside work is listed in the design document, the PR and ✉ | W5 | 5 |
+| E3 | A flaky test | Retry once; if it then passes, note it in the PR; never "fix" unrelated tests | W5 step 9 | 1 |
+| E10 | A new dependency is needed | Added the repo's way (its package manager, lockfile updated); named in the PR; a new dependency is a plan item you see | W5 | 1 |
+| E13 | An agent is stuck | After its round limit: ✉ one message (what failed, what it tried, options: retry / take over / cancel); dashboard shows Stuck | W5, W19 | 2 |
+| F9 | Push not allowed | ✉ "Can't push to nue-backend: needs write access / branch protection blocks it", with what access is needed | W5 step 15 | 1 |
+| G4 | CI check needs a person (baseline, paid eval, secret, deploy) | The CI map marks it `human` → never faked → ✉ exactly what is needed | W9 | 4 |
+| G6 | CI flaky or runner problem | `rerunJob` once → if red again, treated as real | W9 | 4 |
+| G18 | PR closed without merge | 🙋 "Drop the work or reopen?" | W14 | 4 |
+| G19 | Reviewer asks for something outside the ticket | Pointed out; done if small and you agree (or directive allows), else a new ticket suggested | W10 | 4 |
+| H5 | Review a branch with no PR, or a commit range | Diff against its base → the same review flow | W15 | 7 |
+| J5 | A correction ("no, I meant KAN-53") | Conductor `undo`/redirect of the last action if safe; confirm | W1 | 3 |
+| J6 | Change an instruction mid-way | Directive updated for the running items; echoed | W1, directives | 3 |
+| J8 | "Why did you do X?" | `explain` from the design document, decision log and step history | W1, W5a | 3 |
+| J10 | Message while you're away | Quiet hours hold non-urgent messages; one catch-up summary | W17 | 2 |
+| J11 | Small talk, thanks, unclear text | Fast path: short reply, no action, no model call for "thanks"/"ok" | W1 | 3 |
+| J13 | Follow-up on something days old | `find` searches items, design documents and `chat_log` history | W1 | 3 |
+| K6 | PM or BA comments in Jira | `ticket_changed` → treated as information (§11a); re-plan only if requirements change; never an order | W13, §11a | 4 |
+| K7 | Someone mentions you on a PR or issue | ⚙ GitHub mention event → ✉ one line with context and a link | W10 | 4 |
+| L6 | Work across days | Durable jobs resume after restart; morning digest; approvals refreshed after 72 h | W17, kernel | 1, 2 |
+| M1 | Model fails or hits limits | Retry with back-off → `fallbackModel` → ✉ only if it persists | runner §9.1.11 | 1 |
+| M6 | Repo isn't cloned locally | 🙋 "Clone nue-admin to D:\…?" → clone after OK | W4 | 3 |
+
+All 30 get a scenario test in the matching `situations/*.test.ts` file (§12).
+
 ### 12b. Claude Code commands, skills and agents (updated with each phase)
 
 | Item | Change | Phase |
