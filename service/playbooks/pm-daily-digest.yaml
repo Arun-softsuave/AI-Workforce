@@ -1,0 +1,8 @@
+id: pm-daily-digest
+title: Project Manager – daily sprint digest
+roles: [project-manager]
+trigger: daily_digest
+steps:
+  - pm_collect
+  - artefact: { kind: pm_digest, tier: small }
+  - deliver: { kind: digest }

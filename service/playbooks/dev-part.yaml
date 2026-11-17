@@ -1,0 +1,12 @@
+id: dev-part
+title: Developer – one repository's part of a lead task
+roles: [backend-developer, frontend-developer, fullstack-developer]
+trigger: part
+steps:
+  - prepare_workspace
+  - context_pack          # + the shared contract, this part's plan and what the other parts already built
+  - implement_test        # questions go to the lead (not the user); the lead asks the user only for product decisions
+  - reviews: { reviewers: [code, security, qa] }
+  - prepublish
+  - report
+  - part_ready            # waits for the lead (integration check, one PR approval, publish)

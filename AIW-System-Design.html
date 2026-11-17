@@ -1,0 +1,928 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>AI Workforce Orchestration</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=Space+Grotesk:wght@500;600;700&display=swap">
+<style>
+/* Layout: a single reading column (max 1120px) of numbered design sections; diagrams and tables scroll inside their own boxes. */
+:root {
+  --bg: #f6f7f9; --surface: #ffffff; --sunk: #eef1f5; --fg: #17202b; --muted: #556170; --line: #d9dfe7;
+  --accent: #1f5fbf; --accent-soft: #e3ecfa;
+  --t-code: #5b6675; --t-code-bg: #eceff3;
+  --t-haiku: #1d7a55; --t-haiku-bg: #e1f3ea;
+  --t-sonnet: #1f5fbf; --t-sonnet-bg: #e3ecfa;
+  --t-opus: #6a3fb5; --t-opus-bg: #eee6fa;
+  --t-you: #a2600a; --t-you-bg: #fbefd9;
+  --ok: #1d7a55; --warn: #a2600a; --bad: #b3261e;
+  --teams: #4b53bc; --teams-bg: #eef0fb;
+  --f-display: "Space Grotesk", "Segoe UI", system-ui, sans-serif;
+  --f-body: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+  --f-mono: "IBM Plex Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #0f141b; --surface: #161d27; --sunk: #1c2531; --fg: #e6ebf2; --muted: #9aa7b8; --line: #2a3442;
+  --accent: #7fb0ff; --accent-soft: #1b2b45;
+  --t-code: #b2bccb; --t-code-bg: #262f3b;
+  --t-haiku: #6fd3a5; --t-haiku-bg: #163428;
+  --t-sonnet: #8db8ff; --t-sonnet-bg: #1b2b45;
+  --t-opus: #c3a6ff; --t-opus-bg: #2b2142;
+  --t-you: #f2b866; --t-you-bg: #3a2a12;
+  --ok: #6fd3a5; --warn: #f2b866; --bad: #ff8a80;
+  --teams: #a7adff; --teams-bg: #22264a; color-scheme: dark; } }
+:root[data-theme="dark"] {
+  --bg: #0f141b; --surface: #161d27; --sunk: #1c2531; --fg: #e6ebf2; --muted: #9aa7b8; --line: #2a3442;
+  --accent: #7fb0ff; --accent-soft: #1b2b45;
+  --t-code: #b2bccb; --t-code-bg: #262f3b;
+  --t-haiku: #6fd3a5; --t-haiku-bg: #163428;
+  --t-sonnet: #8db8ff; --t-sonnet-bg: #1b2b45;
+  --t-opus: #c3a6ff; --t-opus-bg: #2b2142;
+  --t-you: #f2b866; --t-you-bg: #3a2a12;
+  --ok: #6fd3a5; --warn: #f2b866; --bad: #ff8a80;
+  --teams: #a7adff; --teams-bg: #22264a; color-scheme: dark; }
+
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html { -webkit-text-size-adjust: 100%; }
+body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.6 var(--f-body);
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+.wrap { max-width: 1120px; margin: 0 auto; padding-block: 40px 80px; display: grid; gap: 56px; }
+h1, h2, h3 { font-family: var(--f-display); line-height: 1.2; text-wrap: balance; margin: 0; }
+h1 { font-size: clamp(30px, 5vw, 44px); font-weight: 700; letter-spacing: -0.01em; }
+h2 { font-size: 24px; font-weight: 600; }
+h3 { font-size: 17px; font-weight: 600; }
+p { margin: 0; max-width: 72ch; }
+code, .mono { font-family: var(--f-mono); font-size: 0.88em; }
+a { color: var(--accent); }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+.eyebrow { font: 500 12px/1 var(--f-mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+.lead { font-size: 17px; color: var(--muted); max-width: 70ch; }
+section { display: grid; gap: 18px; min-width: 0; }
+.sec-head { display: grid; gap: 6px; }
+.sec-head .num { font: 600 13px/1 var(--f-mono); color: var(--accent); }
+.box { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 20px; min-width: 0; }
+.scroll { overflow-x: auto; }
+.muted { color: var(--muted); }
+.small { font-size: 13px; }
+
+/* header */
+header.top { display: grid; gap: 16px; }
+.decisions { display: flex; flex-wrap: wrap; gap: 8px; }
+.pill { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 999px; font-size: 13px; background: var(--sunk); color: var(--fg); border: 1px solid var(--line); }
+.pill b { font-weight: 600; }
+
+/* targets */
+.targets { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; }
+.target { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; display: grid; gap: 4px; align-content: start; }
+.target .v { font: 600 22px/1.2 var(--f-display); font-variant-numeric: tabular-nums; }
+.target .k { font-size: 13px; color: var(--muted); }
+
+/* tier chips */
+.tier { display: inline-block; padding: 1px 8px; border-radius: 6px; font: 500 12px/1.7 var(--f-mono); white-space: nowrap; }
+.tier.code { color: var(--t-code); background: var(--t-code-bg); }
+.tier.haiku { color: var(--t-haiku); background: var(--t-haiku-bg); }
+.tier.sonnet { color: var(--t-sonnet); background: var(--t-sonnet-bg); }
+.tier.opus { color: var(--t-opus); background: var(--t-opus-bg); }
+.tier.you { color: var(--t-you); background: var(--t-you-bg); }
+.legend { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; font-size: 13px; color: var(--muted); }
+
+/* diagram */
+svg.diagram { display: block; width: 100%; min-width: 860px; height: auto; }
+svg.diagram text { font-family: var(--f-body); fill: var(--fg); }
+svg.diagram .lbl { font-size: 13px; font-weight: 600; }
+svg.diagram .sub { font-size: 11px; fill: var(--muted); }
+svg.diagram .n { font: 600 11px var(--f-mono); fill: var(--accent); }
+svg.diagram .node { fill: var(--surface); stroke: var(--line); stroke-width: 1.2; }
+svg.diagram .node.ai { fill: var(--t-sonnet-bg); stroke: var(--t-sonnet); }
+svg.diagram .node.store { fill: var(--sunk); stroke: var(--muted); }
+svg.diagram .node.gate { fill: var(--t-you-bg); stroke: var(--t-you); }
+svg.diagram .band { fill: var(--sunk); stroke: none; }
+svg.diagram .edge { stroke: var(--muted); stroke-width: 1.3; fill: none; }
+svg.diagram .edgehot { stroke: var(--accent); stroke-width: 1.6; fill: none; }
+svg.diagram .arrow { fill: var(--muted); }
+svg.diagram .arrowhot { fill: var(--accent); }
+svg.diagram .bandlbl { font: 600 11px var(--f-mono); fill: var(--muted); letter-spacing: 0.06em; }
+
+/* tables */
+table { border-collapse: collapse; width: 100%; font-size: 14px; }
+th, td { text-align: left; vertical-align: top; padding: 9px 10px; border-bottom: 1px solid var(--line); }
+th { font: 600 12px/1.3 var(--f-mono); color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; background: var(--sunk); }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+tr:last-child td { border-bottom: none; }
+
+/* components grid */
+.comps { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 12px; }
+.comp { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 16px; display: grid; gap: 8px; align-content: start; min-width: 0; }
+.comp .row { display: flex; gap: 8px; align-items: baseline; justify-content: space-between; flex-wrap: wrap; }
+.comp ul { margin: 0; padding-left: 18px; display: grid; gap: 3px; font-size: 14px; }
+
+/* flows */
+.tabs { display: flex; flex-wrap: wrap; gap: 6px; }
+.tab { font: 500 13px/1 var(--f-body); padding: 9px 12px; border-radius: 8px; border: 1px solid var(--line); background: var(--surface); color: var(--fg); cursor: pointer; }
+.tab[aria-selected="true"] { background: var(--accent); border-color: var(--accent); color: var(--surface); }
+.flow { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr); gap: 16px; align-items: start; }
+@media (max-width: 860px) { .flow { grid-template-columns: 1fr; } }
+.steps { list-style: none; margin: 0; padding: 0; display: grid; gap: 0; counter-reset: s; }
+.steps li { display: grid; grid-template-columns: 28px minmax(0, 1fr); gap: 10px; padding: 10px 0; border-bottom: 1px dashed var(--line); counter-increment: s; }
+.steps li:last-child { border-bottom: none; }
+.steps li::before { content: counter(s); font: 600 12px/26px var(--f-mono); text-align: center; width: 26px; height: 26px; border-radius: 50%; background: var(--sunk); color: var(--muted); }
+.steps .what { display: grid; gap: 4px; }
+.steps .what .h { display: flex; flex-wrap: wrap; gap: 6px 8px; align-items: baseline; }
+.steps .what .h b { font-weight: 600; }
+.steps .what span.d { color: var(--muted); font-size: 14px; }
+.flowfoot { display: flex; flex-wrap: wrap; gap: 8px 16px; font-size: 13px; color: var(--muted); padding-top: 10px; border-top: 1px solid var(--line); margin-top: 6px; }
+.flowfoot b { color: var(--fg); font-variant-numeric: tabular-nums; }
+
+/* Teams messages */
+.chat { display: grid; gap: 10px; }
+.chat .cap { font: 500 12px/1 var(--f-mono); color: var(--muted); letter-spacing: 0.05em; text-transform: uppercase; }
+.msg { background: var(--teams-bg); border: 1px solid color-mix(in srgb, var(--teams) 30%, transparent); border-radius: 10px; padding: 10px 12px; font-size: 14px; line-height: 1.5; display: grid; gap: 4px; }
+.msg .t { font-weight: 600; }
+.msg .a { color: var(--teams); font-size: 13px; }
+.msg.me { background: var(--surface); border-color: var(--line); justify-self: end; max-width: 85%; }
+
+/* cost bars */
+.bars { display: grid; gap: 8px; }
+.bar { display: grid; grid-template-columns: 170px minmax(0, 1fr) 90px; gap: 10px; align-items: center; font-size: 13px; }
+.bar .track { height: 12px; background: var(--sunk); border-radius: 6px; overflow: hidden; }
+.bar .fill { height: 100%; border-radius: 6px; }
+.bar .v { text-align: right; font-variant-numeric: tabular-nums; color: var(--muted); }
+@media (max-width: 560px) { .bar { grid-template-columns: 110px minmax(0, 1fr) 70px; } }
+
+/* states */
+.states { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.state { font: 500 12px/1 var(--f-mono); padding: 7px 9px; border-radius: 6px; background: var(--surface); border: 1px solid var(--line); }
+.state.hot { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+.arrowtxt { color: var(--muted); font-size: 13px; }
+
+/* two col */
+.two { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; }
+.check { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; font-size: 14px; }
+.check li { display: grid; grid-template-columns: 18px minmax(0, 1fr); gap: 8px; }
+.check li::before { content: ""; width: 10px; height: 10px; margin-top: 6px; border-radius: 2px; background: var(--accent); }
+.check.rails li::before { background: var(--bad); }
+
+/* phases */
+.phases { display: grid; gap: 0; }
+.phase { display: grid; grid-template-columns: 70px minmax(0, 1fr) minmax(0, 1fr); gap: 14px; padding: 12px 0; border-bottom: 1px solid var(--line); font-size: 14px; }
+.phase:last-child { border-bottom: none; }
+.phase .p { font: 600 13px/1.4 var(--f-mono); color: var(--accent); }
+@media (max-width: 700px) { .phase { grid-template-columns: 56px minmax(0, 1fr); } .phase .done { grid-column: 2; } }
+
+footer { font-size: 13px; color: var(--muted); display: grid; gap: 6px; }
+@media (prefers-reduced-motion: no-preference) { .tab { transition: background .15s, color .15s; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="top">
+  <div class="eyebrow">AI Workforce · design for review · 16 Nov 2026</div>
+  <h1>AI Workforce Orchestration</h1>
+  <p class="lead">How the plugin takes any request – one ticket, many tickets, an epic, a sprint, a PR, an old ticket, your own branch – and carries it to merged code. Code drives the flow; agents are called only where judgment is needed; everything is remembered so nothing is paid for twice.</p>
+  <div class="decisions" aria-label="Decisions recorded">
+    <span class="pill"><b>Merge order</b> always given</span>
+    <span class="pill"><b>Figma</b> token connection first</span>
+    <span class="pill"><b>Teammate PRs</b> every one notified</span>
+    <span class="pill"><b>Sprint</b> short preview first</span>
+    <span class="pill"><b>.env DB</b> may be used</span>
+    <span class="pill"><b>Messages</b> short; questions may be longer</span>
+  </div>
+</header>
+
+<!-- 1 targets -->
+<section aria-labelledby="s1">
+  <div class="sec-head"><span class="num">01</span><h2 id="s1">What the design must achieve</h2></div>
+  <div class="targets">
+    <div class="target"><span class="v">&lt; 1 s</span><span class="k">"yes", "1", "status" – rules, no AI</span></div>
+    <div class="target"><span class="v">3–8 s</span><span class="k">any other Teams message – one Sonnet turn</span></div>
+    <div class="target"><span class="v">&lt; 10 min</span><span class="k">CI failure → fix pushed, usually</span></div>
+    <div class="target"><span class="v">0 tokens</span><span class="k">polling, events, scheduling, gates, messages</span></div>
+    <div class="target"><span class="v">0.1×</span><span class="k">price of cached prompt prefixes on reuse</span></div>
+    <div class="target"><span class="v">~6 lines</span><span class="k">per Teams message (questions may be longer)</span></div>
+  </div>
+  <p class="small muted">Covers all ~130 situations in <code>SITUATIONS.md</code>. Token figures on this page are design targets to measure against, not measurements.</p>
+</section>
+
+<!-- 2 architecture -->
+<section aria-labelledby="s2">
+  <div class="sec-head"><span class="num">02</span><h2 id="s2">The system at a glance</h2>
+    <p class="muted">Nine parts. Grey boxes are plain code (fast, free, predictable). Blue boxes call a model. The work graph is the single record everything reads and writes.</p></div>
+  <div class="box scroll">
+    <svg class="diagram" viewBox="0 0 1080 560" role="img" aria-label="Architecture: inputs feed the fast path, Conductor and event reactions; everything reads and writes the work graph; the kernel and scheduler run recipes; recipes use the knowledge service, policy gate and messenger.">
+      <defs>
+        <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path class="arrow" d="M0,0 L10,5 L0,10 z"/></marker>
+        <marker id="ahh" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path class="arrowhot" d="M0,0 L10,5 L0,10 z"/></marker>
+      </defs>
+      <!-- inputs band -->
+      <rect class="band" x="10" y="10" width="1060" height="78" rx="10"/>
+      <text class="bandlbl" x="26" y="32">INPUTS · all local polling, no server</text>
+      <rect class="node" x="26" y="42" width="190" height="36" rx="7"/><text class="lbl" x="40" y="65">Teams (3–10 s, adaptive)</text>
+      <rect class="node" x="228" y="42" width="160" height="36" rx="7"/><text class="lbl" x="242" y="65">Jira · ticket index</text>
+      <rect class="node" x="400" y="42" width="200" height="36" rx="7"/><text class="lbl" x="414" y="65">GitHub (ETag · 304 = free)</text>
+      <rect class="node" x="612" y="42" width="150" height="36" rx="7"/><text class="lbl" x="626" y="65">Figma (token)</text>
+      <rect class="node" x="774" y="42" width="140" height="36" rx="7"/><text class="lbl" x="788" y="65">Health · 5 min</text>
+      <rect class="node" x="926" y="42" width="130" height="36" rx="7"/><text class="lbl" x="940" y="65">Clock</text>
+
+      <!-- fast path + conductor -->
+      <rect class="node" x="26" y="130" width="220" height="56" rx="8"/>
+      <text class="n" x="40" y="150">1</text><text class="lbl" x="56" y="150">Fast path</text><text class="sub" x="40" y="171">rules: yes · 1 · status · exact commands</text>
+      <rect class="node ai" x="26" y="206" width="220" height="70" rx="8"/>
+      <text class="n" x="40" y="226">2</text><text class="lbl" x="56" y="226">Conductor</text><text class="sub" x="40" y="246">Sonnet · tools: find, start, status,</text><text class="sub" x="40" y="262">decide, fix, review, adopt, directives</text>
+
+      <!-- work graph -->
+      <rect class="node store" x="300" y="130" width="300" height="146" rx="8"/>
+      <text class="n" x="316" y="152">3</text><text class="lbl" x="332" y="152">Work graph (SQLite)</text>
+      <text class="sub" x="316" y="176">items: sprint · epic · batch · ticket · part · PR · audit</text>
+      <text class="sub" x="316" y="196">edges: depends_on · stacks_on · same_area</text>
+      <text class="sub" x="316" y="216">jobs · steps (checkpoints) · events</text>
+      <text class="sub" x="316" y="236">decisions · directives · contracts · chat</text>
+      <text class="sub" x="316" y="256">context cache · agent cache · health</text>
+
+      <!-- kernel -->
+      <rect class="node" x="654" y="130" width="400" height="146" rx="8"/>
+      <text class="n" x="670" y="152">4</text><text class="lbl" x="686" y="152">Kernel</text>
+      <text class="sub" x="670" y="176">reactions: event → job (ci_failed → ci_fix …)</text>
+      <text class="sub" x="670" y="196">item mailboxes: one job at a time per item</text>
+      <text class="sub" x="670" y="216">durable steps: resume only the step in flight</text>
+      <text class="n" x="670" y="244">5</text><text class="lbl" x="686" y="244">Scheduler</text>
+      <text class="sub" x="670" y="264">waves by dependency · 2 builds/repo · area locks · priority · budgets</text>
+
+      <!-- recipes -->
+      <rect class="node ai" x="300" y="318" width="754" height="92" rx="8"/>
+      <text class="n" x="316" y="340">6</text><text class="lbl" x="332" y="340">Recipes from the step library  (agents work here)</text>
+      <text class="sub" x="316" y="364">plan-scope · understand · plan · build + test · reviews · standards guard · report · publish · merge order</text>
+      <text class="sub" x="316" y="384">ci-fix · comment-fix · review · audit (old work) · QA · adopt branch · rebase · close + learn</text>
+
+      <!-- bottom services -->
+      <rect class="node" x="26" y="460" width="300" height="80" rx="8"/>
+      <text class="n" x="40" y="482">9</text><text class="lbl" x="56" y="482">Messenger</text>
+      <text class="sub" x="40" y="504">short templates · merges routine notices</text><text class="sub" x="40" y="522">focus · "details KAN-45" · morning digest</text>
+      <rect class="node ai" x="390" y="460" width="320" height="80" rx="8"/>
+      <text class="n" x="404" y="482">7</text><text class="lbl" x="420" y="482">Knowledge service</text>
+      <text class="sub" x="404" y="504">ask-desk ladder: decisions → cache → Brain</text><text class="sub" x="404" y="522">→ code → live lookups · asks you last</text>
+      <rect class="node gate" x="774" y="460" width="280" height="80" rx="8"/>
+      <text class="n" x="788" y="482">8</text><text class="lbl" x="804" y="482">Policy &amp; safety gate</text>
+      <text class="sub" x="788" y="504">your directives &gt; preferences &gt; defaults</text><text class="sub" x="788" y="522">hard rails outside everything</text>
+
+      <!-- edges -->
+      <path class="edgehot" d="M120 78 V128" marker-end="url(#ahh)"/>
+      <path class="edge" d="M136 186 V204" marker-end="url(#ah)"/>
+      <path class="edgehot" d="M246 240 H298" marker-end="url(#ahh)"/>
+      <path class="edge" d="M246 158 H298" marker-end="url(#ah)"/>
+      <path class="edge" d="M500 78 V128" marker-end="url(#ah)"/>
+      <path class="edge" d="M840 78 V128" marker-end="url(#ah)"/>
+      <path class="edgehot" d="M600 200 H652" marker-end="url(#ahh)"/>
+      <path class="edgehot" d="M854 276 V316" marker-end="url(#ahh)"/>
+      <path class="edge" d="M450 318 V278" marker-end="url(#ah)"/>
+      <path class="edge" d="M550 410 V458" marker-end="url(#ah)"/>
+      <path class="edge" d="M900 410 V458" marker-end="url(#ah)"/>
+      <path class="edge" d="M360 410 L250 458" marker-end="url(#ah)"/>
+      <path class="edge" d="M130 458 V278" marker-end="url(#ah)"/>
+    </svg>
+  </div>
+  <div class="legend"><span class="tier code">code</span> no tokens <span class="tier haiku">Haiku</span> cheap, fast <span class="tier sonnet">Sonnet</span> most agent work <span class="tier opus">Opus</span> planning &amp; coding M/L only <span class="tier you">you</span> a decision in Teams</div>
+</section>
+
+<!-- 3 components -->
+<section aria-labelledby="s3">
+  <div class="sec-head"><span class="num">03</span><h2 id="s3">What each part does</h2></div>
+  <div class="comps">
+    <div class="comp"><div class="row"><h3>① Fast path</h3><span class="tier code">code</span></div>
+      <ul><li>Answers to a waiting question when the target is clear</li><li>"status", "approve KAN-45", "start KAN-47"</li><li>Under 1 s, no AI</li></ul></div>
+    <div class="comp"><div class="row"><h3>② Conductor</h3><span class="tier sonnet">Sonnet</span></div>
+      <ul><li>Understands any message with the last 20 turns and every active item in view</li><li>Acts through tools, replies once</li><li>Asks back only when ambiguous or destructive</li><li>Echoes every new instruction once</li></ul></div>
+    <div class="comp"><div class="row"><h3>③ Work graph</h3><span class="tier code">SQLite</span></div>
+      <ul><li>One record for every level of work and every job</li><li>Dependencies, contracts, decisions, your instructions, events</li><li>Agents read a slice, write a small result back</li></ul></div>
+    <div class="comp"><div class="row"><h3>④ Kernel</h3><span class="tier code">code</span></div>
+      <ul><li>Event → job rules (no AI)</li><li>One job at a time per item – no collisions</li><li>Each step saved; a crash resumes the one step in flight, model answers read back from cache</li></ul></div>
+    <div class="comp"><div class="row"><h3>⑤ Scheduler</h3><span class="tier code">code</span></div>
+      <ul><li>Runs work in dependency waves</li><li>Up to 5 jobs at once, 2 builds per repo</li><li>Area locks: two items never edit the same files at once</li><li>Priority: you waiting &gt; CI fix &gt; comments &gt; new work</li></ul></div>
+    <div class="comp"><div class="row"><h3>⑥ Recipes</h3><span class="tier sonnet">agents</span></div>
+      <ul><li>Small step lists for each kind of job</li><li>Today's steps reused unchanged</li><li>A new behaviour = one event rule + one recipe</li></ul></div>
+    <div class="comp"><div class="row"><h3>⑦ Knowledge service</h3><span class="tier sonnet">Sonnet</span></div>
+      <ul><li>Every agent question goes here first</li><li>Saved decisions → cached context → Brain → code → live lookups</li><li>Only product decisions reach you, batched per item</li></ul></div>
+    <div class="comp"><div class="row"><h3>⑧ Policy &amp; safety gate</h3><span class="tier code">code</span></div>
+      <ul><li>Your instructions override approvals for their scope</li><li>Hard rails can never be switched off</li><li>Approvals bound to the exact commit and diff</li></ul></div>
+    <div class="comp"><div class="row"><h3>⑨ Messenger</h3><span class="tier code">code</span></div>
+      <ul><li>Title + about 6 lines, one decision each</li><li>Routine notices merged within 60 s</li><li>Details only when asked</li><li>Morning digest, quiet hours</li></ul></div>
+  </div>
+</section>
+
+<!-- 4 agents -->
+<section aria-labelledby="s4">
+  <div class="sec-head"><span class="num">04</span><h2 id="s4">The agents, their models and their budgets</h2>
+    <p class="muted">Each agent gets one objective, a fixed output format and clear boundaries, and returns a short structured result – never its whole working context.</p></div>
+  <div class="box scroll" style="padding:0">
+    <table>
+      <thead><tr><th>Agent</th><th>Model</th><th>Called when</th><th>Reads</th><th>Returns</th><th class="num">Target tokens</th></tr></thead>
+      <tbody>
+        <tr><td>Conductor</td><td><span class="tier sonnet">Sonnet</span></td><td>a Teams message the rules can't settle</td><td>working set, last 20 turns, message</td><td>tool calls + one reply</td><td class="num">8–12k (cached)</td></tr>
+        <tr><td>History &amp; context distiller</td><td><span class="tier haiku">Haiku</span></td><td>long chat, new Jira/Figma/PRD source</td><td>the raw source</td><td>short distilled text, cached</td><td class="num">1–5k</td></tr>
+        <tr><td>Scope planner (sprint / epic)</td><td><span class="tier opus">Opus</span></td><td>once per sprint or epic</td><td>all tickets, PRD, both Brains</td><td>tickets, waves, dependencies, contracts, merge order</td><td class="num">30–60k</td></tr>
+        <tr><td>Ticket lead (understand + plan)</td><td><span class="tier opus">Opus</span> M/L · <span class="tier sonnet">Sonnet</span> S</td><td>each ticket</td><td>its slice + code by search</td><td>requirements, repos, short plan</td><td class="num">25–80k</td></tr>
+        <tr><td>Plan reviewer</td><td><span class="tier sonnet">Sonnet</span></td><td>after each plan</td><td>plan + acceptance criteria</td><td>pass / issues</td><td class="num">~8k</td></tr>
+        <tr><td>Knowledge agent</td><td><span class="tier sonnet">Sonnet</span></td><td>any agent question not in the cache</td><td>code, live lookups (≤ 6 turns)</td><td>answer, confidence, evidence</td><td class="num">5–15k</td></tr>
+        <tr><td>Implementer</td><td><span class="tier opus">Opus</span> M/L · <span class="tier sonnet">Sonnet</span> S</td><td>build</td><td>plan, rules card, files it opens</td><td>change + commit subject</td><td class="num">60–150k</td></tr>
+        <tr><td>Reviewers: code, security, QA</td><td><span class="tier sonnet">Sonnet</span></td><td>after build, in parallel</td><td>diff + plan only</td><td>findings</td><td class="num">10–20k each</td></tr>
+        <tr><td>Standards guard</td><td><span class="tier code">code</span> + <span class="tier haiku">Haiku</span></td><td>before every push</td><td>changed files, rules card</td><td>removed stray files, missing docstrings</td><td class="num">0–2k</td></tr>
+        <tr><td>Reporter · screenshotter</td><td><span class="tier sonnet">Sonnet</span></td><td>before the PR</td><td>results, template; changed pages</td><td>PR text; desktop + mobile shots</td><td class="num">10–40k</td></tr>
+        <tr><td>CI triage → CI fixer</td><td><span class="tier code">code</span> → <span class="tier sonnet">Sonnet</span></td><td>a check fails</td><td>failing step + first error only</td><td>fix, pushed</td><td class="num">10–60k</td></tr>
+        <tr><td>Comment resolver</td><td><span class="tier sonnet">Sonnet</span></td><td>"resolve the comments"</td><td>each comment + its code</td><td>fix / answer / disagree per comment</td><td class="num">20–50k</td></tr>
+        <tr><td>PR reviewer (teammate's PR)</td><td><span class="tier sonnet">Sonnet</span></td><td>"review PR 140"</td><td>diff, ticket, PRD sections</td><td>review comments</td><td class="num">20–40k</td></tr>
+        <tr><td>QA engineer</td><td><span class="tier sonnet">Sonnet</span></td><td>"QA PR 140"</td><td>criteria, diff, local test runs</td><td>bugs → GitHub issues</td><td class="num">30–60k</td></tr>
+        <tr><td>Auditor (old work)</td><td><span class="tier sonnet">Sonnet</span></td><td>"review KAN-12" (merged long ago)</td><td>merged diff, later changes, criteria</td><td>met / partial / missing / regressed</td><td class="num">20–50k</td></tr>
+        <tr><td>Gap analyst</td><td><span class="tier sonnet">Sonnet</span></td><td>"finish my branch"</td><td>your diff + ticket</td><td>done / remaining</td><td class="num">20–40k</td></tr>
+        <tr><td>Merge-order planner</td><td><span class="tier code">code</span></td><td>whenever PRs depend on each other</td><td>dependency edges</td><td>ordered list, in PRs and Teams</td><td class="num">0</td></tr>
+        <tr><td>Memory keeper</td><td><span class="tier haiku">Haiku</span></td><td>after a merge</td><td>decisions, repeated comments</td><td>Brain facts, rules-card lines</td><td class="num">3–5k</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- 5 flows -->
+<section aria-labelledby="s5">
+  <div class="sec-head"><span class="num">05</span><h2 id="s5">How each kind of request flows</h2>
+    <p class="muted">Pick a situation. Each step shows who does it; the right side shows what you see in Teams.</p></div>
+  <div class="tabs" role="tablist" aria-label="Flows">
+    <button class="tab" role="tab" id="t-ticket" aria-controls="p-ticket" aria-selected="true">One ticket</button>
+    <button class="tab" role="tab" id="t-batch" aria-controls="p-batch" aria-selected="false">Many tickets</button>
+    <button class="tab" role="tab" id="t-sprint" aria-controls="p-sprint" aria-selected="false">Sprint / epic</button>
+    <button class="tab" role="tab" id="t-ci" aria-controls="p-ci" aria-selected="false">CI fails</button>
+    <button class="tab" role="tab" id="t-team" aria-controls="p-team" aria-selected="false">Two developers</button>
+    <button class="tab" role="tab" id="t-audit" aria-controls="p-audit" aria-selected="false">Old ticket review</button>
+    <button class="tab" role="tab" id="t-adopt" aria-controls="p-adopt" aria-selected="false">Finish my branch</button>
+    <button class="tab" role="tab" id="t-conn" aria-controls="p-conn" aria-selected="false">Connector drops</button>
+  </div>
+
+  <!-- one ticket -->
+  <div class="box flow" role="tabpanel" id="p-ticket" aria-labelledby="t-ticket">
+    <div>
+      <ol class="steps">
+        <li><div class="what"><div class="h"><b>Read the message</b><span class="tier code">code</span><span class="tier sonnet">Sonnet</span></div><span class="d">"Do the invite email task" → <code>find</code> matches KAN-45 from the ticket index → <code>start</code>.</span></div></li>
+        <li><div class="what"><div class="h"><b>Understand once</b><span class="tier haiku">Haiku</span><span class="tier opus">Opus</span></div><span class="d">Jira, PRD, Figma fetched in parallel and distilled into the cache; the lead reads the code by search.</span></div></li>
+        <li><div class="what"><div class="h"><b>Answer its own questions</b><span class="tier sonnet">Sonnet</span></div><span class="d">Knowledge agent: saved decisions → cache → Brain → code. Only product decisions go to you.</span></div></li>
+        <li><div class="what"><div class="h"><b>Plan + review</b><span class="tier opus">Opus</span><span class="tier sonnet">Sonnet</span></div><span class="d">One short plan message. Approval unless you said "no approval".</span></div></li>
+        <li><div class="what"><div class="h"><b>Build and test</b><span class="tier opus">Opus</span><span class="tier code">code</span></div><span class="d">Implementer with the rules card; lint, format, targeted tests; up to 3 rounds sending only the failure.</span></div></li>
+        <li><div class="what"><div class="h"><b>Check</b><span class="tier sonnet">Sonnet ×3</span><span class="tier code">code</span></div><span class="d">Code, security, QA reviewers in parallel; standards guard removes stray files and adds missing docstrings; secrets and AI-mention scan.</span></div></li>
+        <li><div class="what"><div class="h"><b>Raise the PR</b><span class="tier you">you</span><span class="tier code">code</span></div><span class="d">One approval message (skippable). Normal PR to dev, reviewers requested, screenshots for frontend.</span></div></li>
+        <li><div class="what"><div class="h"><b>Stay alive until merged</b><span class="tier code">code</span></div><span class="d">State PR_OPEN: CI watched, comments and conflicts handled by event rules.</span></div></li>
+      </ol>
+      <div class="flowfoot"><span>Messages: <b>3</b></span><span>Target: <b>~0.2–0.4M</b> tokens (M ticket), mostly cached reads</span><span>Situations: B1–B4, C, D, E, F</span></div>
+    </div>
+    <div class="chat"><span class="cap">In Teams</span>
+      <div class="msg me">do the invite email task</div>
+      <div class="msg"><span class="t">📋 KAN-45 · Invite by email — plan</span><span>Backend · size M · 6 files</span><span>1. POST /invites with a 7-day token<br>2. Send via the existing mailer<br>3. Tests: created, duplicate, expired</span><span>Found: expiry 7 days (PRD §3.2)</span><span class="a">Reply "approve" · or say what to change</span></div>
+      <div class="msg"><span class="t">✅ KAN-45 · built and tested</span><span>6 files · tests pass · reviews OK</span><span class="a">Reply "raise PR"</span></div>
+      <div class="msg"><span class="t">🚀 KAN-45 · PR #140 raised</span><span>Reviewer: Eric · watching CI</span></div>
+    </div>
+  </div>
+
+  <!-- batch -->
+  <div class="box flow" role="tabpanel" id="p-batch" aria-labelledby="t-batch" hidden>
+    <div>
+      <ol class="steps">
+        <li><div class="what"><div class="h"><b>Resolve every target</b><span class="tier code">code</span><span class="tier sonnet">Sonnet</span></div><span class="d">"Do KAN-45, KAN-47 and the email templates task, no approvals" → three tickets found (the last one by name: KAN-52); the instruction is stored as a directive for this batch and echoed once.</span></div></li>
+        <li><div class="what"><div class="h"><b>Find overlaps</b><span class="tier haiku">Haiku</span><span class="tier code">code</span></div><span class="d">Cheap check of titles, areas and contracts: KAN-47 uses KAN-45's API → edge <code>depends_on</code>; shared files → area lock.</span></div></li>
+        <li><div class="what"><div class="h"><b>Run in waves</b><span class="tier code">code</span></div><span class="d">Wave 1: KAN-45 and KAN-52 in parallel. Wave 2: KAN-47, stacked on KAN-45's branch.</span></div></li>
+        <li><div class="what"><div class="h"><b>Each ticket runs the one-ticket flow</b><span class="tier opus">Opus</span><span class="tier sonnet">Sonnet</span></div><span class="d">Plans are sent as information (no approvals, as you asked). Questions only if the data can't answer them.</span></div></li>
+        <li><div class="what"><div class="h"><b>Merge order</b><span class="tier code">code</span></div><span class="d">Computed from the edges; written into each PR ("merge 2 of 2, after #140"), in Teams and in status. Merged out of order → warning and rebase.</span></div></li>
+      </ol>
+      <div class="flowfoot"><span>Messages: <b>1 + 1 per PR</b></span><span>Overlap check: <b>~2k</b> tokens</span><span>Situations: B7, B8, B19, B20, F8, L2</span></div>
+    </div>
+    <div class="chat"><span class="cap">In Teams</span>
+      <div class="msg me">do KAN-45, KAN-47 and the email templates task, no approvals</div>
+      <div class="msg"><span class="t">👍 Starting 3 tickets · no approvals</span><span>• KAN-45 Invite by email — backend<br>• KAN-52 Invite templates — frontend<br>• KAN-47 Seller dashboard — after KAN-45</span><span class="a">Say "status" any time</span></div>
+      <div class="msg"><span class="t">🚀 2 PRs raised · merge in this order</span><span>1. #140 KAN-45 (backend)<br>2. #141 KAN-47 (stacked on #140)</span></div>
+    </div>
+  </div>
+
+  <!-- sprint -->
+  <div class="box flow" role="tabpanel" id="p-sprint" aria-labelledby="t-sprint" hidden>
+    <div>
+      <ol class="steps">
+        <li><div class="what"><div class="h"><b>Preview first</b><span class="tier code">code</span></div><span class="d">"Build sprint 14" → sprint tickets from Jira; count, sizes, repos, rough estimate. Shown once, even with "no approvals".</span></div></li>
+        <li><div class="what"><div class="h"><b>Understand the whole scope once</b><span class="tier haiku">Haiku</span><span class="tier opus">Opus</span></div><span class="d">Epic and child tickets, PRD, both Brains → one shared, cached context. Children never re-read it.</span></div></li>
+        <li><div class="what"><div class="h"><b>Scope plan</b><span class="tier opus">Opus</span><span class="tier sonnet">Sonnet</span></div><span class="d">Tickets → repos; dependencies; shared contracts (APIs, fields, DB changes); waves; merge order; gaps ("no ticket covers email templates").</span></div></li>
+        <li><div class="what"><div class="h"><b>One approval for the plan</b><span class="tier you">you</span></div><span class="d">About 15 lines. Child plans then run as information unless you ask to see each.</span></div></li>
+        <li><div class="what"><div class="h"><b>Waves</b><span class="tier code">code</span></div><span class="d">Independent tickets in parallel; dependent ones stacked; area locks stop collisions; budget per sprint.</span></div></li>
+        <li><div class="what"><div class="h"><b>Contracts kept in step</b><span class="tier opus">Opus</span></div><span class="d">A ticket that needs a contract change asks the planner; affected tickets are re-checked.</span></div></li>
+        <li><div class="what"><div class="h"><b>Epic check and summary</b><span class="tier sonnet">Sonnet</span></div><span class="d">Acceptance criteria × merged code; one summary: shipped, follow-ups, cost.</span></div></li>
+      </ol>
+      <div class="flowfoot"><span>Messages: <b>preview + plan + 1 per PR + daily digest</b></span><span>Planner: <b>~30–60k</b> once</span><span>Situations: B9–B12, B15, B18, D7, O2</span></div>
+    </div>
+    <div class="chat"><span class="cap">In Teams</span>
+      <div class="msg me">build sprint 14</div>
+      <div class="msg"><span class="t">🗂️ Sprint 14 · preview</span><span>12 tickets · backend 7, frontend 5<br>3 depend on others · est. 2–3 days</span><span class="a">Reply "start" · or drop tickets</span></div>
+      <div class="msg"><span class="t">☀️ Sprint 14 · morning</span><span>Done 4 · In progress 3 · Waiting on you 1<br>Blocked 1 (KAN-60 waits for #140 merge)</span><span class="a">Merge next: #140, then #141</span></div>
+    </div>
+  </div>
+
+  <!-- ci -->
+  <div class="box flow" role="tabpanel" id="p-ci" aria-labelledby="t-ci" hidden>
+    <div>
+      <ol class="steps">
+        <li><div class="what"><div class="h"><b>Event</b><span class="tier code">code</span></div><span class="d">CI is polled every 60 s while checks run. <code>ci_failed</code> lands in KAN-45's mailbox → job <code>ci_fix</code>. No message yet.</span></div></li>
+        <li><div class="what"><div class="h"><b>Read the failure</b><span class="tier code">code</span></div><span class="d">Failed step, command, first error (~3k characters) – never the whole log.</span></div></li>
+        <li><div class="what"><div class="h"><b>Classify</b><span class="tier code">code</span><span class="tier haiku">Haiku</span></div><span class="d">Uses the CI map learned at onboarding: caused by this PR → fix · fails on dev too → leave it · flaky/runner → re-run once · needs a person (baseline, paid eval, secret) → tell you exactly what.</span></div></li>
+        <li><div class="what"><div class="h"><b>Fix</b><span class="tier sonnet">Sonnet</span></div><span class="d">Same command run locally, standards guard, commit <code>fix(scope): …</code>, push. No asking (your rule). Opus only on round 3.</span></div></li>
+        <li><div class="what"><div class="h"><b>Watch again</b><span class="tier code">code</span></div><span class="d">Up to 3 rounds; never weakens tests or edits CI files.</span></div></li>
+      </ol>
+      <div class="flowfoot"><span>Messages: <b>1</b> (the result)</span><span>Target: <b>10–60k</b> tokens</span><span>Situations: G1–G8</span></div>
+    </div>
+    <div class="chat"><span class="cap">In Teams</span>
+      <div class="msg"><span class="t">✅ KAN-45 · PR #140 CI green</span><span>Fixed "Lint &amp; Format": ruff format in 2 files<br>Pushed a1b2c3d</span></div>
+      <div class="msg"><span class="t">⚠️ KAN-45 · PR #140 needs you</span><span>"Regression replay" needs a re-recorded baseline – I don't fake those.</span><span class="a">Run the baseline job, or say "details"</span></div>
+    </div>
+  </div>
+
+  <!-- two devs -->
+  <div class="box flow" role="tabpanel" id="p-team" aria-labelledby="t-team" hidden>
+    <div>
+      <ol class="steps">
+        <li><div class="what"><div class="h"><b>You raise a PR</b><span class="tier code">code</span></div><span class="d">Reviewers requested (team list or CODEOWNERS). GitHub is the shared channel – no server.</span></div></li>
+        <li><div class="what"><div class="h"><b>Teammate's plugin notices</b><span class="tier code">code</span></div><span class="d">Every PR a teammate opens is notified (your decision), with the link and "say review PR 140".</span></div></li>
+        <li><div class="what"><div class="h"><b>Teammate: "review PR 140"</b><span class="tier sonnet">Sonnet</span></div><span class="d">Review against the ticket and PRD; shown to them first (or posted directly if they chose that).</span></div></li>
+        <li><div class="what"><div class="h"><b>Your plugin sees the comments</b><span class="tier code">code</span></div><span class="d">One message with a summary and "say resolve the comments".</span></div></li>
+        <li><div class="what"><div class="h"><b>You: "resolve the comments"</b><span class="tier sonnet">Sonnet</span></div><span class="d">Fix / answer / disagree with a reason per comment; push; reply on each thread; re-request review.</span></div></li>
+        <li><div class="what"><div class="h"><b>Teammate's plugin sees the fixes</b><span class="tier code">code</span></div><span class="d">"Sneha resolved 4/4 comments – re-review?" Ownership is fixed: only the author's plugin pushes, only reviewers' plugins review.</span></div></li>
+        <li><div class="what"><div class="h"><b>"QA PR 140"</b><span class="tier sonnet">Sonnet</span></div><span class="d">Bugs become GitHub issues linked in the PR; both plugins see them.</span></div></li>
+      </ol>
+      <div class="flowfoot"><span>Each person gets only the messages that concern them</span><span>Situations: G9–G12, H1–H3, K1–K7</span></div>
+    </div>
+    <div class="chat"><span class="cap">Teammate's Teams</span>
+      <div class="msg"><span class="t">🔔 Sneha raised PR #140 · KAN-45</span><span>Invite by email · backend · 6 files</span><span class="a">Say "review PR 140"</span></div>
+      <span class="cap">Your Teams</span>
+      <div class="msg"><span class="t">💬 Eric left 4 comments on PR #140</span><span>2 on validation, 1 naming, 1 test</span><span class="a">Say "resolve the comments"</span></div>
+      <div class="msg"><span class="t">✅ PR #140 · 4 comments resolved</span><span>3 fixed, 1 answered · review re-requested</span></div>
+    </div>
+  </div>
+
+  <!-- audit -->
+  <div class="box flow" role="tabpanel" id="p-audit" aria-labelledby="t-audit" hidden>
+    <div>
+      <ol class="steps">
+        <li><div class="what"><div class="h"><b>Find the old work</b><span class="tier code">code</span></div><span class="d">"Review KAN-12" (merged a month ago) → Jira development links → GitHub PR search by key → <code>git log --grep KAN-12</code>.</span></div></li>
+        <li><div class="what"><div class="h"><b>Take the merged change</b><span class="tier code">code</span></div><span class="d">The merge or squash commit range; then any later commits to the same files (edits, reverts).</span></div></li>
+        <li><div class="what"><div class="h"><b>Audit</b><span class="tier sonnet">Sonnet</span></div><span class="d">Each acceptance criterion against the merged diff and today's code → met / partial / missing / regressed.</span></div></li>
+        <li><div class="what"><div class="h"><b>Report and offer</b><span class="tier you">you</span></div><span class="d">Short verdict, details on request; offer GitHub issues or a follow-up Jira ticket. Never comments on a closed PR unless asked.</span></div></li>
+      </ol>
+      <div class="flowfoot"><span>Messages: <b>1</b></span><span>Target: <b>20–50k</b> tokens</span><span>Situations: H4–H7</span></div>
+    </div>
+    <div class="chat"><span class="cap">In Teams</span>
+      <div class="msg me">review KAN-12</div>
+      <div class="msg"><span class="t">🔎 KAN-12 · Refund limits — audit</span><span>Merged in PR #98 (12 Oct)<br>4 of 5 criteria met · 1 partial: no rate limit<br>Changed since: refund.py (16 Oct)</span><span class="a">Say "create follow-up" · or "details"</span></div>
+    </div>
+  </div>
+
+  <!-- adopt -->
+  <div class="box flow" role="tabpanel" id="p-adopt" aria-labelledby="t-adopt" hidden>
+    <div>
+      <ol class="steps">
+        <li><div class="what"><div class="h"><b>Take the branch</b><span class="tier code">code</span></div><span class="d">"I'm on feat/KAN-45/invites, finish it" → fetch; a worktree on that branch; your commits kept and never rewritten.</span></div></li>
+        <li><div class="what"><div class="h"><b>Gap analysis</b><span class="tier sonnet">Sonnet</span></div><span class="d">Ticket and criteria against your diff → done / partly done / missing.</span></div></li>
+        <li><div class="what"><div class="h"><b>Plan only the rest</b><span class="tier sonnet">Sonnet</span><span class="tier you">you</span></div><span class="d">One short message; approval per your preferences.</span></div></li>
+        <li><div class="what"><div class="h"><b>Build on top</b><span class="tier opus">Opus</span><span class="tier code">code</span></div><span class="d">Same build, check and standards steps; normal push; PR raised, or the existing PR continues.</span></div></li>
+        <li><div class="what"><div class="h"><b>You push meanwhile?</b><span class="tier code">code</span></div><span class="d">Its local work is rebased onto your new commits first; a conflict stops and tells you. Never forces.</span></div></li>
+      </ol>
+      <div class="flowfoot"><span>Messages: <b>2–3</b></span><span>Usually cheaper than starting fresh</span><span>Situations: I1–I4</span></div>
+    </div>
+    <div class="chat"><span class="cap">In Teams</span>
+      <div class="msg me">I'm on feat/KAN-45/invites, finish it</div>
+      <div class="msg"><span class="t">🧩 KAN-45 · your branch</span><span>Done: endpoint, model<br>Left: expiry check, email send, 3 tests</span><span class="a">Reply "go" · or say what to change</span></div>
+    </div>
+  </div>
+
+  <!-- connector -->
+  <div class="box flow" role="tabpanel" id="p-conn" aria-labelledby="t-conn" hidden>
+    <div>
+      <ol class="steps">
+        <li><div class="what"><div class="h"><b>Health check every 5 min</b><span class="tier code">code</span></div><span class="d">Jira <code>myself</code>, GitHub <code>user</code> (304 = free), Figma token <code>me</code>.</span></div></li>
+        <li><div class="what"><div class="h"><b>It drops</b><span class="tier code">code</span></div><span class="d">One message straight away with the reconnect command; repeated every 4 h in working hours while it stays down.</span></div></li>
+        <li><div class="what"><div class="h"><b>Work keeps going</b><span class="tier code">code</span></div><span class="d">Jobs that need it wait as BLOCKED; everything else runs.</span></div></li>
+        <li><div class="what"><div class="h"><b>It's back</b><span class="tier code">code</span></div><span class="d">"Reconnected" and the blocked jobs resume on their own.</span></div></li>
+      </ol>
+      <div class="flowfoot"><span>Tokens: <b>0</b></span><span>Situations: A6, A7, L4</span></div>
+    </div>
+    <div class="chat"><span class="cap">In Teams</span>
+      <div class="msg"><span class="t">⚠️ Jira disconnected</span><span>2 tickets are waiting for it; everything else runs.</span><span class="a">Run: aiw connect jira</span></div>
+      <div class="msg"><span class="t">✅ Jira reconnected</span><span>KAN-45 and KAN-47 resumed.</span></div>
+    </div>
+  </div>
+</section>
+
+<!-- 6 orchestration inside a job -->
+<section aria-labelledby="s6">
+  <div class="sec-head"><span class="num">06</span><h2 id="s6">Inside a job: how agents get what they need</h2>
+    <p class="muted">Agents never fetch freely and never call each other directly. Every need goes through one of two routes, and every answer is cached against the version of its source, so it is paid for once.</p></div>
+
+  <div class="two">
+    <div class="box" style="display:grid;gap:10px">
+      <h3>Route 1 · Ask while working (synchronous)</h3>
+      <p class="small">A tool call inside the agent's turn. The <b>context broker</b> (code) answers it and the agent carries on in the same turn.</p>
+      <ul class="check">
+        <li><span><code>figma(frame, need)</code> – one frame, distilled to a spec card</span></li>
+        <li><span><code>code.search / code.read / code.map</code> – exact lines, not folders</span></li>
+        <li><span><code>ticket() · prd(query) · contract() · history()</code></span></li>
+        <li><span><code>ask(question)</code> – the knowledge agent runs and replies inline</span></li>
+      </ul>
+      <p class="small muted">Used when the answer is needed to keep going and doesn't change anyone else's work.</p>
+    </div>
+    <div class="box" style="display:grid;gap:10px">
+      <h3>Route 2 · Raise it (asynchronous)</h3>
+      <p class="small">The agent ends its step with a result such as <code>needs_decision</code>, <code>contract_change</code> or <code>blocked</code>. The <b>kernel</b> routes it as an event to the right mailbox.</p>
+      <ul class="check">
+        <li><span>A contract change → the lead or planner decides → affected items re-run the affected step</span></li>
+        <li><span>A blocking review finding → back to build with only the findings</span></li>
+        <li><span>A product question → you (other items keep running)</span></li>
+        <li><span>The ticket changed in Jira → a delta re-plan at the next step boundary</span></li>
+      </ul>
+      <p class="small muted">Used when the answer changes the plan, another item, or needs a person.</p>
+    </div>
+  </div>
+
+  <div class="box" style="display:grid;gap:14px">
+    <h3>The context broker: one path for every lookup</h3>
+    <div class="scroll">
+      <svg class="diagram" viewBox="0 0 1060 190" style="min-width:820px" role="img" aria-label="Agent tool call goes to the broker, which checks the cache by source version; on a hit it returns the distilled text; on a miss it fetches only the needed part from the connector, distils it with Haiku, stores it and returns it.">
+        <defs><marker id="ah2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path class="arrow" d="M0,0 L10,5 L0,10 z"/></marker></defs>
+        <rect class="node ai" x="10" y="60" width="150" height="60" rx="8"/><text class="lbl" x="24" y="86">Agent</text><text class="sub" x="24" y="106">tool call</text>
+        <rect class="node" x="200" y="60" width="170" height="60" rx="8"/><text class="lbl" x="214" y="86">Broker</text><text class="sub" x="214" y="106">checks policy + budget</text>
+        <rect class="node store" x="410" y="10" width="200" height="60" rx="8"/><text class="lbl" x="424" y="36">Cache hit?</text><text class="sub" x="424" y="56">key = source + version</text>
+        <rect class="node" x="410" y="112" width="200" height="60" rx="8"/><text class="lbl" x="424" y="138">Miss → fetch only</text><text class="sub" x="424" y="158">the frame / section / lines</text>
+        <rect class="node ai" x="650" y="112" width="170" height="60" rx="8"/><text class="lbl" x="664" y="138">Distil (Haiku)</text><text class="sub" x="664" y="158">if large → short card</text>
+        <rect class="node store" x="860" y="112" width="190" height="60" rx="8"/><text class="lbl" x="874" y="138">Store + return</text><text class="sub" x="874" y="158">next caller: free</text>
+        <rect class="node" x="860" y="10" width="190" height="60" rx="8"/><text class="lbl" x="874" y="36">Return to agent</text><text class="sub" x="874" y="56">1–3k tokens, cited</text>
+        <path class="edge" d="M160 90 H198" marker-end="url(#ah2)"/>
+        <path class="edge" d="M370 80 L408 46" marker-end="url(#ah2)"/>
+        <path class="edge" d="M370 100 L408 136" marker-end="url(#ah2)"/>
+        <path class="edge" d="M610 40 H858" marker-end="url(#ah2)"/><text class="sub" x="700" y="32">hit · 0 tokens</text>
+        <path class="edge" d="M610 142 H648" marker-end="url(#ah2)"/>
+        <path class="edge" d="M820 142 H858" marker-end="url(#ah2)"/>
+        <path class="edge" d="M955 112 V72" marker-end="url(#ah2)"/>
+      </svg>
+    </div>
+    <div class="scroll" style="padding:0">
+      <table>
+        <thead><tr><th>Source</th><th>Version that invalidates the cache</th><th>Fetched as</th></tr></thead>
+        <tbody>
+          <tr><td>Figma</td><td>file <code>version</code> / <code>lastModified</code></td><td>one node (frame) by id, never the whole file</td></tr>
+          <tr><td>Jira ticket</td><td><code>updated</code> time</td><td>description, criteria, comments since last read</td></tr>
+          <tr><td>PRD / Notion</td><td>document hash / edit time</td><td>the matching section</td></tr>
+          <tr><td>Code</td><td>commit SHA + file hash</td><td>search hits, line ranges, code map entries</td></tr>
+          <tr><td>Decisions</td><td>never (until you change one)</td><td>the answer + where it came from</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="tabs" role="tablist" aria-label="Orchestration examples">
+    <button class="tab" role="tab" id="o-figma" aria-controls="q-figma" aria-selected="true">Needs Figma again</button>
+    <button class="tab" role="tab" id="o-code" aria-controls="q-code" aria-selected="false">Understand the code again</button>
+    <button class="tab" role="tab" id="o-ask" aria-controls="q-ask" aria-selected="false">Has a question</button>
+    <button class="tab" role="tab" id="o-contract" aria-controls="q-contract" aria-selected="false">Contract must change</button>
+    <button class="tab" role="tab" id="o-review" aria-controls="q-review" aria-selected="false">Review finds a problem</button>
+    <button class="tab" role="tab" id="o-jira" aria-controls="q-jira" aria-selected="false">Ticket changes mid-build</button>
+    <button class="tab" role="tab" id="o-you" aria-controls="q-you" aria-selected="false">Waiting on you</button>
+  </div>
+
+  <div class="box flow" role="tabpanel" id="q-figma" aria-labelledby="o-figma">
+    <div>
+      <ol class="steps">
+        <li><div class="what"><div class="h"><b>Understand step left a pointer</b><span class="tier code">work graph</span></div><span class="d">While understanding KAN-52, the lead mapped the ticket to Figma frames: <code>Invite modal → node 812:44</code>, with short design notes (layout, states). Stored on the item.</span></div></li>
+        <li><div class="what"><div class="h"><b>Implementer needs exact detail</b><span class="tier opus">Opus</span></div><span class="d">Building the modal, it needs spacing and the error state. It calls <code>figma("Invite modal", need: "spacing, colors, error state")</code>.</span></div></li>
+        <li><div class="what"><div class="h"><b>Broker checks the cache</b><span class="tier code">code</span></div><span class="d">Key = file + node 812:44 + file version. The notes exist but not the measurements → miss for this need.</span></div></li>
+        <li><div class="what"><div class="h"><b>Fetch only that frame</b><span class="tier code">Figma token</span></div><span class="d">Design context of node 812:44 only – not the file. If Figma is unreachable: carry on with the notes, record an assumption, health alert.</span></div></li>
+        <li><div class="what"><div class="h"><b>Distil into a spec card</b><span class="tier haiku">Haiku</span></div><span class="d">Component tree, sizes, states, and colors mapped to the repo's own design tokens (from the rules card): <code>#E5484D → danger-500</code>.</span></div></li>
+        <li><div class="what"><div class="h"><b>Back to the implementer</b><span class="tier code">code</span></div><span class="d">~1.5k tokens arrive in the same turn; it keeps building. The card is cached: the reviewer and screenshotter read it for free.</span></div></li>
+      </ol>
+      <div class="flowfoot"><span>Cost: <b>~3–6k</b> Haiku + <b>~1.5k</b> into Opus</span><span>Second time: <b>0</b></span><span>No message to you</span></div>
+    </div>
+    <div class="chat"><span class="cap">What the implementer receives</span>
+      <div class="msg" style="background:var(--sunk);border-color:var(--line)"><span class="t mono" style="font-size:12px">figma · Invite modal (812:44) · v2026-11-14</span><span class="small">Modal 480 wide · padding 24 · gap 16<br>Email field + "Send invite" (primary)<br>Error: text danger-500 under field, 13px<br>States: idle · sending (spinner) · sent (toast)<br>Use: &lt;Modal&gt;, &lt;TextField&gt;, &lt;Button variant="primary"&gt;</span></div>
+    </div>
+  </div>
+
+  <div class="box flow" role="tabpanel" id="q-code" aria-labelledby="o-code" hidden>
+    <div>
+      <ol class="steps">
+        <li><div class="what"><div class="h"><b>First understanding is saved as a code note</b><span class="tier code">work graph</span></div><span class="d">The lead's result is kept on the item: relevant files, entry points, how the flow works, stamped with the commit SHA and each file's hash.</span></div></li>
+        <li><div class="what"><div class="h"><b>A later job needs it</b><span class="tier code">kernel</span></div><span class="d">Example: CI fails on PR #140 six days later, or a comment asks for a change, or you say "continue KAN-45".</span></div></li>
+        <li><div class="what"><div class="h"><b>Check drift</b><span class="tier code">git</span></div><span class="d"><code>git diff</code> between the note's SHA and today, limited to the note's files.</span></div></li>
+        <li><div class="what"><div class="h"><b>No change → reuse</b><span class="tier code">code</span></div><span class="d">The note goes straight into the job's context. 0 tokens of re-reading.</span></div></li>
+        <li><div class="what"><div class="h"><b>Some files changed → delta re-read</b><span class="tier sonnet">Sonnet</span></div><span class="d">Only the changed files (plus the failing test, for a CI fix) are read; the note is updated and re-stamped.</span></div></li>
+        <li><div class="what"><div class="h"><b>Large change → full re-understand</b><span class="tier opus">Opus</span></div><span class="d">If more than ~30 % of the relevant files changed, or the base was restructured, the lead runs again – rare.</span></div></li>
+      </ol>
+      <div class="flowfoot"><span>Typical: <b>0</b> or <b>5–15k</b> (delta)</span><span>Full re-read only on big change</span><span>Code map itself updates by git diff, no AI</span></div>
+    </div>
+    <div class="chat"><span class="cap">Layers of code knowledge, cheapest first</span>
+      <div class="msg" style="background:var(--sunk);border-color:var(--line)"><span class="t">1 · Code map</span><span class="small">symbols, imports, routes – built by code, refreshed by git diff</span></div>
+      <div class="msg" style="background:var(--sunk);border-color:var(--line)"><span class="t">2 · Rules card + Brain</span><span class="small">conventions, architecture, standards – once per repo</span></div>
+      <div class="msg" style="background:var(--sunk);border-color:var(--line)"><span class="t">3 · Item code note</span><span class="small">what this ticket touches and how it works – once per item, delta-updated</span></div>
+      <div class="msg" style="background:var(--sunk);border-color:var(--line)"><span class="t">4 · Live reading</span><span class="small">search + exact line ranges, only for what the above can't answer</span></div>
+    </div>
+  </div>
+
+  <div class="box flow" role="tabpanel" id="q-ask" aria-labelledby="o-ask" hidden>
+    <div>
+      <ol class="steps">
+        <li><div class="what"><div class="h"><b>Implementer is unsure</b><span class="tier opus">Opus</span></div><span class="d">"Should the invite reuse <code>EmailValidator</code> or the new <code>InviteRules</code>?" It calls <code>ask(question)</code>.</span></div></li>
+        <li><div class="what"><div class="h"><b>Decision log</b><span class="tier code">code</span></div><span class="d">Same question for this item, its epic, or the project? → answer returned, done.</span></div></li>
+        <li><div class="what"><div class="h"><b>Cached context and Brain</b><span class="tier code">code</span></div><span class="d">Ticket, PRD section, rules card ("validators live in app/core/validation").</span></div></li>
+        <li><div class="what"><div class="h"><b>Knowledge agent reads the code</b><span class="tier sonnet">Sonnet</span></div><span class="d">≤ 6 turns: finds both classes and their callers → "EmailValidator; InviteRules is unused", confidence high.</span></div></li>
+        <li><div class="what"><div class="h"><b>Answer returns in the same turn</b><span class="tier code">code</span></div><span class="d">Written to the decision log with its evidence; shown in the PR as "Found: …". Never asked again.</span></div></li>
+        <li><div class="what"><div class="h"><b>Only if it's a product decision</b><span class="tier you">you</span></div><span class="d">Low confidence or a business choice → Route 2: the item waits for you; all its questions come in one message.</span></div></li>
+      </ol>
+      <div class="flowfoot"><span>Cost: <b>0</b> (log hit) to <b>5–15k</b></span><span>Messages: <b>0</b> unless it's a product decision</span></div>
+    </div>
+    <div class="chat"><span class="cap">Answer returned to the implementer</span>
+      <div class="msg" style="background:var(--sunk);border-color:var(--line)"><span class="small">Use <b>EmailValidator</b> (app/core/validation/email.py:12). InviteRules has no callers. · confidence high · source: code</span></div>
+    </div>
+  </div>
+
+  <div class="box flow" role="tabpanel" id="q-contract" aria-labelledby="o-contract" hidden>
+    <div>
+      <ol class="steps">
+        <li><div class="what"><div class="h"><b>Frontend part finds a gap</b><span class="tier opus">Opus</span></div><span class="d">The UI needs <code>invite.expiresAt</code>, which the agreed contract doesn't have. It ends its step with <code>contract_change</code>.</span></div></li>
+        <li><div class="what"><div class="h"><b>Kernel routes it up</b><span class="tier code">kernel</span></div><span class="d">The event goes to the ticket lead's mailbox (or the epic planner's, for an epic contract). The frontend part waits; others keep going.</span></div></li>
+        <li><div class="what"><div class="h"><b>Lead decides</b><span class="tier opus">Opus</span></div><span class="d">Small, read-only check of both repos: accept → contract v2 (field, type, producer: backend). A product question → you.</span></div></li>
+        <li><div class="what"><div class="h"><b>Affected items re-run only the affected step</b><span class="tier code">kernel</span></div><span class="d">Backend part: back to build with "add expiresAt to the response". Frontend: resumes. Unaffected tickets: untouched.</span></div></li>
+        <li><div class="what"><div class="h"><b>Integration check</b><span class="tier sonnet">Sonnet</span></div><span class="d">Producer and consumer checked against contract v2 before the PRs.</span></div></li>
+      </ol>
+      <div class="flowfoot"><span>Cost: <b>~10–20k</b> for the decision</span><span>Messages: <b>0</b> unless a product choice</span></div>
+    </div>
+    <div class="chat"><span class="cap">Shown later in the plan / PR</span>
+      <div class="msg"><span class="t">🔁 KAN-52 · contract updated (v2)</span><span>Added invite.expiresAt (ISO date) – backend provides it.</span></div>
+    </div>
+  </div>
+
+  <div class="box flow" role="tabpanel" id="q-review" aria-labelledby="o-review" hidden>
+    <div>
+      <ol class="steps">
+        <li><div class="what"><div class="h"><b>Reviewers run in parallel</b><span class="tier sonnet">Sonnet ×3</span></div><span class="d">Each sees only the plan and the diff. Security finds a blocker: the token isn't checked for expiry.</span></div></li>
+        <li><div class="what"><div class="h"><b>Kernel decides the route</b><span class="tier code">kernel</span></div><span class="d">Blocker → back to the build step. Minor findings → listed in the PR, no loop.</span></div></li>
+        <li><div class="what"><div class="h"><b>Implementer resumes with only the findings</b><span class="tier opus">Opus</span></div><span class="d">Its previous session is resumed (context read from cache, 0.1× price) plus the 1 finding – not the whole history again.</span></div></li>
+        <li><div class="what"><div class="h"><b>Only the failed reviewer re-checks</b><span class="tier sonnet">Sonnet</span></div><span class="d">On the new diff. Up to 2 rounds; then you get one message with what's left.</span></div></li>
+      </ol>
+      <div class="flowfoot"><span>Cost: <b>~10–30k</b> per round</span><span>Messages: <b>0</b> normally</span></div>
+    </div>
+    <div class="chat"><span class="cap">Handed back to the implementer</span>
+      <div class="msg" style="background:var(--sunk);border-color:var(--line)"><span class="small"><b>blocker · security</b> app/invites/service.py:41 – accept_invite() doesn't reject expired tokens. Add the check and a test.</span></div>
+    </div>
+  </div>
+
+  <div class="box flow" role="tabpanel" id="q-jira" aria-labelledby="o-jira" hidden>
+    <div>
+      <ol class="steps">
+        <li><div class="what"><div class="h"><b>Jira poll sees a change</b><span class="tier code">code</span></div><span class="d">KAN-45 <code>updated</code> moved. Event <code>ticket_changed</code> → KAN-45's mailbox. The running step is not interrupted.</span></div></li>
+        <li><div class="what"><div class="h"><b>What changed?</b><span class="tier haiku">Haiku</span></div><span class="d">Old vs new text → "expiry changed from 7 to 3 days" (or "typo only" → just refresh the cache).</span></div></li>
+        <li><div class="what"><div class="h"><b>At the next step boundary</b><span class="tier code">kernel</span></div><span class="d">Before building: delta re-plan. During or after building: a short "adapt?" message – or adapt directly if you said "no approvals".</span></div></li>
+        <li><div class="what"><div class="h"><b>Delta, not restart</b><span class="tier sonnet">Sonnet</span></div><span class="d">The plan and code note are updated for the change only; affected steps re-run.</span></div></li>
+      </ol>
+      <div class="flowfoot"><span>Cost: <b>~2k</b> + the delta</span><span>Messages: <b>0–1</b></span></div>
+    </div>
+    <div class="chat"><span class="cap">In Teams</span>
+      <div class="msg"><span class="t">📝 KAN-45 · ticket changed</span><span>Expiry: 7 → 3 days. Affects 1 file and 1 test.</span><span class="a">Reply "adapt" · or "keep as is"</span></div>
+    </div>
+  </div>
+
+  <div class="box flow" role="tabpanel" id="q-you" aria-labelledby="o-you" hidden>
+    <div>
+      <ol class="steps">
+        <li><div class="what"><div class="h"><b>A product decision is needed</b><span class="tier sonnet">Sonnet</span></div><span class="d">The knowledge agent says "business choice". The item goes to NEEDS_INFO; its step state and agent session are saved.</span></div></li>
+        <li><div class="what"><div class="h"><b>Questions are batched</b><span class="tier code">messenger</span></div><span class="d">All open questions for this item go in one message, with options and a recommendation.</span></div></li>
+        <li><div class="what"><div class="h"><b>Everything else keeps running</b><span class="tier code">scheduler</span></div><span class="d">The slot is given to the next item in the queue.</span></div></li>
+        <li><div class="what"><div class="h"><b>You answer</b><span class="tier you">you</span></div><span class="d">"1 2" or in your own words → decision log (so it's never asked again in this scope).</span></div></li>
+        <li><div class="what"><div class="h"><b>Resume the same step</b><span class="tier code">kernel</span></div><span class="d">The saved session continues with your answer – no re-reading, no re-planning from scratch.</span></div></li>
+      </ol>
+      <div class="flowfoot"><span>Messages: <b>1</b></span><span>Idle cost while waiting: <b>0</b></span></div>
+    </div>
+    <div class="chat"><span class="cap">In Teams</span>
+      <div class="msg"><span class="t">❓ KAN-45 · 1 question</span><span>Can an invite be resent before it expires?<br>(1) Yes, once per hour ★ &nbsp;(2) No</span><span class="a">Reply "1" · or your own answer</span></div>
+    </div>
+  </div>
+
+  <div class="box" style="display:grid;gap:12px">
+    <h3>What one agent call is made of</h3>
+    <p class="small muted">Assembled by code for every call. Stable blocks come first so they are read from cache; each block has a cap.</p>
+    <div class="bars" role="img" aria-label="Context blocks of an implementer call">
+      <div class="bar"><span>Role + tools</span><span class="track"><span class="fill" style="width:27%;display:block;background:var(--t-code)"></span></span><span class="v">~4k · cached</span></div>
+      <div class="bar"><span>Rules card + Brain</span><span class="track"><span class="fill" style="width:20%;display:block;background:var(--t-code)"></span></span><span class="v">~3k · cached</span></div>
+      <div class="bar"><span>Item slice</span><span class="track"><span class="fill" style="width:33%;display:block;background:var(--t-sonnet)"></span></span><span class="v">~5k · cached per item</span></div>
+      <div class="bar"><span>This step's input</span><span class="track"><span class="fill" style="width:20%;display:block;background:var(--t-opus)"></span></span><span class="v">~3k · fresh</span></div>
+      <div class="bar"><span>Lookups during the turn</span><span class="track"><span class="fill" style="width:100%;display:block;background:var(--t-haiku)"></span></span><span class="v">≤ 15k · capped</span></div>
+    </div>
+    <p class="small muted">Item slice = distilled ticket, plan, contract, code note, spec cards. Step input = the diff, failure or findings. Scale: 15k = full width.</p>
+  </div>
+</section>
+
+<!-- 7 events -->
+<section aria-labelledby="s7">
+  <div class="sec-head"><span class="num">07</span><h2 id="s7">Events drive everything after the first request</h2>
+    <p class="muted">A ticket stays alive in <code>PR_OPEN</code> until its PR is merged or closed. Each event becomes a job on that ticket through a plain rule – adding a behaviour means adding a row.</p></div>
+  <div class="box" style="display:grid;gap:14px">
+    <div class="states" aria-label="Item states">
+      <span class="state">NEW</span><span class="arrowtxt">→</span><span class="state">UNDERSTANDING</span><span class="arrowtxt">→</span><span class="state">PLANNED</span><span class="arrowtxt">→</span><span class="state">BUILDING</span><span class="arrowtxt">→</span><span class="state">READY</span><span class="arrowtxt">→</span><span class="state hot">PR_OPEN</span><span class="arrowtxt">→</span><span class="state">MERGED</span><span class="arrowtxt">→</span><span class="state">DONE</span>
+    </div>
+    <p class="small muted">Side states at any point: NEEDS_INFO · AWAITING_OK · BLOCKED (dependency or connector) · PAUSED · FAILED (with reason and options) · CANCELLED.</p>
+  </div>
+  <div class="box scroll" style="padding:0">
+    <table>
+      <thead><tr><th>Event</th><th>Condition</th><th>Job</th><th>You hear</th></tr></thead>
+      <tbody>
+        <tr><td><code>ticket_assigned</code></td><td>project active</td><td>build (or "start?" for size L)</td><td>the plan</td></tr>
+        <tr><td><code>ticket_changed</code></td><td>before / after building</td><td>re-plan / adapt</td><td>what changed</td></tr>
+        <tr><td><code>ci_failed</code></td><td>your PR, &lt; 3 rounds</td><td>ci_fix, no asking</td><td>the result</td></tr>
+        <tr><td><code>ci_passed</code></td><td>after a fix or first green</td><td>–</td><td>merged notice</td></tr>
+        <tr><td><code>comment_added</code></td><td>your PR</td><td>notify; comment_fix if you said auto</td><td>summary</td></tr>
+        <tr><td><code>teammate_pr_opened</code></td><td>any project repo</td><td>notify</td><td>link + "review PR n"</td></tr>
+        <tr><td><code>review_requested</code></td><td>you</td><td>notify; review if you chose auto</td><td>link</td></tr>
+        <tr><td><code>new_commits</code></td><td>PR you reviewed / your branch</td><td>notify / rebase local work</td><td>"re-review?"</td></tr>
+        <tr><td><code>pr_conflict</code></td><td>not mergeable</td><td>rebase</td><td>only if it can't resolve</td></tr>
+        <tr><td><code>pr_merged</code></td><td>–</td><td>close · unblock dependents · re-target stacked PRs · learn</td><td>next in merge order</td></tr>
+        <tr><td><code>pr_merged</code> out of order</td><td>a dependency not merged yet</td><td>rebase / re-target the rest</td><td>a warning</td></tr>
+        <tr><td><code>pr_closed</code></td><td>not merged</td><td>pause</td><td>"drop or reopen?"</td></tr>
+        <tr><td><code>connector_down/up</code></td><td>Jira, GitHub, Figma</td><td>block / resume dependent jobs</td><td>reconnect command</td></tr>
+        <tr><td><code>clock</code></td><td>digest time, expiry</td><td>digest · stale approvals</td><td>morning summary</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- 7 cost -->
+<section aria-labelledby="s8">
+  <div class="sec-head"><span class="num">08</span><h2 id="s8">Why it costs little</h2>
+    <p class="muted">Design target for one size-M ticket with one review round and one CI fix: about 0.2–0.5M tokens in total, most of them cache reads at a tenth of the input price.</p></div>
+  <div class="two">
+    <div class="box" style="display:grid;gap:14px">
+      <h3>Where the tokens go (target, one M ticket)</h3>
+      <div class="bars" role="img" aria-label="Token targets per stage for one medium ticket">
+        <div class="bar"><span>Build (implementer)</span><span class="track"><span class="fill" style="width:100%;display:block;background:var(--t-opus)"></span></span><span class="v">60–150k</span></div>
+        <div class="bar"><span>Understand</span><span class="track"><span class="fill" style="width:53%;display:block;background:var(--t-opus)"></span></span><span class="v">40–80k</span></div>
+        <div class="bar"><span>Reviews ×3</span><span class="track"><span class="fill" style="width:40%;display:block;background:var(--t-sonnet)"></span></span><span class="v">30–60k</span></div>
+        <div class="bar"><span>CI fix (1 round)</span><span class="track"><span class="fill" style="width:40%;display:block;background:var(--t-sonnet)"></span></span><span class="v">10–60k</span></div>
+        <div class="bar"><span>Resolve comments</span><span class="track"><span class="fill" style="width:33%;display:block;background:var(--t-sonnet)"></span></span><span class="v">20–50k</span></div>
+        <div class="bar"><span>Plan + review</span><span class="track"><span class="fill" style="width:23%;display:block;background:var(--t-opus)"></span></span><span class="v">25–35k</span></div>
+        <div class="bar"><span>Report + PR</span><span class="track"><span class="fill" style="width:27%;display:block;background:var(--t-sonnet)"></span></span><span class="v">10–40k</span></div>
+        <div class="bar"><span>Each chat message</span><span class="track"><span class="fill" style="width:8%;display:block;background:var(--t-sonnet)"></span></span><span class="v">0–12k</span></div>
+        <div class="bar"><span>Polling, events, gates</span><span class="track"><span class="fill" style="width:0.5%;display:block;background:var(--t-code)"></span></span><span class="v">0</span></div>
+      </div>
+      <p class="small muted">Bars use the upper end of each range on one scale (150k = full width).</p>
+    </div>
+    <div class="box" style="display:grid;gap:12px">
+      <h3>The levers</h3>
+      <ul class="check">
+        <li><span><b>No AI in plumbing.</b> Polling, events, scheduling, gates, merge order and messages are code.</span></li>
+        <li><span><b>Smallest reliable model.</b> Haiku to classify and distil, Sonnet for most agents, Opus only to plan and code M/L work.</span></li>
+        <li><span><b>Cached prefixes.</b> Instructions, tools, rules card and Brain summary come first and stay the same; reads cost 0.1×.</span></li>
+        <li><span><b>Fetch once.</b> Jira, Figma and PRD are distilled once per item; re-plans, children and later jobs reuse them.</span></li>
+        <li><span><b>Small handoffs.</b> Agents return short structured results, never their whole context.</span></li>
+        <li><span><b>Excerpts.</b> CI gets the failing step and first error; reviewers get the diff, not the build history.</span></li>
+        <li><span><b>Never pay twice.</b> Saved steps and cached model answers on resume; the decision log stops repeat questions.</span></li>
+        <li><span><b>Depth on demand.</b> One ticket has no epic layer; multi-agent depth only when the scope needs it.</span></li>
+        <li><span><b>Budgets.</b> Per item, epic, sprint and day, with a warning at 80 %.</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- 8 accuracy -->
+<section aria-labelledby="s9">
+  <div class="sec-head"><span class="num">09</span><h2 id="s9">Why it gets things right</h2></div>
+  <div class="two">
+    <div class="box" style="display:grid;gap:12px">
+      <h3>Inside every job</h3>
+      <ul class="check">
+        <li><span><b>Grounded.</b> Plans and answers cite what was just read – files, ticket, PRD section – never memory.</span></li>
+        <li><span><b>Structured.</b> Every decision is a validated result, not free text.</span></li>
+        <li><span><b>Proven by running.</b> Lint, targeted tests, standards guard, then CI – done means CI green.</span></li>
+        <li><span><b>Fresh eyes.</b> Reviewers see only the plan and the diff.</span></li>
+        <li><span><b>Consistent across tickets.</b> Shared contracts and the epic check.</span></li>
+        <li><span><b>Misunderstandings show early.</b> Instructions echoed once; short plan before code.</span></li>
+      </ul>
+    </div>
+    <div class="box" style="display:grid;gap:12px">
+      <h3>Guarding the whole system</h3>
+      <ul class="check">
+        <li><span><b>Conversation replay.</b> ~60 of your real Teams messages with the expected actions – including the ones that failed before.</span></li>
+        <li><span><b>Scope resolution tests.</b> Names, links, epics, sprints, old tickets, "Eric's PR".</span></li>
+        <li><span><b>Situation scenarios.</b> One automated scenario per group in SITUATIONS.md, on the mock model and fake Jira/GitHub. Nothing ships unless all pass.</span></li>
+        <li><span><b>Observability.</b> Every step records tokens, time, model, cache hits; <code>aiw explain KAN-45</code> shows the full story.</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- 9 gates -->
+<section aria-labelledby="s10">
+  <div class="sec-head"><span class="num">10</span><h2 id="s10">Your instructions and the rules that never bend</h2>
+    <p class="muted">Order of precedence: this item's instruction → its batch / epic / sprint → project → global → your preferences → defaults.</p></div>
+  <div class="two">
+    <div class="box scroll" style="padding:0">
+      <table>
+        <thead><tr><th>Gate</th><th>Default</th><th>Changed by</th></tr></thead>
+        <tbody>
+          <tr><td>Start size L / big scope</td><td>preview once</td><td>always previewed for sprints</td></tr>
+          <tr><td>Plan approval</td><td>ask</td><td>"no approval"</td></tr>
+          <tr><td>PR approval</td><td>ask</td><td>"no approval"</td></tr>
+          <tr><td>Push CI fixes</td><td>no asking</td><td>preference</td></tr>
+          <tr><td>Push comment fixes</td><td>show first</td><td>"resolve automatically"</td></tr>
+          <tr><td>Post review comments</td><td>show first</td><td>preference</td></tr>
+          <tr><td>Create QA issues</td><td>show first</td><td>preference</td></tr>
+          <tr><td>Take someone's ticket</td><td>ask</td><td>always asks</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="box" style="display:grid;gap:12px">
+      <h3>Hard rails</h3>
+      <ul class="check rails">
+        <li><span>Never merge; never push to dev or main; never force-push or rewrite your commits.</span></li>
+        <li><span>No mention of AI in code, commits, branches or PRs; secrets scan; git hooks always run.</span></li>
+        <li><span>Never weaken tests, edit CI workflows or re-record baselines to go green.</span></li>
+        <li><span>Decisions only from your own Teams chat; text in Jira, GitHub or Figma is data, never orders.</span></li>
+        <li><span>Secrets only in the OS vault.</span></li>
+      </ul>
+      <p class="small muted">The .env database may be used (your decision). A repo whose tests wipe tables is flagged once at the ready check so you can choose.</p>
+    </div>
+  </div>
+</section>
+
+<!-- 10 messages -->
+<section aria-labelledby="s11">
+  <div class="sec-head"><span class="num">11</span><h2 id="s11">Messages in Teams</h2></div>
+  <div class="two">
+    <div class="box" style="display:grid;gap:12px">
+      <h3>The rules</h3>
+      <ul class="check">
+        <li><span>Title line with ticket and state, then about 6 short lines, then one action line.</span></li>
+        <li><span>One decision per message. "1", "yes", "details" apply to the item in focus.</span></li>
+        <li><span>All questions for an item come together in one message – that one may be longer.</span></li>
+        <li><span>Routine notices wait up to 60 s and merge ("CI green on #140, #141, #145").</span></li>
+        <li><span>"details KAN-45" gives the plan, report or log; long content never appears unasked.</span></li>
+        <li><span>One morning digest; quiet hours hold non-urgent messages.</span></li>
+      </ul>
+    </div>
+    <div class="chat box">
+      <span class="cap">Questions – the allowed long message</span>
+      <div class="msg"><span class="t">❓ KAN-47 · Seller dashboard — 2 questions</span>
+        <span>1. Show cancelled orders in the totals?<br>&nbsp;&nbsp;&nbsp;(1) No – match the finance report ★ &nbsp;(2) Yes</span>
+        <span>2. Default date range?<br>&nbsp;&nbsp;&nbsp;(1) Last 30 days ★ &nbsp;(2) This month &nbsp;(3) This week</span>
+        <span class="small muted">Found myself: currency (settings), chart library (repo)</span>
+        <span class="a">Reply "1 1" · or answer in your words</span></div>
+    </div>
+  </div>
+</section>
+
+<!-- 11 phases -->
+<section aria-labelledby="s12">
+  <div class="sec-head"><span class="num">12</span><h2 id="s12">Build order</h2>
+    <p class="muted">Each phase ships on its own, keeps every existing test green, and adds scenario tests for its situations. Today's step code is reused, not rewritten.</p></div>
+  <div class="box phases">
+    <div class="phase"><span class="p">0</span><span>Finish 0.7.0 onboarding: rules card, CI map, team, preferences, ready check</span><span class="done muted">A1–A4, F3, F4</span></div>
+    <div class="phase"><span class="p">1</span><span>Kernel: work graph, jobs, saved steps, events, event rules, agent cache – current flows migrated</span><span class="done muted">all tests pass on it; a restart resumes without re-paying</span></div>
+    <div class="phase"><span class="p">2</span><span>Messenger, connector health, .env database with the wipe check</span><span class="done muted">A6, short messages, always connected</span></div>
+    <div class="phase"><span class="p">3</span><span>Conductor: tools, working set, instructions, find by name / link / PR</span><span class="done muted">B1–B3, B20, J1–J8</span></div>
+    <div class="phase"><span class="p">4</span><span>After the PR: CI auto-fix classes, comments, conflicts, merge/close, every teammate PR, both plugins</span><span class="done muted">G1–G19, K1–K7</span></div>
+    <div class="phase"><span class="p">5</span><span>Knowledge service, decision log, one plan message, batched questions</span><span class="done muted">C2–C5, D1, O4</span></div>
+    <div class="phase"><span class="p">6</span><span>Batches, epics, sprints: preview, waves, area locks, contracts, stacking, merge order, epic check</span><span class="done muted">B7–B12, D7, F8, L1–L2, O2</span></div>
+    <div class="phase"><span class="p">7</span><span>Reviews of old work and branches, finish my branch, take over / hand back, undo</span><span class="done muted">H2–H8, I1–I4, J5, J14</span></div>
+    <div class="phase"><span class="p">8</span><span>Learning: repeated comments into the rules card, cost and speed dashboards</span><span class="done muted">O1–O3</span></div>
+  </div>
+</section>
+
+<footer>
+  <span>Source documents in <code>D:\ai-workforce</code>: SITUATIONS.md · DESIGN-ORCHESTRATION.md · ARCHITECTURE.md</span>
+  <span>References: <a href="https://www.anthropic.com/research/building-effective-agents" target="_blank" rel="noopener">Building effective agents</a> · <a href="https://www.anthropic.com/engineering/multi-agent-research-system" target="_blank" rel="noopener">Multi-agent research system</a> · <a href="https://platform.claude.com/docs/en/build-with-claude/prompt-caching" target="_blank" rel="noopener">Prompt caching</a> · <a href="https://temporal.io/blog/temporal-langgraph-plugin-durable-execution" target="_blank" rel="noopener">Durable execution</a> · <a href="https://www.alphaxiv.org/abs/2606.03115.md" target="_blank" rel="noopener">Wave scheduling (SPOQ)</a></span>
+</footer>
+
+</div>
+<script>
+(function () {
+  Array.prototype.slice.call(document.querySelectorAll('[role="tablist"]')).forEach(function (list) {
+    var tabs = Array.prototype.slice.call(list.querySelectorAll('[role="tab"]'));
+    function show(id) {
+      tabs.forEach(function (t) {
+        var on = t.id === id;
+        t.setAttribute('aria-selected', on ? 'true' : 'false');
+        t.tabIndex = on ? 0 : -1;
+        document.getElementById(t.getAttribute('aria-controls')).hidden = !on;
+      });
+    }
+    tabs.forEach(function (t, i) {
+      t.addEventListener('click', function () { show(t.id); });
+      t.addEventListener('keydown', function (e) {
+        if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return;
+        var n = tabs[(i + (e.key === 'ArrowRight' ? 1 : tabs.length - 1)) % tabs.length];
+        n.focus(); show(n.id);
+      });
+    });
+    show(tabs[0].id);
+  });
+})();
+</script>
+</body>
+</html>

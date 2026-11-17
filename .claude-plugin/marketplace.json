@@ -1,0 +1,16 @@
+{
+  "name": "ai-workforce-local",
+  "owner": {
+    "name": "AI Workforce Product Team"
+  },
+  "plugins": [
+    {
+      "name": "ai-workforce",
+      "source": "./",
+      "description": "Local-first, role-based AI workforce for Claude Code"
+    }
+  ],
+  "metadata": {
+    "description": "Local marketplace for the AI Workforce Claude Code plugin"
+  }
+}

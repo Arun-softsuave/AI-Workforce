@@ -1,0 +1,19 @@
+{
+  "name": "ai-workforce",
+  "version": "0.6.9",
+  "description": "Role-based, local-first AI team member: watches Jira/GitHub, remembers your projects (Brain), runs cost-efficient agent playbooks and asks your approval before publishing.",
+  "author": {
+    "name": "AI Workforce Product Team"
+  },
+  "keywords": [
+    "jira",
+    "github",
+    "agents",
+    "workflow",
+    "memory",
+    "slack",
+    "teams"
+  ],
+  "license": "LicenseRef-Proprietary",
+  "icon": "./.claude-plugin/icon.png"
+}

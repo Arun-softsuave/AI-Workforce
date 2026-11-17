@@ -1,0 +1,17 @@
+id: dev-small-change
+title: Developer – small change fast lane (size S)
+roles: [backend-developer, frontend-developer, fullstack-developer]
+trigger: assigned
+steps:
+  - prepare_workspace
+  - context_pack
+  - plan: { tier: medium }   # a short plan, so even small changes are approved before any code
+  - plan_gate                # pauses for plan approval (settings.workflow.planApproval: always)
+  - implement_test
+  - reviews: { reviewers: [combined] }
+  - prepublish
+  - report
+  - request_approval: { action: create_pr }
+  - publish
+  - ticket_report        # PDF report of the ticket (what was asked, decided and done, diagrams) sent to Teams
+  - record_memory

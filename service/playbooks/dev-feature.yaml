@@ -1,0 +1,20 @@
+id: dev-feature
+title: Developer – feature ticket (size M / L)
+roles: [backend-developer, frontend-developer, fullstack-developer]
+trigger: assigned
+steps:
+  - prepare_workspace
+  - context_pack
+  - analyse
+  - plan
+  - plan_review
+  - plan_gate            # pauses for plan approval (settings.workflow.planApproval: always, or project autonomy = plan)
+  - implement_test
+  - reviews: { reviewers: [code, security, qa] }
+  - propose_memory       # proposed Handbook facts travel inside the PR for team review
+  - prepublish
+  - report
+  - request_approval: { action: create_pr }
+  - publish
+  - ticket_report        # PDF report of the ticket (what was asked, decided and done, diagrams) sent to Teams
+  - record_memory

@@ -1,0 +1,4 @@
+node_modules/
+service/dist/
+*.log
+.ai-workforce-test/

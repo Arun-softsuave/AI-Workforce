@@ -1,0 +1,16 @@
+id: dev-lead
+title: Developer – ticket across several repositories (one lead, one part per repository)
+roles: [backend-developer, frontend-developer, fullstack-developer]
+trigger: lead
+steps:
+  - understand            # reads the ticket, links, Brain and the code of EVERY repository; decides repos + build order
+  - contract              # the agreement between the repositories (endpoints, fields, types, errors) – skipped for one repo
+  - lead_plan             # one plan with a part per repository
+  - plan_review
+  - plan_gate             # ONE plan approval for all repositories
+  - run_parts             # builds each repository's part in the decided order; answers the parts' questions itself
+  - integration_check     # reads all changes together + each repository's tests; sends fixes back to the parts
+  - request_approval: { action: create_pr }   # ONE PR approval for all repositories
+  - publish_parts         # one draft PR per repository (to the base branch, never merged), linked to each other
+  - ticket_report         # one PDF report for the whole ticket, sent to Teams
+  - record_memory

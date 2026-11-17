@@ -1,0 +1,11 @@
+id: design-review
+title: UI/UX – design consistency and accessibility review
+roles: [uiux-designer, frontend-developer]
+trigger: design_review
+steps:
+  - design_fetch
+  - context_pack
+  - artefact: { kind: design_review }
+  - deliver
+  - request_approval: { action: post_jira_comment }
+  - publish

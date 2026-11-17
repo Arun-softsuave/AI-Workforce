@@ -1,0 +1,577 @@
+<title>AI Workforce Console</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: control-room console. Sidebar nav, one status strip, then "needs you" > "working now" > board, with a live feed rail. */
+:root{
+  --bg:#F3F4F7; --surface:#FFFFFF; --surface-2:#EDEFF4; --line:#DFE3EA; --fg:#141821; --muted:#5D6575; --faint:#8A92A1;
+  --accent:#1E4FD8; --accent-bg:#E6EDFD;
+  --you:#A85A00; --you-bg:#FFF2DE; --you-line:#F3C98A;
+  --ok:#147A3D; --ok-bg:#E3F4EA;
+  --bad:#B42318; --bad-bg:#FDE9E7;
+  --wait:#5D6575; --wait-bg:#EDEFF4;
+  --shadow:0 1px 2px rgba(20,24,33,.05),0 6px 20px -8px rgba(20,24,33,.12);
+  --f-display:"Space Grotesk",ui-sans-serif,system-ui,sans-serif;
+  --f-body:"Geist",ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;
+  --f-mono:"Geist Mono",ui-monospace,"Cascadia Code",Consolas,monospace;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
+  --bg:#0D1015; --surface:#141922; --surface-2:#1A202B; --line:#262E3B; --fg:#E6E9EF; --muted:#9BA3B3; --faint:#6E7788;
+  --accent:#86A8FF; --accent-bg:#1A2747;
+  --you:#F2B04A; --you-bg:#2E2412; --you-line:#5C4519;
+  --ok:#5BD58A; --ok-bg:#12291C; --bad:#FF8A80; --bad-bg:#331917; --wait:#9BA3B3; --wait-bg:#1A202B;
+  --shadow:0 1px 2px rgba(0,0,0,.3),0 8px 24px -10px rgba(0,0,0,.6); color-scheme:dark}}
+:root[data-theme="dark"]{
+  --bg:#0D1015; --surface:#141922; --surface-2:#1A202B; --line:#262E3B; --fg:#E6E9EF; --muted:#9BA3B3; --faint:#6E7788;
+  --accent:#86A8FF; --accent-bg:#1A2747;
+  --you:#F2B04A; --you-bg:#2E2412; --you-line:#5C4519;
+  --ok:#5BD58A; --ok-bg:#12291C; --bad:#FF8A80; --bad-bg:#331917; --wait:#9BA3B3; --wait-bg:#1A202B;
+  --shadow:0 1px 2px rgba(0,0,0,.3),0 8px 24px -10px rgba(0,0,0,.6); color-scheme:dark}
+
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 var(--f-body);-webkit-font-smoothing:antialiased}
+button{font:inherit;color:inherit;cursor:pointer}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:6px}
+.mono{font-family:var(--f-mono);font-size:12.5px}
+.num{font-variant-numeric:tabular-nums}
+h1,h2,h3{font-family:var(--f-display);margin:0;text-wrap:balance;letter-spacing:-.01em}
+
+.app{display:grid;grid-template-columns:232px minmax(0,1fr);min-height:100vh}
+/* Sidebar */
+.side{background:var(--surface);border-right:1px solid var(--line);padding:20px 14px;display:flex;flex-direction:column;gap:22px;position:sticky;top:0;height:100vh}
+.brand{display:flex;align-items:center;gap:10px;padding:0 8px}
+.mark{width:30px;height:30px;border-radius:8px;background:var(--fg);color:var(--bg);display:grid;place-items:center;font:700 13px var(--f-display)}
+.brand b{font:600 15px var(--f-display);display:block}
+.brand small{color:var(--muted);font-size:12px}
+.nav{display:flex;flex-direction:column;gap:2px}
+.nav a{display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:8px;color:var(--muted);text-decoration:none;font-weight:500}
+.nav a:hover{background:var(--surface-2);color:var(--fg)}
+.nav a[aria-current="page"]{background:var(--accent-bg);color:var(--accent)}
+.nav .count{margin-left:auto;font:500 11.5px var(--f-mono);padding:1px 7px;border-radius:99px;background:var(--surface-2);color:var(--muted)}
+.nav .count.you{background:var(--you-bg);color:var(--you)}
+.nav svg{width:17px;height:17px;flex:none}
+.side-foot{margin-top:auto;display:flex;flex-direction:column;gap:8px}
+.ghost{border:1px solid var(--line);background:var(--surface);border-radius:8px;padding:8px 10px;text-align:left;display:flex;align-items:center;gap:8px;font-weight:500}
+.ghost:hover{background:var(--surface-2)}
+
+/* Main */
+main{min-width:0;padding-block:20px 48px;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px))}
+.wrap{max-width:1320px;margin:0 auto;display:flex;flex-direction:column;gap:20px}
+.top{display:flex;flex-wrap:wrap;align-items:center;gap:12px 18px}
+.top h1{font-size:24px}
+.demo{font:500 11px var(--f-mono);letter-spacing:.06em;text-transform:uppercase;color:var(--you);background:var(--you-bg);border:1px solid var(--you-line);padding:2px 8px;border-radius:99px}
+.top .sp{flex:1}
+.btn{border:1px solid var(--line);background:var(--surface);border-radius:8px;padding:7px 12px;font-weight:500;display:inline-flex;align-items:center;gap:7px}
+.btn:hover{background:var(--surface-2)}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--surface)}
+.btn.primary:hover{filter:brightness(1.08)}
+.btn.you{background:var(--you);border-color:var(--you);color:var(--surface)}
+.btn.sm{padding:4px 10px;font-size:13px}
+
+/* Status strip */
+.strip{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));background:var(--surface);border:1px solid var(--line);border-radius:12px;box-shadow:var(--shadow)}
+.stat{padding:14px 18px;border-right:1px solid var(--line);display:flex;flex-direction:column;gap:2px;min-width:0}
+.stat:last-child{border-right:0}
+.stat .k{font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;font-weight:500}
+.stat .v{font:600 24px var(--f-display);display:flex;align-items:baseline;gap:8px}
+.stat .v small{font:400 12.5px var(--f-body);color:var(--muted)}
+.stat.you .v{color:var(--you)}
+.dot{width:8px;height:8px;border-radius:50%;display:inline-block;flex:none}
+.dot.ok{background:var(--ok)} .dot.you{background:var(--you)} .dot.bad{background:var(--bad)} .dot.work{background:var(--accent)} .dot.wait{background:var(--faint)}
+.pulse{animation:pulse 1.6s ease-in-out infinite}
+@keyframes pulse{50%{opacity:.35}}
+
+.grid{display:grid;grid-template-columns:minmax(0,1fr) 340px;gap:20px;align-items:start}
+.col{display:flex;flex-direction:column;gap:20px;min-width:0}
+.sec-h{display:flex;align-items:baseline;gap:10px;margin-bottom:10px}
+.sec-h h2{font-size:16px}
+.sec-h p{margin:0;color:var(--muted);font-size:13px}
+.sec-h .sp{flex:1}
+.link{background:none;border:0;color:var(--accent);font-weight:500;padding:0}
+
+/* Needs you */
+.needs{background:var(--you-bg);border:1px solid var(--you-line);border-radius:12px;padding:6px}
+.need{display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:14px;align-items:center;background:var(--surface);border-radius:9px;padding:12px 14px}
+.need+.need{margin-top:6px}
+.need .ic{width:34px;height:34px;border-radius:9px;background:var(--you-bg);color:var(--you);display:grid;place-items:center}
+.need .ic svg{width:18px;height:18px}
+.need .t{font-weight:600}
+.need .d{color:var(--muted);font-size:13px}
+.need .acts{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}
+.opt{border:1px solid var(--line);background:var(--surface);border-radius:7px;padding:4px 10px;font-size:13px}
+.opt.rec{border-color:var(--you);color:var(--you);font-weight:600}
+.opt:hover{background:var(--surface-2)}
+.empty{padding:18px;text-align:center;color:var(--muted);background:var(--surface);border-radius:9px}
+
+/* Agents */
+.agents{display:grid;grid-template-columns:repeat(auto-fill,minmax(270px,1fr));gap:12px}
+.agent{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:14px;display:flex;flex-direction:column;gap:10px;box-shadow:var(--shadow);cursor:pointer;text-align:left}
+.agent:hover{border-color:var(--accent)}
+.agent .hd{display:flex;align-items:center;gap:10px}
+.av{width:32px;height:32px;border-radius:9px;display:grid;place-items:center;font:600 12px var(--f-mono);flex:none}
+.agent .who{font-weight:600;line-height:1.2}
+.agent .on{font-size:12.5px;color:var(--muted)}
+.agent .hd .tier{margin-left:auto}
+.doing{font-size:13.5px;min-height:40px}
+.doing .mono{color:var(--muted)}
+.bar{height:6px;background:var(--surface-2);border-radius:99px;overflow:hidden}
+.bar i{display:block;height:100%;background:var(--accent);border-radius:99px;transition:width .8s ease}
+.agent .ft{display:flex;gap:12px;color:var(--muted);font-size:12px}
+.agent .ft span{display:inline-flex;gap:5px;align-items:center}
+.agent.idle{opacity:.7;box-shadow:none;cursor:default}
+.agent.idle:hover{border-color:var(--line)}
+
+.chip{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:500;padding:2px 9px;border-radius:99px;white-space:nowrap}
+.chip.work{background:var(--accent-bg);color:var(--accent)}
+.chip.you{background:var(--you-bg);color:var(--you)}
+.chip.ok{background:var(--ok-bg);color:var(--ok)}
+.chip.bad{background:var(--bad-bg);color:var(--bad)}
+.chip.wait{background:var(--wait-bg);color:var(--wait)}
+.tier{font:500 10.5px var(--f-mono);letter-spacing:.04em;padding:2px 6px;border-radius:5px;border:1px solid var(--line);color:var(--muted);text-transform:uppercase}
+
+/* Board */
+.sprint{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:14px 16px;display:flex;flex-wrap:wrap;gap:10px 22px;align-items:center;margin-bottom:12px}
+.sprint b{font-family:var(--f-display)}
+.sprint .bar{flex:1;min-width:140px}
+.sprint .bar i{background:var(--ok)}
+.waves{display:flex;gap:6px;flex-wrap:wrap}
+.board-scroll{overflow-x:auto;padding-bottom:4px}
+.board{display:grid;grid-template-columns:repeat(6,minmax(190px,1fr));gap:10px;min-width:1180px}
+.lane{background:var(--surface-2);border-radius:12px;padding:10px;display:flex;flex-direction:column;gap:8px;min-height:120px}
+.lane h3{font:600 12.5px var(--f-body);color:var(--muted);text-transform:uppercase;letter-spacing:.05em;display:flex;justify-content:space-between;padding:2px 4px 4px}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:11px 12px;display:flex;flex-direction:column;gap:7px;text-align:left;width:100%;border-left:3px solid var(--line)}
+.card:hover{border-color:var(--accent);border-left-color:inherit}
+.card.s-work{border-left-color:var(--accent)} .card.s-you{border-left-color:var(--you)} .card.s-ok{border-left-color:var(--ok)} .card.s-bad{border-left-color:var(--bad)}
+.card .r1{display:flex;align-items:center;gap:8px}
+.card .ref{font:500 12px var(--f-mono);color:var(--muted)}
+.card .r1 .sz{margin-left:auto}
+.card .ttl{font-weight:600;font-size:13.5px;line-height:1.35}
+.card .now{font-size:12.5px;color:var(--muted)}
+.repos{display:flex;flex-direction:column;gap:5px}
+.repo{display:grid;grid-template-columns:62px minmax(0,1fr) 30px;gap:6px;align-items:center;font-size:11.5px;color:var(--muted)}
+.repo .bar{height:4px}
+.repo.done .bar i{background:var(--ok)}
+
+/* Feed */
+.panel{background:var(--surface);border:1px solid var(--line);border-radius:12px;box-shadow:var(--shadow)}
+.panel-h{display:flex;align-items:center;gap:8px;padding:12px 14px;border-bottom:1px solid var(--line)}
+.panel-h h2{font-size:15px}
+.panel-h .sp{flex:1}
+.live{display:inline-flex;align-items:center;gap:6px;font:500 11px var(--f-mono);color:var(--ok);text-transform:uppercase;letter-spacing:.06em}
+.feed{list-style:none;margin:0;padding:6px 0;max-height:560px;overflow:auto}
+.feed li{display:grid;grid-template-columns:44px 10px minmax(0,1fr);gap:8px;padding:7px 14px;font-size:13px;align-items:baseline}
+.feed li .dot{transform:translateY(-1px)}
+.feed time{font:400 11.5px var(--f-mono);color:var(--faint)}
+.feed .new{animation:flash 1.4s ease}
+@keyframes flash{from{background:var(--accent-bg)}to{background:transparent}}
+.feed b{font-weight:600}
+
+/* Tables */
+.tbl{overflow-x:auto}
+table{width:100%;border-collapse:collapse;font-size:13.5px}
+th{text-align:left;font-weight:500;color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.05em;padding:10px 14px;border-bottom:1px solid var(--line);white-space:nowrap}
+td{padding:11px 14px;border-bottom:1px solid var(--line);vertical-align:middle}
+tr:last-child td{border-bottom:0}
+td .sub{display:block;color:var(--muted);font-size:12.5px}
+
+/* Connections */
+.conns{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:12px}
+.conn{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:16px;display:flex;flex-direction:column;gap:10px}
+.conn .hd{display:flex;align-items:center;gap:10px}
+.logo{width:34px;height:34px;border-radius:9px;display:grid;place-items:center;font:700 13px var(--f-display);color:#fff;flex:none}
+.conn .name{font-weight:600}
+.conn .hd .chip{margin-left:auto}
+.conn dl{margin:0;display:grid;grid-template-columns:auto 1fr;gap:3px 12px;font-size:12.5px}
+.conn dt{color:var(--muted)} .conn dd{margin:0}
+.conn.warn{border-color:var(--you-line)}
+.conn.off{border-style:dashed}
+
+/* Drawer */
+.scrim{position:fixed;inset:0;background:rgba(10,12,18,.42);z-index:40}
+.drawer{position:fixed;top:0;right:0;bottom:0;width:min(560px,100%);background:var(--surface);z-index:41;box-shadow:-20px 0 50px rgba(0,0,0,.2);display:flex;flex-direction:column;padding-top:env(safe-area-inset-top,0px);padding-right:env(safe-area-inset-right,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+.drawer .dh{padding:18px 22px;border-bottom:1px solid var(--line);display:flex;gap:12px;align-items:flex-start}
+.drawer .dh h2{font-size:19px;margin-top:4px}
+.drawer .body{overflow:auto;padding:18px 22px;display:flex;flex-direction:column;gap:22px}
+.x{margin-left:auto;border:0;background:var(--surface-2);border-radius:8px;width:32px;height:32px;display:grid;place-items:center;flex:none}
+.nowbox{background:var(--accent-bg);color:var(--fg);border-radius:10px;padding:12px 14px;font-size:14px}
+.nowbox b{color:var(--accent)}
+.lbl{font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;font-weight:500;margin-bottom:10px}
+.tl{list-style:none;margin:0;padding:0;display:flex;flex-direction:column}
+.tl li{display:grid;grid-template-columns:22px minmax(0,1fr) auto;gap:12px;position:relative;padding-bottom:14px}
+.tl li::before{content:"";position:absolute;left:10px;top:20px;bottom:0;width:2px;background:var(--line)}
+.tl li:last-child::before{display:none}
+.tl .m{width:22px;height:22px;border-radius:50%;display:grid;place-items:center;background:var(--surface-2);border:2px solid var(--line);font-size:11px;position:relative;z-index:1}
+.tl li.done .m{background:var(--ok);border-color:var(--ok);color:var(--surface)}
+.tl li.cur .m{background:var(--accent-bg);border-color:var(--accent)}
+.tl li.cur .m::after{content:"";width:8px;height:8px;border-radius:50%;background:var(--accent)}
+.tl li.ask .m{background:var(--you-bg);border-color:var(--you)}
+.tl .st{font-weight:600}
+.tl li.todo .st{color:var(--faint);font-weight:500}
+.tl .who{font-size:12.5px;color:var(--muted)}
+.tl time{font:400 11.5px var(--f-mono);color:var(--faint)}
+.kv{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
+.kv div{background:var(--surface-2);border-radius:9px;padding:10px 12px}
+.kv span{display:block;font-size:12px;color:var(--muted)}
+.kv b{font:600 17px var(--f-display)}
+.dacts{display:flex;gap:8px;flex-wrap:wrap;padding:14px 22px;border-top:1px solid var(--line)}
+
+/* Tour */
+.tour{position:fixed;z-index:60;width:min(340px,calc(100% - 32px));background:var(--fg);color:var(--bg);border-radius:12px;padding:16px;box-shadow:0 20px 50px rgba(0,0,0,.35)}
+.tour .stepn{font:500 11px var(--f-mono);opacity:.65;letter-spacing:.06em;text-transform:uppercase}
+.tour h3{font-size:16px;margin:4px 0 6px}
+.tour p{margin:0 0 12px;font-size:13.5px;opacity:.88}
+.tour .row{display:flex;gap:8px;align-items:center}
+.tour .row .sp{flex:1}
+.tour button{border:1px solid color-mix(in srgb,var(--bg) 30%,transparent);background:transparent;color:var(--bg);border-radius:7px;padding:5px 12px;font-size:13px}
+.tour button.go{background:var(--bg);color:var(--fg);border-color:var(--bg);font-weight:600}
+.spot{outline:3px solid var(--accent)!important;outline-offset:4px;border-radius:12px;position:relative;z-index:50}
+.toast{position:fixed;left:50%;bottom:calc(20px + env(safe-area-inset-bottom,0px));transform:translateX(-50%);background:var(--fg);color:var(--bg);padding:10px 16px;border-radius:10px;z-index:70;font-weight:500;box-shadow:var(--shadow);max-width:calc(100% - 32px)}
+
+.banner{display:flex;gap:12px;align-items:center;background:var(--surface);border:1px dashed var(--line);border-radius:12px;padding:12px 16px;color:var(--muted);font-size:13.5px;flex-wrap:wrap}
+.banner b{color:var(--fg)}
+.paused-bar{background:var(--you-bg);border:1px solid var(--you-line);color:var(--you);border-radius:12px;padding:10px 16px;font-weight:500;display:flex;gap:10px;align-items:center}
+
+.mobile-nav{display:none}
+@media (max-width:1100px){.grid{grid-template-columns:minmax(0,1fr)}.feed{max-height:340px}}
+@media (max-width:860px){
+  .app{grid-template-columns:minmax(0,1fr)}
+  .side{display:none}
+  .mobile-nav{display:flex;gap:4px;overflow-x:auto;position:sticky;top:env(safe-area-inset-top,0px);z-index:20;background:var(--bg);padding-block:8px;margin-bottom:-8px}
+  .mobile-nav a{padding:6px 12px;border-radius:99px;text-decoration:none;color:var(--muted);white-space:nowrap;font-weight:500;border:1px solid var(--line);background:var(--surface)}
+  .mobile-nav a[aria-current="page"]{background:var(--accent);color:var(--surface);border-color:var(--accent)}
+  .strip{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .stat{border-bottom:1px solid var(--line)}
+  .need{grid-template-columns:auto minmax(0,1fr)}
+  .need .acts{grid-column:1/-1;justify-content:flex-start}
+  .kv{grid-template-columns:1fr 1fr}
+}
+@media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+</style>
+
+<div class="app">
+  <aside class="side" aria-label="Main navigation">
+    <div class="brand"><div class="mark">AW</div><div><b>AI Workforce</b><small class="mono">localhost:7421</small></div></div>
+    <nav class="nav" id="nav"></nav>
+    <div class="side-foot">
+      <button class="ghost" id="pauseBtn" type="button"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></svg><span>Pause new work</span></button>
+      <button class="ghost" id="themeBtn" type="button"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 13A9 9 0 1 1 11 3a7 7 0 0 0 10 10z"/></svg><span>Switch theme</span></button>
+    </div>
+  </aside>
+
+  <main>
+    <div class="wrap">
+      <nav class="mobile-nav" id="mnav" aria-label="Sections"></nav>
+      <div class="top">
+        <h1 id="viewTitle">Overview</h1>
+        <span class="demo">Demo data</span>
+        <span class="sp"></span>
+        <span class="muted" style="color:var(--muted);font-size:13px" id="clock"></span>
+        <button class="btn" id="tourBtn" type="button"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M9.5 9a2.5 2.5 0 1 1 3.5 2.3c-.6.3-1 .9-1 1.6V14M12 17.5v.01"/></svg>How to use</button>
+      </div>
+      <div id="pausedBar" class="paused-bar" hidden>New work is paused. Running tasks finish their current step, then wait. <button class="btn sm" id="resumeBtn" type="button" style="margin-left:auto">Resume</button></div>
+      <div id="view"></div>
+    </div>
+  </main>
+</div>
+
+<div id="scrim" class="scrim" hidden></div>
+<aside id="drawer" class="drawer" hidden aria-label="Ticket details"></aside>
+<div id="tour" class="tour" hidden role="dialog" aria-live="polite"></div>
+<div id="toast" class="toast" hidden role="status"></div>
+
+<script>
+const $=s=>document.querySelector(s);
+const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const ICON={
+  home:'<path d="M3 11l9-7 9 7v9a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1z"/>',
+  board:'<rect x="3" y="4" width="5" height="16" rx="1.5"/><rect x="10" y="4" width="5" height="11" rx="1.5"/><rect x="17" y="4" width="4" height="7" rx="1.5"/>',
+  agents:'<circle cx="9" cy="8" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0"/><path d="M16 4.5a3.5 3.5 0 0 1 0 7M18 14.5a6.5 6.5 0 0 1 3.5 5.5"/>',
+  clock:'<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
+  plug:'<path d="M9 3v5M15 3v5M6 8h12v3a6 6 0 0 1-12 0zM12 17v4"/>',
+  ask:'<circle cx="12" cy="12" r="9"/><path d="M9.5 9a2.5 2.5 0 1 1 3.5 2.3c-.6.3-1 .9-1 1.6V14M12 17.5v.01"/>',
+  check:'<path d="M5 12.5l4.5 4.5L19 7.5"/>',
+  play:'<path d="M7 5l12 7-12 7z"/>',
+  pr:'<circle cx="6" cy="6" r="2.5"/><circle cx="6" cy="18" r="2.5"/><circle cx="18" cy="18" r="2.5"/><path d="M6 8.5v7M18 15.5V10a3 3 0 0 0-3-3h-4"/><path d="M13 5l-2 2 2 2"/>',
+  coin:'<circle cx="12" cy="12" r="9"/><path d="M14.5 9.5c-.4-1-1.4-1.5-2.5-1.5-1.5 0-2.5.8-2.5 2s1 1.7 2.5 2 2.5.8 2.5 2-1 2-2.5 2c-1.2 0-2.2-.6-2.6-1.6M12 6.5V8M12 16v1.5"/>'
+};
+const svg=(n,w=17)=>`<svg viewBox="0 0 24 24" width="${w}" height="${w}" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">${ICON[n]}</svg>`;
+
+/* ---------- Demo data ---------- */
+const IDLE={conductor:'Reads your Teams messages and decides what to do. Wakes on each message.',planner:'Reads the ticket, Figma and code, then writes the plan.',implementer:'Writes the code and runs the tests for one repo.',reviewer:'Checks the change against the plan, standards and docstrings.',cifixer:'Wakes when CI fails on a PR and fixes it by itself.',knowledge:'Answers agents\' questions from past decisions, Brain and code before asking you.',qa:'Tests a PR like a user would and drafts issues for you.'};
+const STAGES=[['queued','Waiting to start'],['plan','Understand & plan'],['build','Building'],['review','Reviewing'],['pr','PR open'],['done','Done']];
+const AGENTS={
+  conductor:{name:'Conductor',col:'#1E4FD8',tier:'Sonnet',abbr:'CO'},
+  planner:{name:'Planner',col:'#7C3AED',tier:'Opus',abbr:'PL'},
+  implementer:{name:'Implementer',col:'#0E7490',tier:'Sonnet',abbr:'IM'},
+  reviewer:{name:'Reviewer',col:'#B45309',tier:'Sonnet',abbr:'RV'},
+  cifixer:{name:'CI fixer',col:'#BE123C',tier:'Code + Sonnet',abbr:'CI'},
+  knowledge:{name:'Knowledge agent',col:'#15803D',tier:'Haiku',abbr:'KN'},
+  qa:{name:'QA engineer',col:'#4D7C0F',tier:'Sonnet',abbr:'QA'}
+};
+let tickets=[
+ {id:'KAN-52',title:'Show reply chips under assistant answers',stage:'build',st:'work',size:'M',wave:1,
+  now:'Frontend is being built. Backend part is finished and waiting for it.',
+  parts:[{repo:'backend',pct:100},{repo:'frontend',pct:62}],tokens:184000,cost:1.42,pr:null,agent:'implementer',
+  log:[['09:12','Understood the ticket','Planner read Jira, Figma frame "Chat / Reply chips" and both repos','done'],['09:20','Plan approved','You approved in Teams','done'],['09:21','Contract agreed','POST /assistant/turn returns chips[] and reason','done'],['10:05','Backend built and tested','38 tests passed · reviewer passed','done'],['10:40','Frontend building','Implementer: 5 of 8 steps · running npm test','cur'],['','Review both repos','Reviewer + integration check','todo'],['','Raise 2 linked PRs','backend first, then frontend','todo']]},
+ {id:'KAN-61',title:'Email templates for team invites',stage:'review',st:'work',size:'S',wave:1,
+  now:'Reviewer is checking code standards and docstrings.',parts:[{repo:'backend',pct:88}],tokens:71000,cost:.48,agent:'reviewer',
+  log:[['08:50','Understood the ticket','Small task, backend only','done'],['08:52','Plan sent to you','No approval needed (your order: "no need to ask")','done'],['09:30','Built and tested','12 tests passed','done'],['10:44','Reviewing','Docstrings, coding standards, no stray test files','cur'],['','Raise PR to dev','Reviewers: from CODEOWNERS','todo']]},
+ {id:'KAN-35',title:'Filters on order history page',stage:'plan',st:'you',size:'M',wave:1,
+  now:'Waiting for your answer: should "Cancelled" orders be shown by default?',parts:[{repo:'frontend',pct:20}],tokens:42000,cost:.31,agent:null,
+  log:[['09:40','Understood the ticket','Read Jira and the existing orders page','done'],['09:46','Checked the code and Brain','Found 3 of 4 answers itself','done'],['09:47','Asked you one question','Show cancelled orders by default?','ask'],['','Plan','','todo'],['','Build','','todo']]},
+ {id:'KAN-44',title:'Rate limiting on login and signup',stage:'plan',st:'work',size:'L',wave:2,
+  now:'Planner is reading the auth middleware to plan the change.',parts:[{repo:'backend',pct:35}],tokens:96000,cost:1.05,agent:'planner',
+  log:[['10:30','Started after wave 1 slot freed','Sprint 14 · wave 2','done'],['10:31','Understanding','Reading auth middleware and settings','cur'],['','Plan for your approval','','todo']]},
+ {id:'KAN-58',title:'Fix login redirect loop on Safari',stage:'pr',st:'work',size:'S',wave:1,
+  now:'CI lint failed. Fixing it automatically and pushing (round 1 of 3).',parts:[{repo:'frontend',pct:100}],tokens:38000,cost:.22,pr:'#141',agent:'cifixer',
+  log:[['Yesterday','PR #141 raised to dev','Reviewers requested: 1','done'],['10:41','CI failed: eslint','4 lint errors in auth/redirect.ts','done'],['10:42','Fixing CI by itself','Ran the repo lint fix, no AI needed','cur'],['','CI green','','todo'],['','Waiting for review','','todo']]},
+ {id:'KAN-40',title:'Profile avatar upload',stage:'pr',st:'ok',size:'M',wave:1,
+  now:'PR #138 is green. Waiting for your teammate to review.',parts:[{repo:'backend',pct:100},{repo:'frontend',pct:100}],tokens:122000,cost:.95,pr:'#138, #139',agent:null,
+  log:[['Mon','2 PRs raised','Merge order: #138 backend, then #139 frontend','done'],['Tue','2 review comments fixed','Both people notified','done'],['Today','CI green on both','','done'],['','Teammate review','Waiting for approval','cur']]},
+ {id:'KAN-47',title:'Bulk export of invoices to CSV',stage:'queued',st:'you',size:'L',wave:2,now:'Large task. Waiting for you to say start.',parts:[{repo:'backend',pct:0}],tokens:0,cost:0,agent:null,
+  log:[['10:02','Arrived from Jira','Assigned to you · size L','done'],['','Start?','Waiting for you','ask']]},
+ {id:'KAN-66',title:'Typing indicator in chat',stage:'queued',st:'wait',size:'S',wave:2,now:'Queued: KAN-52 is editing the same chat screen. Starts when it finishes.',parts:[{repo:'frontend',pct:0}],tokens:0,cost:0,agent:null,
+  log:[['10:15','Arrived from Jira','','done'],['','Waiting for the chat screen to be free','Area lock with KAN-52','cur']]},
+ {id:'KAN-33',title:'Dark mode colour tokens',stage:'done',st:'ok',size:'M',wave:1,now:'Merged by your teammate on Monday.',parts:[{repo:'frontend',pct:100}],tokens:88000,cost:.71,pr:'#131',agent:null,log:[['Mon','Merged','Ticket moved to Done in Jira','done']]},
+ {id:'KAN-29',title:'Password reset email copy',stage:'done',st:'ok',size:'S',wave:1,now:'Merged last week.',parts:[{repo:'backend',pct:100}],tokens:24000,cost:.16,pr:'#127',agent:null,log:[['Thu','Merged','','done']]},
+ {id:'PR #142',title:"Teammate's PR: notification settings API",stage:'review',st:'work',size:'–',wave:null,now:'QA engineer is testing the teammate PR. Issues come to you before posting.',parts:[{repo:'backend',pct:55}],tokens:31000,cost:.24,agent:'qa',
+  log:[['10:20','Teammate raised PR #142','You were notified','done'],['10:36','QA testing','Running the API checks','cur'],['','Results to you in Teams','Nothing posted without you','todo']]}
+];
+let working=[
+ {a:'implementer',on:'KAN-52',where:'frontend',doing:'Running <span class="mono">npm test</span>: 41 of 58 passed',pct:62,mins:14,tok:'38k'},
+ {a:'reviewer',on:'KAN-61',where:'backend',doing:'Checking docstrings and coding standards in 6 files',pct:70,mins:3,tok:'12k'},
+ {a:'cifixer',on:'KAN-58',where:'PR #141',doing:'Lint fixed with the repo\'s own command. Pushing.',pct:85,mins:1,tok:'0'},
+ {a:'planner',on:'KAN-44',where:'backend',doing:'Reading <span class="mono">auth/middleware.py</span> to plan the change',pct:35,mins:6,tok:'24k'},
+ {a:'qa',on:'PR #142',where:'backend',doing:'Calling <span class="mono">PATCH /settings/notifications</span> with 9 test cases',pct:55,mins:5,tok:'9k'}
+];
+let needs=[
+ {id:'n1',kind:'Question',ref:'KAN-35',title:'Show cancelled orders by default?',detail:'Couldn\'t find this in the ticket, Figma or code. Everything else was answered from the code.',opts:['Hide them (recommended)','Show them'],rec:0},
+ {id:'n2',kind:'Start?',ref:'KAN-47',title:'Start "Bulk export of invoices to CSV"? (size L)',detail:'About 2 hours of agent work. One slot is free after KAN-58.',opts:['Start','Later'],rec:0},
+ {id:'n3',kind:'Approve',ref:'PR #134',title:'QA result ready: pass with 2 warnings',detail:'Post the 2 warnings as GitHub issues?',opts:['Post issues','Show me first'],rec:1}
+];
+const feedSeed=[
+ ['10:44','work','<b>Reviewer</b> started checking KAN-61'],
+ ['10:42','work','<b>CI fixer</b> found 4 lint errors on PR #141. Fixing without asking (your setting).'],
+ ['10:41','bad','CI failed on PR #141 (eslint)'],
+ ['10:40','ok','<b>Knowledge agent</b> answered KAN-52\'s question from the code: <span class="mono">reason</span> can be empty. You were not asked.'],
+ ['10:36','work','<b>QA engineer</b> started testing teammate PR #142'],
+ ['10:31','work','<b>Planner</b> started KAN-44 (sprint wave 2)'],
+ ['10:05','ok','KAN-52 backend part finished: 38 tests passed, review passed'],
+ ['10:02','you','KAN-47 arrived from Jira. Size L, waiting for you to start'],
+ ['09:47','you','KAN-35 asked you one question'],
+ ['09:20','ok','You approved the plan for KAN-52 in Teams']
+];
+let feed=feedSeed.slice();
+const jobs=[
+ ['Jira check','New and changed tickets','every 2 min','40 s ago','in 1 min','ok'],
+ ['Teams inbox','Your messages to the bot','every 10 s','4 s ago','in 6 s','ok'],
+ ['PR watcher','Comments, reviews, merges on 5 PRs','every 2 min','1 min ago','in 1 min','ok'],
+ ['CI watch · PR #141','Fix round 1 of 3','on CI event','just now','on next CI result','work'],
+ ['Connector health','Jira, GitHub, Figma, Teams, model','every 5 min','2 min ago','in 3 min','ok'],
+ ['Ticket name index','So you can say "the email templates task"','every 15 min','9 min ago','in 6 min','ok'],
+ ['Brain refresh','Re-reads repos that changed','daily 06:00','today 06:00','tomorrow 06:00','ok'],
+ ['Daily digest','One summary message in Teams','daily 18:00','yesterday','today 18:00','wait']
+];
+const conns=[
+ {n:'Jira',c:'#1868DB',l:'J',st:'ok',info:[['Account','Your Jira Cloud'],['Project','KAN'],['Checked','2 min ago']]},
+ {n:'GitHub',c:'#24292F',l:'G',st:'warn',info:[['Repos','nue-backend, nue-frontend'],['Sign-in','expires in 3 days'],['Checked','2 min ago']],act:'Renew sign-in'},
+ {n:'Figma',c:'#A259FF',l:'F',st:'ok',info:[['Mode','Access token (primary)'],['Last file','Chat / Reply chips'],['Checked','2 min ago']]},
+ {n:'Microsoft Teams',c:'#5B5FC7',l:'T',st:'ok',info:[['Bot','Two-way chat'],['Last message','4 s ago'],['Checked','2 min ago']]},
+ {n:'Claude model access',c:'#C2410C',l:'C',st:'ok',info:[['Today','412k tokens · $3.10'],['Budget','$15 / day'],['Checked','2 min ago']]},
+ {n:'Notion',c:'#37352F',l:'N',st:'off',info:[['Status','Not connected'],['Used for','Product docs (optional)']],act:'Connect'}
+];
+
+/* ---------- Views ---------- */
+const VIEWS=[['overview','Overview','home'],['tickets','Tickets','board'],['agents','Agents','agents'],['background','Background','clock'],['connections','Connections','plug']];
+let view='overview', paused=false;
+
+function counts(){return{overview:needs.length?{n:needs.length,you:1}:null,tickets:{n:tickets.filter(t=>t.stage!=='done').length},agents:{n:working.length},background:{n:jobs.length},connections:conns.some(c=>c.st!=='ok')?{n:conns.filter(c=>c.st!=='ok').length,you:1}:{n:'✓'}}}
+function renderNav(){
+  const c=counts();
+  $('#nav').innerHTML=VIEWS.map(([k,l,i])=>`<a href="#${k}" ${k===view?'aria-current="page"':''}>${svg(i)}${l}${c[k]?`<span class="count ${c[k].you?'you':''}">${c[k].n}</span>`:''}</a>`).join('');
+  $('#mnav').innerHTML=VIEWS.map(([k,l])=>`<a href="#${k}" ${k===view?'aria-current="page"':''}>${l}</a>`).join('');
+}
+function strip(){
+  const bad=conns.filter(c=>c.st!=='ok').length;
+  return `<section class="strip" id="strip" aria-label="At a glance">
+   <div class="stat"><span class="k">Service</span><span class="v"><span class="dot ${paused?'you':'ok'} pulse"></span>${paused?'Paused':'Running'}</span><small style="color:var(--muted);font-size:12.5px">up 3 h 12 m · v0.9.0</small></div>
+   <div class="stat you"><span class="k">Needs you</span><span class="v num">${needs.length}<small>${needs.length?'decisions waiting':'all clear'}</small></span></div>
+   <div class="stat"><span class="k">Agents working</span><span class="v num">${working.length}<small>of 5 slots</small></span></div>
+   <div class="stat"><span class="k">Tickets in progress</span><span class="v num">${tickets.filter(t=>!['done','queued'].includes(t.stage)).length}<small>${tickets.filter(t=>t.stage==='queued').length} waiting</small></span></div>
+   <div class="stat"><span class="k">Connections</span><span class="v">${bad?`<span class="dot you"></span>${conns.length-bad}/${conns.length}`:'<span class="dot ok"></span>All good'}<small>${bad?bad+' to check':''}</small></span></div>
+  </section>`;
+}
+function needsHtml(){
+  if(!needs.length) return `<div class="needs"><div class="empty">Nothing needs you right now. Agents will ask here and in Teams.</div></div>`;
+  return `<div class="needs">${needs.map(n=>`<div class="need" data-need="${n.id}">
+    <div class="ic">${svg(n.kind==='Question'?'ask':n.kind==='Start?'?'play':'check',18)}</div>
+    <div style="min-width:0"><div class="t"><span class="mono" style="color:var(--muted)">${esc(n.ref)}</span> · ${esc(n.title)}</div><div class="d">${esc(n.detail)}</div></div>
+    <div class="acts">${n.opts.map((o,i)=>`<button class="opt ${i===n.rec?'rec':''}" type="button" data-act="${n.id}" data-i="${i}">${esc(o)}</button>`).join('')}</div>
+  </div>`).join('')}</div>`;
+}
+function agentCard(w){
+  const A=AGENTS[w.a];
+  return `<button class="agent" type="button" data-open="${esc(w.on)}">
+    <div class="hd"><div class="av" style="background:${A.col}1f;color:${A.col}">${A.abbr}</div><div><div class="who">${A.name}</div><div class="on"><span class="mono">${esc(w.on)}</span> · ${esc(w.where)}</div></div><span class="tier">${A.tier}</span></div>
+    <div class="doing">${w.doing}</div>
+    <div class="bar"><i style="width:${w.pct}%"></i></div>
+    <div class="ft"><span><span class="dot work pulse"></span>working</span><span class="num">${w.mins} min</span><span class="num">${w.tok} tokens</span></div>
+  </button>`;
+}
+const stChip={work:['work','Working'],you:['you','Needs you'],ok:['ok','On track'],bad:['bad','Failed'],wait:['wait','Waiting']};
+function cardHtml(t){
+  const [c,l]=t.stage==='done'?['ok','Done']:stChip[t.st];
+  return `<button class="card s-${t.stage==='done'?'ok':t.st}" type="button" data-open="${esc(t.id)}">
+    <div class="r1"><span class="ref">${esc(t.id)}</span><span class="chip ${c}">${l}</span><span class="tier sz">${t.size}</span></div>
+    <div class="ttl">${esc(t.title)}</div>
+    ${t.stage!=='done'?`<div class="now">${esc(t.now)}</div>`:''}
+    ${t.parts.length>1||t.stage!=='done'&&t.stage!=='queued'?`<div class="repos">${t.parts.map(p=>`<div class="repo ${p.pct>=100?'done':''}"><span>${p.repo}</span><div class="bar"><i style="width:${p.pct}%"></i></div><span class="num">${p.pct}%</span></div>`).join('')}</div>`:''}
+    ${t.pr?`<div class="now">${svg('pr',13)} PR ${esc(t.pr)}</div>`:''}
+  </button>`;
+}
+function sprintHtml(){
+  const sp=tickets.filter(t=>t.wave);const done=sp.filter(t=>t.stage==='done').length;
+  return `<div class="sprint"><b>Sprint 14</b><span style="color:var(--muted)">ends Fri 21 Nov</span>
+    <div class="bar"><i style="width:${Math.round(done/sp.length*100)}%"></i></div><span class="num">${done} of ${sp.length} done</span>
+    <div class="waves"><span class="chip work">Wave 1 · ${sp.filter(t=>t.wave===1&&t.stage!=='done').length} active</span><span class="chip wait">Wave 2 · starts as slots free</span></div></div>`;
+}
+function boardHtml(){
+  return `<div class="board-scroll"><div class="board" id="board">${STAGES.map(([k,l])=>{const ts=tickets.filter(t=>t.stage===k);return `<div class="lane"><h3><span>${l}</span><span class="num">${ts.length}</span></h3>${ts.map(cardHtml).join('')||'<div style="color:var(--faint);font-size:12.5px;padding:4px">Empty</div>'}</div>`}).join('')}</div></div>`;
+}
+function feedHtml(){
+  return `<section class="panel" id="feedPanel"><div class="panel-h"><h2>Activity</h2><span class="sp"></span><span class="live"><span class="dot ok pulse"></span>Live</span></div>
+  <ul class="feed" id="feed">${feed.map((f,i)=>`<li class="${f[3]?'new':''}"><time>${f[0]}</time><span class="dot ${f[1]}"></span><span>${f[2]}</span></li>`).join('')}</ul></section>`;
+}
+function jobsHtml(full){
+  const rows=full?jobs:jobs.slice(0,4);
+  return `<section class="panel" id="jobsPanel"><div class="panel-h"><h2>Running in the background</h2><span class="sp"></span>${full?'':'<button class="link" type="button" data-go="background">See all</button>'}</div>
+  <div class="tbl"><table><tr><th>Job</th><th>How often</th><th>Last run</th><th>Next</th><th></th></tr>
+  ${rows.map(j=>`<tr><td><b>${j[0]}</b><span class="sub">${j[1]}</span></td><td>${j[2]}</td><td class="num">${j[3]}</td><td class="num">${j[4]}</td><td><span class="chip ${j[5]}">${j[5]==='ok'?'Healthy':j[5]==='work'?'Running':'Scheduled'}</span></td></tr>`).join('')}
+  </table></div></section>`;
+}
+function connsHtml(){
+  return `<div class="conns" id="conns">${conns.map(c=>`<div class="conn ${c.st==='warn'?'warn':c.st==='off'?'off':''}">
+    <div class="hd"><div class="logo" style="background:${c.c}">${c.l}</div><div class="name">${c.n}</div><span class="chip ${c.st==='ok'?'ok':c.st==='warn'?'you':'wait'}">${c.st==='ok'?'Connected':c.st==='warn'?'Check soon':'Not connected'}</span></div>
+    <dl>${c.info.map(([k,v])=>`<dt>${k}</dt><dd>${v}</dd>`).join('')}</dl>
+    ${c.act?`<button class="btn sm ${c.st==='warn'?'you':''}" type="button" data-conn="${c.n}">${c.act}</button>`:''}
+  </div>`).join('')}</div>`;
+}
+function render(){
+  renderNav();
+  $('#viewTitle').textContent=VIEWS.find(v=>v[0]===view)[1];
+  const V=$('#view');
+  if(view==='overview'){
+    V.innerHTML=`<div class="col">${strip()}
+      <div class="grid"><div class="col">
+        <section id="needsSec"><div class="sec-h"><h2>Needs you</h2><p>Decide here or reply in Teams. Both work.</p></div>${needsHtml()}</section>
+        <section id="agentsSec"><div class="sec-h"><h2>Working now</h2><p>Click a card to see the ticket.</p><span class="sp"></span><button class="link" type="button" data-go="agents">All agents</button></div><div class="agents">${working.map(agentCard).join('')}</div></section>
+        <section id="boardSec"><div class="sec-h"><h2>Ticket progress</h2><p>Each ticket moves left to right.</p></div>${sprintHtml()}${boardHtml()}</section>
+      </div><div class="col">${feedHtml()}${jobsHtml(false)}</div></div></div>`;
+  } else if(view==='tickets'){
+    V.innerHTML=`<div class="col"><div class="banner">${svg('board')}<span><b>Tip:</b> click any ticket to see every step, who did it, and what it cost.</span></div>${sprintHtml()}${boardHtml()}
+    <section class="panel"><div class="panel-h"><h2>All tickets</h2></div><div class="tbl"><table><tr><th>Ticket</th><th>Stage</th><th>Status</th><th>Repos</th><th>Tokens</th><th>Cost</th><th>PR</th></tr>
+    ${tickets.map(t=>{const [c,l]=t.stage==='done'?['ok','Done']:stChip[t.st];return `<tr style="cursor:pointer" data-open="${esc(t.id)}"><td><span class="mono">${esc(t.id)}</span><span class="sub">${esc(t.title)}</span></td><td>${STAGES.find(s=>s[0]===t.stage)[1]}</td><td><span class="chip ${c}">${l}</span></td><td>${t.parts.map(p=>p.repo).join(' + ')}</td><td class="num">${t.tokens?Math.round(t.tokens/1000)+'k':'–'}</td><td class="num">${t.cost?'$'+t.cost.toFixed(2):'–'}</td><td>${t.pr||''}</td></tr>`}).join('')}</table></div></section></div>`;
+  } else if(view==='agents'){
+    const idle=Object.keys(AGENTS).filter(k=>!working.some(w=>w.a===k));
+    V.innerHTML=`<div class="col"><div class="banner">${svg('agents')}<span><b>5 slots</b> run at the same time. At most 2 builds per repo. Tickets that touch the same screen wait for each other.</span></div>
+    <section><div class="sec-h"><h2>Working now</h2><p>${working.length} of 5 slots in use</p></div><div class="agents">${working.map(agentCard).join('')}</div></section>
+    <section><div class="sec-h"><h2>Ready</h2><p>Start when a ticket needs them</p></div><div class="agents">${idle.map(k=>{const A=AGENTS[k];return `<div class="agent idle"><div class="hd"><div class="av" style="background:${A.col}1f;color:${A.col}">${A.abbr}</div><div><div class="who">${A.name}</div><div class="on">Idle</div></div><span class="tier">${A.tier}</span></div><div class="doing" style="color:var(--muted)">${IDLE[k]||''}</div></div>`}).join('')}</div></section>
+    <section class="panel"><div class="panel-h"><h2>Queue</h2><span class="sp"></span><span style="color:var(--muted);font-size:13px">Starts in this order when a slot frees</span></div><div class="tbl"><table><tr><th>#</th><th>Ticket</th><th>Why it waits</th></tr><tr><td>1</td><td><span class="mono">KAN-47</span><span class="sub">Bulk export of invoices to CSV</span></td><td><span class="chip you">Needs your start</span></td></tr><tr><td>2</td><td><span class="mono">KAN-66</span><span class="sub">Typing indicator in chat</span></td><td><span class="chip wait">Same screen as KAN-52</span></td></tr></table></div></section></div>`;
+  } else if(view==='background'){
+    V.innerHTML=`<div class="col"><div class="banner">${svg('clock')}<span>These run by themselves. Most use <b>no AI at all</b>, so they cost nothing.</span></div>${jobsHtml(true)}${feedHtml()}</div>`;
+  } else {
+    V.innerHTML=`<div class="col"><div class="banner">${svg('plug')}<span>Checked every 5 minutes. If one breaks you also get a short Teams message with a <b>Reconnect</b> link.</span></div>${connsHtml()}</div>`;
+  }
+}
+
+/* ---------- Drawer ---------- */
+function openTicket(id){
+  const t=tickets.find(x=>x.id===id); if(!t) return;
+  const [c,l]=t.stage==='done'?['ok','Done']:stChip[t.st];
+  const si=STAGES.findIndex(s=>s[0]===t.stage);
+  const A=t.agent?AGENTS[t.agent]:null;
+  $('#drawer').innerHTML=`<div class="dh"><div style="min-width:0"><div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><span class="mono" style="color:var(--muted)">${esc(t.id)}</span><span class="chip ${c}">${l}</span><span class="tier">size ${t.size}</span></div><h2>${esc(t.title)}</h2></div><button class="x" type="button" id="closeD" aria-label="Close">✕</button></div>
+  <div class="body">
+    <div class="nowbox"><b>Now:</b> ${esc(t.now)}${A?`<div style="margin-top:6px;font-size:12.5px;color:var(--muted)">Agent: ${A.name} · ${A.tier}</div>`:''}</div>
+    <div><div class="lbl">Stage</div><div style="display:flex;gap:4px">${STAGES.map((s,i)=>`<div style="flex:1"><div class="bar" style="height:5px"><i style="width:${i<si?100:i===si?50:0}%;background:${i<si?'var(--ok)':'var(--accent)'}"></i></div><div style="font-size:11px;color:${i<=si?'var(--fg)':'var(--faint)'};margin-top:5px">${s[1]}</div></div>`).join('')}</div></div>
+    ${t.parts.length>1?`<div><div class="lbl">Repos</div><div class="repos">${t.parts.map(p=>`<div class="repo ${p.pct>=100?'done':''}" style="grid-template-columns:80px 1fr 40px;font-size:13px"><span>${p.repo}</span><div class="bar"><i style="width:${p.pct}%"></i></div><span class="num">${p.pct}%</span></div>`).join('')}</div></div>`:''}
+    <div><div class="lbl">What happened</div><ol class="tl">${t.log.map(([tm,st,who,s])=>`<li class="${s}"><span class="m">${s==='done'?'✓':s==='ask'?'?':''}</span><div><div class="st">${esc(st)}</div>${who?`<div class="who">${esc(who)}</div>`:''}</div><time>${tm}</time></li>`).join('')}</ol></div>
+    <div class="kv"><div><span>Tokens</span><b class="num">${t.tokens?Math.round(t.tokens/1000)+'k':'0'}</b></div><div><span>Cost</span><b class="num">$${t.cost.toFixed(2)}</b></div><div><span>PR</span><b>${t.pr||'–'}</b></div></div>
+  </div>
+  <div class="dacts">${t.st==='you'?`<button class="btn you" type="button" data-go="overview" id="toNeeds">Answer it</button>`:''}${t.stage!=='done'?'<button class="btn" type="button" data-toast="Paused '+esc(t.id)+'. It stops after the current step.">Pause this ticket</button>':''}<button class="btn" type="button" data-toast="Opens ${esc(t.id)} in Jira (demo)">Open in Jira</button>${t.pr?`<button class="btn" type="button" data-toast="Opens PR ${esc(t.pr)} on GitHub (demo)">Open PR</button>`:''}</div>`;
+  $('#drawer').hidden=false;$('#scrim').hidden=false;$('#closeD').focus();
+}
+function closeDrawer(){$('#drawer').hidden=true;$('#scrim').hidden=true}
+
+/* ---------- Actions ---------- */
+let toastT;function toast(m){const e=$('#toast');e.textContent=m;e.hidden=false;clearTimeout(toastT);toastT=setTimeout(()=>e.hidden=true,2600)}
+function nowT(){const d=new Date();return String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0')}
+function pushFeed(kind,html){feed.unshift([nowT(),kind,html,1]);feed=feed.slice(0,30);feed.slice(1).forEach(f=>f[3]=0)}
+function act(id,i){
+  const n=needs.find(x=>x.id===id); if(!n) return; const choice=n.opts[i];
+  needs=needs.filter(x=>x.id!==id);
+  if(n.ref==='KAN-35'){const t=tickets.find(x=>x.id==='KAN-35');t.st='work';t.now='Planning with your answer: '+choice.replace(' (recommended)','')+'.';t.agent='planner';t.log.splice(2,1,['09:47','You answered',choice,'done']);t.log[3]=[nowT(),'Planning','Planner','cur'];
+    pushFeed('ok','You answered KAN-35: <b>'+esc(choice)+'</b>. Planning continues.');}
+  if(n.ref==='KAN-47'){const t=tickets.find(x=>x.id==='KAN-47');if(i===0){t.st='wait';t.now='Queued: starts when a slot frees (1st in queue).';pushFeed('ok','You started KAN-47. It is first in the queue.')}else{pushFeed('wait','KAN-47 put off. I\'ll ask again tomorrow morning.')}}
+  if(n.ref==='PR #134'){pushFeed(i===0?'ok':'you',i===0?'2 GitHub issues posted for PR #134':'Sent the 2 QA warnings to Teams for you to read')}
+  toast(n.ref+': '+choice.replace(' (recommended)',''));render();
+}
+document.addEventListener('click',e=>{
+  const a=e.target.closest('[data-act]');if(a){act(a.dataset.act,+a.dataset.i);return}
+  const o=e.target.closest('[data-open]');if(o){openTicket(o.dataset.open);return}
+  const g=e.target.closest('[data-go]');if(g){closeDrawer();location.hash=g.dataset.go;return}
+  const t=e.target.closest('[data-toast]');if(t){toast(t.dataset.toast);return}
+  const c=e.target.closest('[data-conn]');if(c){const x=conns.find(k=>k.n===c.dataset.conn);if(x.st==='warn'){x.st='ok';x.info[1]=['Sign-in','renewed · 90 days'];delete x.act;pushFeed('ok','GitHub sign-in renewed');toast('GitHub sign-in renewed')}else toast('Opens the Notion sign-in page (demo)');render();return}
+});
+$('#scrim').onclick=closeDrawer;
+document.addEventListener('keydown',e=>{if(e.key==='Escape'){closeDrawer();endTour()}});
+function setPaused(p){paused=p;$('#pausedBar').hidden=!p;$('#pauseBtn span').textContent=p?'Resume new work':'Pause new work';pushFeed(p?'you':'ok',p?'You paused new work':'You resumed new work');render()}
+$('#pauseBtn').onclick=()=>setPaused(!paused);$('#resumeBtn').onclick=()=>setPaused(false);
+$('#themeBtn').onclick=()=>{const r=document.documentElement;const dark=r.dataset.theme?r.dataset.theme==='dark':matchMedia('(prefers-color-scheme: dark)').matches;r.dataset.theme=dark?'light':'dark'};
+
+function route(){const h=location.hash.slice(1);view=VIEWS.some(v=>v[0]===h)?h:'overview';closeDrawer();render();window.scrollTo(0,0)}
+window.addEventListener('hashchange',route);
+
+/* ---------- Live simulation ---------- */
+const sim=[
+ ()=>{const w=working.find(x=>x.a==='implementer');if(w&&w.pct<96){w.pct+=4;const p=Math.min(58,41+Math.round((w.pct-62)/2));w.doing=`Running <span class="mono">npm test</span>: ${p} of 58 passed`;tickets[0].parts[1].pct=w.pct}},
+ ()=>{const w=working.find(x=>x.a==='cifixer');if(w){working=working.filter(x=>x!==w);const t=tickets.find(x=>x.id==='KAN-58');t.st='ok';t.now='CI is green. Waiting for your teammate to review.';t.agent=null;t.log[2][3]='done';t.log[3]=[nowT(),'CI green','Fixed in round 1','done'];t.log[4][3]='cur';pushFeed('ok','CI green on PR #141. Fixed by itself in round 1.')}},
+ ()=>{const w=working.find(x=>x.a==='reviewer');if(w){w.pct=Math.min(95,w.pct+10);w.doing='Checked 6 files: docstrings OK, no stray test files'}pushFeed('work','<b>Reviewer</b> checked KAN-61: standards OK')},
+ ()=>{const w=working.find(x=>x.a==='planner');if(w){w.pct+=15;w.doing='Writing the plan: 4 steps, 3 files, 6 tests'}pushFeed('work','<b>Planner</b> is writing the plan for KAN-44')},
+ ()=>{const w=working.find(x=>x.a==='qa');if(w){w.pct+=20;w.doing='7 of 9 checks passed. 1 warning: missing 404 case'}pushFeed('you','<b>QA engineer</b> found 1 warning on PR #142')}
+];
+let si=0;
+function tick(){
+  if(!paused&&!tourOn){sim[si%sim.length]();si++;working.forEach(w=>w.mins+=0);if(!$('#drawer').hidden)return;render()}
+  $('#clock').textContent='Updated '+nowT();
+}
+setInterval(tick,6000);
+
+/* ---------- Tour ---------- */
+const TOUR=[
+ ['#strip','The top line','Service health, how many things need you, how many agents are busy, and whether every connection works. Look here first.'],
+ ['#needsSec','Needs you','Questions, start requests and approvals. Click an option to decide. The recommended choice is outlined. The same items also come to Teams.'],
+ ['#agentsSec','Working now','One card per busy agent: which ticket, what it is doing in plain words, progress, time and tokens. Click a card to open its ticket.'],
+ ['#boardSec','Ticket progress','Every ticket moves from left to right. Two-repo tickets show a bar per repo. The colour on the left edge tells you the state.'],
+ ['#feedPanel','Activity','A live list of what just happened, newest first. Agents that answered something themselves show up here too.'],
+ ['#jobsPanel','Background jobs','Checks that run by themselves, like Jira, PR and CI watching. Open "Connections" in the menu to see each tool and reconnect it.']
+];
+let tourOn=false,tStep=0;
+function showTour(){
+  document.querySelectorAll('.spot').forEach(e=>e.classList.remove('spot'));
+  const [sel,h,p]=TOUR[tStep];const el=$(sel);if(!el){endTour();return}
+  el.classList.add('spot');el.scrollIntoView({block:'center',behavior:matchMedia('(prefers-reduced-motion: reduce)').matches?'auto':'smooth'});
+  const T=$('#tour');T.hidden=false;
+  T.innerHTML=`<div class="stepn">Step ${tStep+1} of ${TOUR.length}</div><h3>${h}</h3><p>${p}</p><div class="row"><button type="button" id="tSkip">Close</button><span class="sp"></span>${tStep?'<button type="button" id="tBack">Back</button>':''}<button class="go" type="button" id="tNext">${tStep===TOUR.length-1?'Done':'Next'}</button></div>`;
+  setTimeout(()=>{const r=el.getBoundingClientRect();const tw=T.offsetWidth,th=T.offsetHeight;let top=r.bottom+14;if(top+th>innerHeight-12)top=Math.max(12,r.top-th-14);if(top<12)top=12;let left=Math.min(Math.max(16,r.left),innerWidth-tw-16);T.style.top=top+'px';T.style.left=left+'px'},350);
+  $('#tSkip').onclick=endTour;$('#tNext').onclick=()=>{if(tStep===TOUR.length-1)endTour();else{tStep++;showTour()}};if($('#tBack'))$('#tBack').onclick=()=>{tStep--;showTour()};
+}
+function startTour(){if(view!=='overview'){location.hash='overview'}tourOn=true;tStep=0;setTimeout(showTour,60)}
+function endTour(){tourOn=false;$('#tour').hidden=true;document.querySelectorAll('.spot').forEach(e=>e.classList.remove('spot'))}
+$('#tourBtn').onclick=startTour;
+
+route();$('#clock').textContent='Updated '+nowT();
+</script>

@@ -1,0 +1,448 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+</head>
+<body>
+<title>AI Workforce Blueprint</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<style>
+/* Layout: one reading column for text, full-width figures that scroll sideways on small screens. Cool engineering neutrals, blue = AI work, amber = you decide. */
+:root {
+  --bg: #f4f6f8; --fg: #16202a; --muted: #586574; --line: #c3ccd6; --panel: #ffffff; --band: #e9edf1;
+  --eng: #2160a6; --eng-bg: #e7f0fa; --you: #a86300; --you-bg: #fbefdc; --ok: #2d7a4d;
+  --sans: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif; --mono: "IBM Plex Mono", ui-monospace, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #10151b; --fg: #e4e9ee; --muted: #98a4b1; --line: #36424f; --panel: #17202a; --band: #141c24;
+  --eng: #7eaee8; --eng-bg: #182a3e; --you: #efb056; --you-bg: #33261a; --ok: #6cc28f; color-scheme: dark } }
+:root[data-theme="dark"] {
+  --bg: #10151b; --fg: #e4e9ee; --muted: #98a4b1; --line: #36424f; --panel: #17202a; --band: #141c24;
+  --eng: #7eaee8; --eng-bg: #182a3e; --you: #efb056; --you-bg: #33261a; --ok: #6cc28f; color-scheme: dark }
+body { background: var(--bg); color: var(--fg); font: 15px/1.6 var(--sans); }
+.wrap { max-width: 1180px; margin: 0 auto; padding-block: 40px 64px; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); display: grid; gap: 48px; }
+header { display: grid; gap: 16px; }
+.eyebrow { font: 600 12px var(--mono); letter-spacing: .1em; text-transform: uppercase; color: var(--eng); }
+h1 { font: 700 clamp(28px, 4vw, 40px)/1.15 var(--sans); margin: 0; text-wrap: balance; }
+h2 { font: 650 22px/1.3 var(--sans); margin: 0; text-wrap: balance; }
+h3 { font: 600 16px/1.4 var(--sans); margin: 0; }
+p { margin: 0; max-width: 72ch; }
+.lede { color: var(--muted); font-size: 17px; }
+.facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.facts div { background: var(--panel); padding: 14px 16px; display: grid; gap: 2px; min-width: 0; }
+.facts b { font: 600 11px var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+.facts span { font-weight: 500; }
+section { display: grid; gap: 16px; }
+.sec-head { display: grid; gap: 6px; }
+.num { font: 600 12px var(--mono); color: var(--muted); letter-spacing: .08em; }
+figure { margin: 0; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; display: grid; }
+.scroll { overflow-x: auto; padding: 16px; }
+.scroll svg { display: block; width: 100%; min-width: 900px; height: auto; color: var(--fg); }
+figcaption { border-top: 1px solid var(--line); padding: 12px 16px; color: var(--muted); font-size: 14px; }
+.key { display: flex; flex-wrap: wrap; gap: 8px 20px; font: 12px var(--mono); color: var(--muted); padding: 0 16px 14px; }
+.key i { display: inline-block; width: 14px; height: 10px; border-radius: 2px; vertical-align: -1px; margin-right: 6px; border: 1.3px solid; }
+.k-eng { background: var(--eng-bg); border-color: var(--eng) !important; }
+.k-you { background: var(--you-bg); border-color: var(--you) !important; }
+.k-box { background: var(--panel); border-color: var(--line) !important; }
+.k-out { border-style: dashed !important; border-color: var(--muted) !important; }
+
+/* SVG parts, themed through the page tokens */
+.bx { fill: var(--panel); stroke: var(--line); stroke-width: 1.2; }
+.bx-eng { fill: var(--eng-bg); stroke: var(--eng); stroke-width: 1.3; }
+.bx-you { fill: var(--you-bg); stroke: var(--you); stroke-width: 1.3; }
+.bx-out { fill: var(--bg); stroke: var(--muted); stroke-width: 1.2; stroke-dasharray: 5 4; }
+.bx-zone { fill: none; stroke: var(--muted); stroke-width: 1.4; stroke-dasharray: 7 5; }
+.lane-a { fill: var(--band); }
+.lane-b { fill: var(--bg); }
+.t { fill: var(--fg); font: 600 13px var(--sans); }
+.tb { fill: var(--fg); font: 600 14px var(--sans); }
+.s { fill: var(--muted); font: 11.5px var(--mono); }
+.s2 { fill: var(--muted); font: 10.5px var(--mono); }
+.lab { fill: var(--muted); font: 600 10.5px var(--mono); letter-spacing: .08em; }
+.al { fill: var(--muted); font: 11px var(--mono); paint-order: stroke; stroke: var(--panel); stroke-width: 5px; stroke-linejoin: round; }
+.ar { stroke: currentColor; stroke-width: 1.3; fill: none; }
+.ar-d { stroke: currentColor; stroke-width: 1.2; fill: none; stroke-dasharray: 4 4; }
+.ar-y { stroke: var(--you); stroke-width: 1.5; fill: none; }
+.ah { fill: currentColor; }
+
+/* tables and lists */
+.tbl { overflow-x: auto; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); }
+table { border-collapse: collapse; width: 100%; min-width: 640px; font-size: 14px; }
+th, td { text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { font: 600 11px var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); background: var(--band); }
+tr:last-child td { border-bottom: 0; }
+code { font: 12.5px var(--mono); background: var(--band); padding: 1px 5px; border-radius: 4px; }
+td code { white-space: nowrap; }
+.tier { font: 600 11px var(--mono); padding: 2px 7px; border-radius: 99px; border: 1px solid var(--line); white-space: nowrap; }
+.states { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.st { font: 600 12px var(--mono); padding: 5px 10px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel); }
+.st.you { background: var(--you-bg); border-color: var(--you); }
+.st.eng { background: var(--eng-bg); border-color: var(--eng); }
+.st.ok { border-color: var(--ok); color: var(--ok); }
+.arrow { color: var(--muted); font: 13px var(--mono); }
+.grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; display: grid; gap: 8px; align-content: start; min-width: 0; }
+.card ul { margin: 0; padding-left: 18px; display: grid; gap: 4px; }
+.card li { max-width: 70ch; }
+.dim { color: var(--muted); }
+footer { color: var(--muted); font-size: 13px; border-top: 1px solid var(--line); padding-top: 16px; }
+</style>
+
+<div class="wrap">
+
+<header>
+  <div class="eyebrow">Architecture review · version 0.3.0</div>
+  <h1>AI Workforce Blueprint</h1>
+  <p class="lede">A Claude Code plugin plus a background service on the developer's own computer. It picks up Jira tickets or requests from Teams, plans, builds and tests the change in an isolated copy of the repository, and raises a draft pull request. The developer approves the plan and the PR in Teams.</p>
+  <div class="facts">
+    <div><b>Runs on</b><span>The developer's computer only</span></div>
+    <div><b>Intelligence</b><span>Claude models via the Claude Agent SDK</span></div>
+    <div><b>Human decisions</b><span>Plan approval and PR approval, in Teams</span></div>
+    <div><b>Output</b><span>Draft PRs to the base branch, never merged</span></div>
+  </div>
+</header>
+
+<!-- ============================================================ 1. BLOCK DIAGRAM -->
+<section>
+  <div class="sec-head">
+    <span class="num">1 · BLOCK DIAGRAM</span>
+    <h2>The building blocks and what each one passes on</h2>
+    <p class="dim">Read top to bottom: where work comes from, how the service takes it in, who decides what happens next, and which shared services do the work.</p>
+  </div>
+  <figure>
+    <div class="scroll">
+      <svg viewBox="0 0 1130 612" role="img" aria-label="Block diagram: Teams, Claude Code, Jira and GitHub feed four intake blocks; Teams text goes through conversation understanding and Jira changes through the event gate and triage into the playbook engine, which drives the agent runner, git worktrees, approval service and notification router; these reach the Brain, local storage, Claude models, read-only lookups, GitHub and Teams.">
+        <defs>
+          <marker id="a1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ah" d="M0,0 L10,5 L0,10 z"/></marker>
+        </defs>
+        <!-- lane labels -->
+        <text class="lab" text-anchor="end" x="112" y="48">WHERE WORK</text><text class="lab" text-anchor="end" x="112" y="62">COMES FROM</text>
+        <text class="lab" text-anchor="end" x="112" y="152">INTAKE</text>
+        <text class="lab" text-anchor="end" x="112" y="253">UNDERSTAND</text>
+        <text class="lab" text-anchor="end" x="112" y="359">ORCHESTRATE</text>
+        <text class="lab" text-anchor="end" x="112" y="457">SHARED</text><text class="lab" text-anchor="end" x="112" y="471">SERVICES</text>
+        <text class="lab" text-anchor="end" x="112" y="568">STORAGE AND</text><text class="lab" text-anchor="end" x="112" y="582">OUTSIDE</text>
+
+        <!-- row 1: inputs -->
+        <rect class="bx-you" x="130" y="30" width="215" height="44" rx="6"/><text class="t" x="237.5" y="49" text-anchor="middle">You · Teams chat</text><text class="s" x="237.5" y="65" text-anchor="middle">plain words, replies</text>
+        <rect class="bx-you" x="385" y="30" width="215" height="44" rx="6"/><text class="t" x="492.5" y="49" text-anchor="middle">You · Claude Code</text><text class="s" x="492.5" y="65" text-anchor="middle">in Workforce projects</text>
+        <rect class="bx-out" x="640" y="30" width="215" height="44" rx="6"/><text class="t" x="747.5" y="49" text-anchor="middle">Jira</text><text class="s" x="747.5" y="65" text-anchor="middle">ticket assigned to you</text>
+        <rect class="bx-out" x="895" y="30" width="215" height="44" rx="6"/><text class="t" x="1002.5" y="49" text-anchor="middle">GitHub</text><text class="s" x="1002.5" y="65" text-anchor="middle">reviews on our PRs</text>
+
+        <!-- row 2: intake -->
+        <rect class="bx" x="130" y="120" width="215" height="56" rx="6"/><text class="t" x="237.5" y="143" text-anchor="middle">Teams poller</text><text class="s" x="237.5" y="161" text-anchor="middle">every 10–30 s</text>
+        <rect class="bx" x="385" y="120" width="215" height="56" rx="6"/><text class="t" x="492.5" y="143" text-anchor="middle">MCP tools + prompt hook</text><text class="s" x="492.5" y="161" text-anchor="middle">hands work to the service</text>
+        <rect class="bx" x="640" y="120" width="215" height="56" rx="6"/><text class="t" x="747.5" y="143" text-anchor="middle">Jira poller</text><text class="s" x="747.5" y="161" text-anchor="middle">every 2–5 min · 0 tokens</text>
+        <rect class="bx" x="895" y="120" width="215" height="56" rx="6"/><text class="t" x="1002.5" y="143" text-anchor="middle">PR watcher</text><text class="s" x="1002.5" y="161" text-anchor="middle">every 3 min · 30 days</text>
+
+        <line class="ar" x1="237.5" y1="74" x2="237.5" y2="118" marker-end="url(#a1)"/><text class="al" x="243" y="101">message</text>
+        <line class="ar" x1="492.5" y1="74" x2="492.5" y2="118" marker-end="url(#a1)"/><text class="al" x="498" y="101">tool call</text>
+        <line class="ar" x1="747.5" y1="118" x2="747.5" y2="76" marker-end="url(#a1)"/><text class="al" x="753" y="101">polled</text>
+        <line class="ar" x1="1002.5" y1="118" x2="1002.5" y2="76" marker-end="url(#a1)"/><text class="al" x="1008" y="101">polled</text>
+
+        <!-- row 3: understand -->
+        <rect class="bx-eng" x="130" y="216" width="215" height="66" rx="6"/><text class="t" x="237.5" y="238" text-anchor="middle">Conversation understanding</text><text class="s" x="237.5" y="256" text-anchor="middle">rules → conversation model</text><text class="s" x="237.5" y="272" text-anchor="middle">chat history · focus</text>
+        <rect class="bx-eng" x="640" y="216" width="215" height="66" rx="6"/><text class="t" x="747.5" y="238" text-anchor="middle">Event gate → Triage</text><text class="s" x="747.5" y="256" text-anchor="middle">each change once</text><text class="s" x="747.5" y="272" text-anchor="middle">size · small model</text>
+        <line class="ar" x1="237.5" y1="176" x2="237.5" y2="214" marker-end="url(#a1)"/><text class="al" x="243" y="200">your text</text>
+        <line class="ar" x1="747.5" y1="176" x2="747.5" y2="214" marker-end="url(#a1)"/><text class="al" x="753" y="200">changes</text>
+
+        <!-- row 4: engine -->
+        <rect class="bx-eng" x="130" y="322" width="725" height="66" rx="6"/><text class="tb" x="492.5" y="347" text-anchor="middle">Playbook engine (state machine)</text><text class="s" x="492.5" y="368" text-anchor="middle">fixed step order · scheduler · one lead + one part per repository · retries · saved after every step</text>
+        <line class="ar" x1="237.5" y1="282" x2="237.5" y2="320" marker-end="url(#a1)"/><text class="al" x="243" y="306">start · approve · answer</text>
+        <line class="ar" x1="492.5" y1="176" x2="492.5" y2="320" marker-end="url(#a1)"/><text class="al" x="498" y="252">run · status</text>
+        <line class="ar" x1="747.5" y1="282" x2="747.5" y2="320" marker-end="url(#a1)"/><text class="al" x="753" y="306">new task</text>
+
+        <!-- row 5: shared services -->
+        <rect class="bx" x="130" y="428" width="180" height="66" rx="6"/><text class="t" x="220" y="450" text-anchor="middle">Brain</text><text class="s" x="220" y="468" text-anchor="middle">code map · handbook</text><text class="s" x="220" y="484" text-anchor="middle">past tasks · docs</text>
+        <rect class="bx-eng" x="330" y="428" width="180" height="66" rx="6"/><text class="t" x="420" y="450" text-anchor="middle">Agent runner</text><text class="s" x="420" y="468" text-anchor="middle">Claude Agent SDK</text><text class="s" x="420" y="484" text-anchor="middle">scoped tools · JSON</text>
+        <rect class="bx" x="530" y="428" width="180" height="66" rx="6"/><text class="t" x="620" y="450" text-anchor="middle">Git worktrees</text><text class="s" x="620" y="468" text-anchor="middle">one per task</text><text class="s" x="620" y="484" text-anchor="middle">checkout untouched</text>
+        <rect class="bx-you" x="730" y="428" width="180" height="66" rx="6"/><text class="t" x="820" y="450" text-anchor="middle">Approval service</text><text class="s" x="820" y="468" text-anchor="middle">bound to the commit</text><text class="s" x="820" y="484" text-anchor="middle">first answer wins</text>
+        <rect class="bx" x="930" y="428" width="180" height="66" rx="6"/><text class="t" x="1020" y="450" text-anchor="middle">Notification router</text><text class="s" x="1020" y="468" text-anchor="middle">Teams only</text><text class="s" x="1020" y="484" text-anchor="middle">retries · 10:00 check-up</text>
+
+        <line class="ar" x1="420" y1="388" x2="420" y2="426" marker-end="url(#a1)"/><text class="al" x="426" y="412">runs a step</text>
+        <line class="ar" x1="620" y1="388" x2="620" y2="426" marker-end="url(#a1)"/><text class="al" x="626" y="412">creates</text>
+        <line class="ar" x1="820" y1="388" x2="820" y2="426" marker-end="url(#a1)"/><text class="al" x="826" y="412">asks you</text>
+        <polyline class="ar" points="855,355 970,355 970,426" marker-end="url(#a1)"/><text class="al" x="912" y="347" text-anchor="middle">updates</text>
+        <line class="ar" x1="1060" y1="176" x2="1060" y2="426" marker-end="url(#a1)"/><text class="al" x="1066" y="300">reviews</text>
+        <line class="ar" x1="330" y1="461" x2="312" y2="461" marker-end="url(#a1)"/>
+        <line class="ar" x1="510" y1="461" x2="528" y2="461" marker-end="url(#a1)"/>
+
+        <!-- row 6: storage and outside -->
+        <rect class="bx" x="130" y="548" width="180" height="48" rx="6"/><text class="t" x="220" y="568" text-anchor="middle">SQLite + OS vault</text><text class="s" x="220" y="585" text-anchor="middle">tasks · steps · chat</text>
+        <rect class="bx-out" x="330" y="548" width="180" height="48" rx="6"/><text class="t" x="420" y="568" text-anchor="middle">Claude models</text><text class="s" x="420" y="585" text-anchor="middle">Anthropic</text>
+        <rect class="bx-out" x="530" y="548" width="180" height="48" rx="6"/><text class="t" x="620" y="568" text-anchor="middle">Lookups (read-only)</text><text class="s" x="620" y="585" text-anchor="middle">Jira·GitHub·Figma·Notion</text>
+        <rect class="bx-out" x="730" y="548" width="180" height="48" rx="6"/><text class="t" x="820" y="568" text-anchor="middle">GitHub</text><text class="s" x="820" y="585" text-anchor="middle">branch + draft PR</text>
+        <rect class="bx-out" x="930" y="548" width="180" height="48" rx="6"/><text class="t" x="1020" y="568" text-anchor="middle">Microsoft Teams</text><text class="s" x="1020" y="585" text-anchor="middle">two-way bot chat</text>
+
+        <line class="ar" x1="220" y1="494" x2="220" y2="546" marker-end="url(#a1)"/><text class="al" x="226" y="524">index</text>
+        <line class="ar" x1="420" y1="494" x2="420" y2="546" marker-end="url(#a1)"/><text class="al" x="414" y="524" text-anchor="end">every step</text>
+        <line class="ar-d" x1="470" y1="494" x2="560" y2="546" marker-end="url(#a1)"/><text class="al" x="526" y="514">reads</text>
+        <line class="ar" x1="820" y1="494" x2="820" y2="546" marker-end="url(#a1)"/><text class="al" x="826" y="524">after your OK</text>
+        <line class="ar" x1="1020" y1="494" x2="1020" y2="546" marker-end="url(#a1)"/><text class="al" x="1026" y="524">messages</text>
+      </svg>
+    </div>
+    <div class="key"><span><i class="k-eng"></i>uses a Claude model</span><span><i class="k-you"></i>you, or waits for you</span><span><i class="k-box"></i>plain code, 0 tokens</span><span><i class="k-out"></i>outside your computer</span></div>
+    <figcaption>Only the agent runner talks to the model, and only the approval service can push to GitHub. The agent runner reads context from the Brain (left arrow) and edits code only inside the task's worktree (right arrow). Claude Code calls the engine directly through MCP tools; plain chat in Teams goes through conversation understanding first.</figcaption>
+  </figure>
+</section>
+
+<!-- ============================================================ 2. ARCHITECTURE -->
+<section>
+  <div class="sec-head">
+    <span class="num">2 · ARCHITECTURE</span>
+    <h2>What runs where, and which way each connection goes</h2>
+    <p class="dim">Everything inside the dashed line runs on the developer's computer. Every connection to an outside service starts from the computer; nothing listens on the internet.</p>
+  </div>
+  <figure>
+    <div class="scroll">
+      <svg viewBox="0 0 1100 530" role="img" aria-label="Architecture: on the developer's computer, Claude Code with the plugin talks to the aiw-agentd service over a local API; the service keeps state in local files and the OS vault and works in git worktrees of the developer's repositories; it makes outbound HTTPS calls to Claude models, Jira, GitHub, Microsoft Teams, Figma and Notion.">
+        <defs>
+          <marker id="a2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ah" d="M0,0 L10,5 L0,10 z"/></marker>
+        </defs>
+        <rect class="bx-zone" x="20" y="24" width="700" height="494" rx="12"/>
+        <text class="lab" x="40" y="48">YOUR COMPUTER</text>
+
+        <!-- Claude Code -->
+        <rect class="bx" x="44" y="66" width="270" height="146" rx="8"/>
+        <text class="tb" x="62" y="92">Claude Code (your session)</text>
+        <text class="s" x="62" y="116">AI Workforce plugin:</text>
+        <text class="s" x="62" y="136">· skills and /aiw commands</text>
+        <text class="s" x="62" y="156">· MCP server (status, run, inbox)</text>
+        <text class="s" x="62" y="176">· prompt hook: hand over work</text>
+        <text class="s" x="62" y="196">· aiw command line</text>
+
+        <!-- service -->
+        <rect class="bx-eng" x="374" y="66" width="322" height="304" rx="8"/>
+        <text class="tb" x="392" y="92">aiw-agentd (background service)</text>
+        <text class="s" x="392" y="118">local API on 127.0.0.1 (token)</text>
+        <text class="s" x="392" y="142">Jira · Teams · PR pollers</text>
+        <text class="s" x="392" y="166">conversation understanding</text>
+        <text class="s" x="392" y="190">playbook engine + scheduler</text>
+        <text class="s" x="392" y="214">agent runner (Claude Agent SDK)</text>
+        <text class="s" x="392" y="238">approval service</text>
+        <text class="s" x="392" y="262">notification router</text>
+        <text class="s" x="392" y="286">daily check-up at 10:00</text>
+        <text class="s2" x="392" y="320">starts with the computer;</text>
+        <text class="s2" x="392" y="336">resumes unfinished steps</text>
+
+        <line class="ar" x1="314" y1="139" x2="372" y2="139" marker-end="url(#a2)"/><text class="al" x="343" y="130" text-anchor="middle">local API</text>
+
+        <!-- stores -->
+        <rect class="bx" x="44" y="236" width="270" height="134" rx="8"/>
+        <text class="tb" x="62" y="262">~/.ai-workforce</text>
+        <text class="s" x="62" y="286">SQLite: tasks, steps, approvals,</text>
+        <text class="s" x="62" y="304">  chat log, Brain search index</text>
+        <text class="s" x="62" y="326">settings.yaml · projects.yaml</text>
+        <text class="s" x="62" y="348">OS vault: tokens, never in files</text>
+        <line class="ar" x1="374" y1="303" x2="316" y2="303" marker-end="url(#a2)"/><text class="al" x="345" y="294" text-anchor="middle">state</text>
+
+        <!-- repositories -->
+        <rect class="bx" x="44" y="398" width="652" height="100" rx="8"/>
+        <text class="tb" x="62" y="422">Your repositories (backend, frontend …)</text>
+        <rect class="bx" x="62" y="434" width="196" height="50" rx="6"/><text class="t" x="160" y="455" text-anchor="middle">main checkout</text><text class="s" x="160" y="473" text-anchor="middle">agents only read</text>
+        <rect class="bx-eng" x="276" y="434" width="196" height="50" rx="6"/><text class="t" x="374" y="455" text-anchor="middle">task worktrees</text><text class="s" x="374" y="473" text-anchor="middle">the only place agents write</text>
+        <rect class="bx-you" x="490" y="434" width="196" height="50" rx="6"/><text class="t" x="588" y="455" text-anchor="middle">task branches</text><text class="s" x="588" y="473" text-anchor="middle">pushed after approval</text>
+        <line class="ar" x1="535" y1="370" x2="535" y2="396" marker-end="url(#a2)"/><text class="al" x="545" y="388">worktrees · tests</text>
+
+        <!-- outside -->
+        <text class="lab" x="790" y="48">OUTSIDE SERVICES · HTTPS, OUTBOUND</text>
+        <rect class="bx-out" x="790" y="66" width="290" height="50" rx="6"/><text class="t" x="808" y="87">Claude models (Anthropic)</text><text class="s" x="808" y="105">each agent step</text>
+        <rect class="bx-out" x="790" y="131" width="290" height="50" rx="6"/><text class="t" x="808" y="152">Jira</text><text class="s" x="808" y="170">poll · read · optional comment</text>
+        <rect class="bx-out" x="790" y="196" width="290" height="50" rx="6"/><text class="t" x="808" y="217">GitHub</text><text class="s" x="808" y="235">read PRs · push · draft PR</text>
+        <rect class="bx-out" x="790" y="261" width="290" height="50" rx="6"/><text class="t" x="808" y="282">Microsoft Teams</text><text class="s" x="808" y="300">two-way bot chat</text>
+        <rect class="bx-out" x="790" y="326" width="290" height="50" rx="6"/><text class="t" x="808" y="347">Figma · Notion</text><text class="s" x="808" y="365">read-only designs and pages</text>
+        <line class="ar" x1="696" y1="91" x2="788" y2="91" marker-end="url(#a2)"/>
+        <line class="ar" x1="696" y1="156" x2="788" y2="156" marker-end="url(#a2)"/>
+        <line class="ar" x1="696" y1="221" x2="788" y2="221" marker-end="url(#a2)"/>
+        <line class="ar" x1="696" y1="286" x2="788" y2="286" marker-end="url(#a2)"/>
+        <line class="ar" x1="696" y1="351" x2="788" y2="351" marker-end="url(#a2)"/>
+        <text class="s2" x="790" y="410">Sign-in: browser login (Jira, GitHub,</text>
+        <text class="s2" x="790" y="426">Notion) or the Figma desktop app.</text>
+        <text class="s2" x="790" y="442">Tokens live in the OS vault.</text>
+      </svg>
+    </div>
+    <figcaption>One service process does all the work; Claude Code and the <code>aiw</code> command are clients of its local API. Agents read the main checkout but write only in a per-task worktree, and only the approval service pushes a branch, after the developer approves.</figcaption>
+  </figure>
+</section>
+
+<!-- ============================================================ 3. FLOW -->
+<section>
+  <div class="sec-head">
+    <span class="num">3 · END-TO-END FLOW</span>
+    <h2>One ticket that changes the backend and the frontend</h2>
+    <p class="dim">Example: "do KAN-52" in Teams. One lead task owns the conversation; each repository gets a part task. A ticket for one repository follows the same flow with one part and no contract or integration check.</p>
+  </div>
+  <figure>
+    <div class="scroll">
+      <svg viewBox="0 0 1180 440" role="img" aria-label="Swimlane flow: you start the ticket in Teams; the lead understands the ticket and the code of all repositories, asks only product questions, writes the contract and one plan; you approve the plan; the backend part is built and tested, then the frontend part, which sees the backend change; the lead runs an integration check and sends fixes back; you approve raising the PRs; two linked draft PRs are opened on GitHub and their links are sent to Teams.">
+        <defs>
+          <marker id="a3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ah" d="M0,0 L10,5 L0,10 z"/></marker>
+          <marker id="a3y" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path style="fill: var(--you)" d="M0,0 L10,5 L0,10 z"/></marker>
+        </defs>
+        <rect class="lane-a" x="0" y="20" width="1180" height="80"/>
+        <rect class="lane-b" x="0" y="100" width="1180" height="80"/>
+        <rect class="lane-a" x="0" y="180" width="1180" height="80"/>
+        <rect class="lane-b" x="0" y="260" width="1180" height="80"/>
+        <rect class="lane-a" x="0" y="340" width="1180" height="80"/>
+        <text class="lab" x="12" y="64">YOU · TEAMS</text>
+        <text class="lab" x="12" y="144">LEAD TASK</text>
+        <text class="lab" x="12" y="224">BACKEND PART</text>
+        <text class="lab" x="12" y="304">FRONTEND PART</text>
+        <text class="lab" x="12" y="384">GITHUB</text>
+
+        <!-- 1 you start -->
+        <rect class="bx-you" x="117" y="34" width="96" height="52" rx="6"/><text class="t" x="165" y="56" text-anchor="middle">"do KAN-52"</text><text class="s2" x="165" y="74" text-anchor="middle">or Jira assigns</text>
+        <!-- 2 understand -->
+        <rect class="bx-eng" x="222" y="114" width="96" height="52" rx="6"/><text class="t" x="270" y="133" text-anchor="middle">Understand</text><text class="s2" x="270" y="148" text-anchor="middle">ticket · links</text><text class="s2" x="270" y="161" text-anchor="middle">code of all repos</text>
+        <!-- 3 questions -->
+        <rect class="bx-you" x="327" y="34" width="96" height="52" rx="6" style="stroke-dasharray: 4 3"/><text class="t" x="375" y="53" text-anchor="middle">Questions</text><text class="s2" x="375" y="68" text-anchor="middle">product only</text><text class="s2" x="375" y="81" text-anchor="middle">or "you decide"</text>
+        <!-- 4 plan -->
+        <rect class="bx-eng" x="432" y="114" width="96" height="52" rx="6"/><text class="t" x="480" y="133" text-anchor="middle">Contract +</text><text class="s2" x="480" y="148" text-anchor="middle">one plan with</text><text class="s2" x="480" y="161" text-anchor="middle">a part per repo</text>
+        <!-- 5 approval 1 -->
+        <rect class="bx-you" x="537" y="34" width="96" height="52" rx="6"/><text class="t" x="585" y="56" text-anchor="middle">Approval 1</text><text class="s2" x="585" y="74" text-anchor="middle">the plan</text>
+        <!-- 6 backend -->
+        <rect class="bx" x="642" y="194" width="96" height="52" rx="6"/><text class="t" x="690" y="213" text-anchor="middle">Build + test</text><text class="s2" x="690" y="228" text-anchor="middle">+ 3 reviews</text><text class="s2" x="690" y="241" text-anchor="middle">own worktree</text>
+        <!-- 7 frontend -->
+        <rect class="bx" x="747" y="274" width="96" height="52" rx="6"/><text class="t" x="795" y="293" text-anchor="middle">Build + test</text><text class="s2" x="795" y="308" text-anchor="middle">sees backend</text><text class="s2" x="795" y="321" text-anchor="middle">change</text>
+        <!-- 8 integration -->
+        <rect class="bx-eng" x="852" y="114" width="96" height="52" rx="6"/><text class="t" x="900" y="133" text-anchor="middle">Integration</text><text class="s2" x="900" y="148" text-anchor="middle">check: diffs,</text><text class="s2" x="900" y="161" text-anchor="middle">contract, tests</text>
+        <!-- 9 approval 2 -->
+        <rect class="bx-you" x="957" y="34" width="96" height="52" rx="6"/><text class="t" x="1005" y="56" text-anchor="middle">Approval 2</text><text class="s2" x="1005" y="74" text-anchor="middle">raise the PRs?</text>
+        <!-- 10 github + links -->
+        <rect class="bx-out" x="1062" y="354" width="96" height="52" rx="6"/><text class="t" x="1110" y="376" text-anchor="middle">2 draft PRs</text><text class="s2" x="1110" y="394" text-anchor="middle">linked</text>
+        <rect class="bx-you" x="1062" y="34" width="96" height="52" rx="6"/><text class="t" x="1110" y="56" text-anchor="middle">Both links</text><text class="s2" x="1110" y="74" text-anchor="middle">in one message</text>
+
+        <!-- main sequence -->
+        <polyline class="ar" points="213,60 217,60 217,140 220,140" marker-end="url(#a3)"/>
+        <polyline class="ar" points="318,140 322,140 322,60 325,60" marker-end="url(#a3)"/>
+        <polyline class="ar" points="423,60 427,60 427,140 430,140" marker-end="url(#a3)"/>
+        <polyline class="ar" points="528,140 532,140 532,60 535,60" marker-end="url(#a3)"/>
+        <polyline class="ar-y" points="633,60 637,60 637,220 640,220" marker-end="url(#a3y)"/>
+        <polyline class="ar" points="738,220 742,220 742,300 745,300" marker-end="url(#a3)"/><text class="al" x="748" y="262">then</text>
+        <polyline class="ar" points="843,300 847,300 847,140 850,140" marker-end="url(#a3)"/>
+        <polyline class="ar" points="948,140 952,140 952,60 955,60" marker-end="url(#a3)"/>
+        <polyline class="ar-y" points="1053,60 1057,60 1057,380 1060,380" marker-end="url(#a3y)"/>
+        <line class="ar" x1="1110" y1="354" x2="1110" y2="88" marker-end="url(#a3)"/>
+
+        <!-- side paths -->
+        <polyline class="ar-d" points="900,166 900,300 845,300" marker-end="url(#a3)"/><text class="al" x="906" y="236">fixes, max 2</text>
+        <polyline class="ar-d" points="690,194 690,176 700,176 700,168" marker-end="url(#a3)"/>
+        <text class="al" x="600" y="186" text-anchor="end">a part's question → lead answers</text>
+      </svg>
+    </div>
+    <div class="key"><span><i class="k-you"></i>you decide (amber arrows continue only after your OK)</span><span><i class="k-eng"></i>lead, Claude model</span><span><i class="k-box"></i>part, Claude model in its own worktree</span><span><i class="k-out"></i>GitHub</span></div>
+    <figcaption>The lead picks the build order from the code: the side that provides the data goes first (here the backend), or both are built at once against the contract. While the parts are built, their questions go to the lead, which answers from the code and asks you only about product decisions. Between the two approvals nothing waits on you, and waiting costs no tokens.</figcaption>
+  </figure>
+</section>
+
+<!-- ============================================================ 4. STATES -->
+<section>
+  <div class="sec-head">
+    <span class="num">4 · TASK STATES</span>
+    <h2>Where a task can be, saved after every step</h2>
+  </div>
+  <div class="card">
+    <div class="states">
+      <span class="st">DETECTED</span><span class="arrow">→</span><span class="st">TRIAGED</span><span class="arrow">→</span><span class="st you">AWAITING_START</span><span class="arrow">→</span><span class="st">QUEUED</span><span class="arrow">→</span><span class="st eng">RUNNING</span><span class="arrow">→</span><span class="st you">AWAITING_APPROVAL</span><span class="arrow">→</span><span class="st">PUBLISHING</span><span class="arrow">→</span><span class="st ok">DONE</span>
+    </div>
+    <ul>
+      <li><b>From RUNNING</b> a task can also go to <code>NEEDS_INFO</code> (a question for you), <code>PAUSED</code> (budget, broken environment, 3 errors in a row) or <code>FAILED</code>.</li>
+      <li><b>A lead</b> waits in <code>WAITING_PARTS</code> while its parts build. <b>A part</b> ends in <code>PART_READY</code>, or <code>ASKING_LEAD</code> when it has a question. Parts never ask you or request approvals themselves.</li>
+      <li><b>Rejected</b> plans re-plan with your words; a rejected PR goes back to building. An approval that no longer matches the code becomes <code>STALE</code> and is asked again.</li>
+      <li><b>AWAITING_START</b> is used for large tickets and sprint-start bursts, so nothing big starts without a "start".</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ============================================================ 5. COMPONENTS -->
+<section>
+  <div class="sec-head">
+    <span class="num">5 · COMPONENTS</span>
+    <h2>Each block, its job, and where it lives in the code</h2>
+  </div>
+  <div class="tbl">
+    <table>
+      <thead><tr><th>Block</th><th>Job</th><th>Code (service/src)</th></tr></thead>
+      <tbody>
+        <tr><td>Teams poller + conversation understanding</td><td>Reads the bot chat, keeps the conversation, sends a short reply to the item asked last; rules first, model only when needed</td><td><code>intake/teamsCommands.ts</code> <code>intake/teamsIntent.ts</code> <code>notify/chatLog.ts</code></td></tr>
+        <tr><td>Jira poller + event gate</td><td>Finds tickets assigned to you, compares with the last snapshot, creates each task once</td><td><code>intake/intake.ts</code></td></tr>
+        <tr><td>MCP server, hooks, skills</td><td>Lets Claude Code hand over work, ask for status and read reports</td><td><code>mcp/</code> <code>hooks/</code> <code>../skills/</code></td></tr>
+        <tr><td>Playbook engine</td><td>Runs the fixed steps of a playbook, schedules tasks, coordinates a lead with its parts, retries, resumes after a restart</td><td><code>engine/engine.ts</code> <code>engine/steps.ts</code> <code>playbooks/*.yaml</code></td></tr>
+        <tr><td>Agent runner</td><td>Runs one agent per step through the Claude Agent SDK with an explicit tool list, model size and JSON schema; adds read-only lookup tools</td><td><code>agents/runner.ts</code> <code>agents/catalog.ts</code> <code>agents/lookup.ts</code></td></tr>
+        <tr><td>Brain</td><td>Code map, team handbook, product documents and past tasks per repository; full-text search builds each step's context</td><td><code>brain/</code></td></tr>
+        <tr><td>Git workspace</td><td>One worktree and branch per task, team branch and commit naming, rebase, secret scan</td><td><code>git/git.ts</code> <code>git/secretScan.ts</code></td></tr>
+        <tr><td>Approval service</td><td>Records approvals tied to repository, branch, commit and diff; the only code path that pushes or opens a PR</td><td><code>approvals/approvals.ts</code></td></tr>
+        <tr><td>Notification router</td><td>Sends every message to Teams with numbered options, retries failures, daily check-up, PR comment alerts</td><td><code>notify/router.ts</code> <code>notify/channels.ts</code> <code>notify/checkup.ts</code> <code>intake/prActivity.ts</code></td></tr>
+        <tr><td>Chat assistant</td><td>Answers questions in Teams by reading the code, Brain and tasks (read-only) and can offer its answer to a waiting task</td><td><code>chat/assistant.ts</code></td></tr>
+        <tr><td>State and secrets</td><td>SQLite (tasks, steps, approvals, notifications, chat log, audit) and the OS credential vault</td><td><code>core/db.ts</code> <code>core/secrets.ts</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ============================================================ 6. AGENTS -->
+<section>
+  <div class="sec-head">
+    <span class="num">6 · AGENTS</span>
+    <h2>Which agent runs in which step, and what it may touch</h2>
+    <p class="dim">Each agent gets the smallest context and tool list for its job and returns a structured answer. Only the implementer can change files, and only inside the task's worktree.</p>
+  </div>
+  <div class="tbl">
+    <table>
+      <thead><tr><th>Agent</th><th>Model</th><th>Tools</th><th>Used for</th></tr></thead>
+      <tbody>
+        <tr><td>Triage</td><td><span class="tier">small</span></td><td>none</td><td>Type and size of every new ticket</td></tr>
+        <tr><td>Lead</td><td><span class="tier">large</span></td><td>read all repos + lookups</td><td>Understands a ticket across repositories, picks repositories and build order</td></tr>
+        <tr><td>Contract · lead planner</td><td><span class="tier">large</span></td><td>read all repos</td><td>Agreement between repositories, one plan with a part per repository</td></tr>
+        <tr><td>Analyst · planner</td><td><span class="tier">medium · large</span></td><td>read repo + lookups</td><td>Requirements and plan for a single-repository playbook</td></tr>
+        <tr><td>Plan reviewer</td><td><span class="tier">medium</span></td><td>none</td><td>Fresh-eyes check of the plan against the requirements</td></tr>
+        <tr><td>Implementer</td><td><span class="tier">medium</span></td><td>edit + test command, worktree only</td><td>Writes the code and tests, up to 3 tries; asks instead of guessing</td></tr>
+        <tr><td>Reviewers: code, security, QA</td><td><span class="tier">medium</span></td><td>none (diff only)</td><td>Independent reviews, up to 2 fix rounds</td></tr>
+        <tr><td>Coordinator</td><td><span class="tier">medium</span></td><td>read all repos</td><td>Answers a part's question, or passes a product decision to you</td></tr>
+        <tr><td>Integration reviewer</td><td><span class="tier">large</span></td><td>read both worktrees</td><td>Checks the repositories fit together against the contract</td></tr>
+        <tr><td>Reporter · memory keeper</td><td><span class="tier">small</span></td><td>none</td><td>PR description in the team's template; facts and lessons for the Brain</td></tr>
+        <tr><td>Conversation model · interviewer</td><td><span class="tier">medium</span></td><td>none · read repo</td><td>Understands Teams replies; interviews you for work without a ticket</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ============================================================ 7. GUARDRAILS -->
+<section>
+  <div class="sec-head">
+    <span class="num">7 · CONTROLS</span>
+    <h2>What keeps it safe and predictable</h2>
+  </div>
+  <div class="grid2">
+    <div class="card"><h3>Code and repositories</h3><ul>
+      <li>Agents never write to the developer's checkout; each task has its own worktree.</li>
+      <li>Only the approval service pushes, only after approval, and only if the commit and diff are unchanged.</li>
+      <li>Draft PRs to the base branch only. Nothing is merged or deployed.</li>
+      <li>Before publishing: rebase, final tests, lint/type checks, secret scan.</li>
+      <li>No mention of Claude or AI in code, commits or PR text (checked before publishing).</li>
+    </ul></div>
+    <div class="card"><h3>People and decisions</h3><ul>
+      <li>Two approvals per ticket: the plan, then the PR. Answers and approvals are accepted only from the developer's Teams chat.</li>
+      <li>Agents ask questions with options and a recommendation; question rounds are capped, after which they proceed and list their assumptions.</li>
+      <li>Ticket text, documents and comments are treated as data, never as instructions.</li>
+    </ul></div>
+    <div class="card"><h3>Cost and reliability</h3><ul>
+      <li>Polling, event gate, workspace, publishing and notifications use no tokens.</li>
+      <li>Small, medium and large models are chosen per step; token budgets per task and per day pause work.</li>
+      <li>Every step is saved; after a crash or reboot the task resumes from its last finished step and publishes exactly once.</li>
+    </ul></div>
+    <div class="card"><h3>Data</h3><ul>
+      <li>All state stays on the computer: SQLite, YAML settings, logs and worktrees under the user's home folder.</li>
+      <li>Tokens are kept in the OS credential vault; sign-in uses the browser where the service supports it.</li>
+      <li>Outside traffic is outbound HTTPS to Anthropic, Jira, GitHub, Teams, Figma and Notion only.</li>
+    </ul></div>
+  </div>
+</section>
+
+<footer>AI Workforce 0.3.0 · Claude Code plugin + local service (aiw-agentd) · Node.js, SQLite, Claude Agent SDK.</footer>
+</div>
+
+</body>
+</html>

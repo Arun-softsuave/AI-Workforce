@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "ai-workforce": {
+      "command": "node",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/service/dist/mcp/server.js"]
+    }
+  }
+}

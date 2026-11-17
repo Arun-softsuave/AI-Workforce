@@ -1,0 +1,12 @@
+id: qa-test-plan
+title: QA – test plan and cases when a ticket is Ready for QA
+roles: [qa-engineer]
+trigger: ready_for_qa
+steps:
+  - context_pack
+  - analyse
+  - artefact: { kind: qa_test_plan }
+  - deliver
+  - request_approval: { action: post_jira_comment }
+  - publish
+  - record_memory

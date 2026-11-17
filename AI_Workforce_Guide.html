@@ -1,0 +1,257 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+</head>
+<body>
+<title>AI Workforce Guide</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: one reading column, sticky section tabs, each section a short band. Pipeline drawn as a vertical rail of stages. */
+:root{
+  --bg:#f6f7f6; --surface:#ffffff; --fg:#17201d; --muted:#5b6762; --line:#dfe4e1;
+  --accent:#0f7a63; --accent-soft:#e2f2ec; --warn:#a35a00; --warn-soft:#fbefdf;
+  --human:#3d4fbf; --human-soft:#e7e9fa; --zero:#6b7470; --zero-soft:#eceeed;
+  --display:"Instrument Sans",system-ui,sans-serif; --body:"Inter",system-ui,sans-serif; --mono:"JetBrains Mono",ui-monospace,Consolas,monospace;
+}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){
+  --bg:#111614; --surface:#18201d; --fg:#e6ece9; --muted:#9aa7a1; --line:#2a3430;
+  --accent:#4cc9a6; --accent-soft:#16312a; --warn:#f0a94a; --warn-soft:#33261a;
+  --human:#9aa6ff; --human-soft:#22264a; --zero:#9aa39f; --zero-soft:#222927; color-scheme:dark}}
+:root[data-theme="dark"]{
+  --bg:#111614; --surface:#18201d; --fg:#e6ece9; --muted:#9aa7a1; --line:#2a3430;
+  --accent:#4cc9a6; --accent-soft:#16312a; --warn:#f0a94a; --warn-soft:#33261a;
+  --human:#9aa6ff; --human-soft:#22264a; --zero:#9aa39f; --zero-soft:#222927; color-scheme:dark}
+
+*{box-sizing:border-box}
+body{background:var(--bg);color:var(--fg);font:15px/1.6 var(--body);
+  padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px))}
+body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset-top,0px);z-index:10;background:var(--bg)}
+.wrap{max-width:860px;margin:0 auto}
+h1,h2,h3{font-family:var(--display);text-wrap:balance;margin:0;line-height:1.2}
+h1{font-size:clamp(28px,5vw,40px);font-weight:700;letter-spacing:-.01em}
+h2{font-size:24px;font-weight:600}
+h3{font-size:16px;font-weight:600}
+p{margin:0}
+code,.mono{font-family:var(--mono);font-size:.86em}
+code{background:var(--zero-soft);padding:1px 6px;border-radius:4px;white-space:nowrap}
+.muted{color:var(--muted)}
+.eyebrow{font:500 12px/1 var(--mono);letter-spacing:.08em;text-transform:uppercase;color:var(--accent)}
+
+header{padding-block:40px 24px;display:grid;gap:14px}
+header .lede{font-size:17px;max-width:62ch;color:var(--muted)}
+.promise{display:flex;flex-wrap:wrap;gap:8px}
+.chip{font:500 12.5px/1 var(--body);padding:7px 11px;border-radius:999px;border:1px solid var(--line);background:var(--surface)}
+.chip b{color:var(--accent);font-weight:600}
+
+nav{position:sticky;top:env(safe-area-inset-top,0px);z-index:5;background:var(--bg);border-bottom:1px solid var(--line);
+  display:flex;gap:4px;overflow-x:auto;padding-block:8px;scrollbar-width:none}
+nav a{flex:none;color:var(--muted);text-decoration:none;font:500 13.5px/1 var(--body);padding:8px 12px;border-radius:6px}
+nav a:hover,nav a:focus-visible{color:var(--fg);background:var(--surface);outline:none}
+nav a:focus-visible{box-shadow:0 0 0 2px var(--accent)}
+
+section{padding-block:40px;border-bottom:1px solid var(--line);display:grid;gap:20px;scroll-margin-top:56px}
+section:last-of-type{border-bottom:0}
+.head{display:grid;gap:8px}
+.head p{max-width:64ch;color:var(--muted)}
+
+/* Install */
+.install{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.box{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:16px;display:grid;gap:8px;align-content:start;min-width:0}
+.box .n{font:600 13px/1 var(--mono);color:var(--accent)}
+.box pre{margin:0;font:12.5px/1.5 var(--mono);background:var(--zero-soft);padding:8px 10px;border-radius:6px;overflow-x:auto;white-space:pre}
+
+/* Onboarding list */
+.steps{list-style:none;margin:0;padding:0;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0 28px;counter-reset:s}
+.steps li{counter-increment:s;display:grid;grid-template-columns:32px minmax(0,1fr);gap:2px 10px;padding-block:12px;border-top:1px solid var(--line)}
+.steps li::before{content:counter(s,decimal-leading-zero);grid-row:span 2;font:500 13px/1.5 var(--mono);color:var(--accent)}
+.steps li p{color:var(--muted);font-size:14px}
+.note{font-size:14px;color:var(--muted);background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:12px 14px}
+.note b{color:var(--fg)}
+
+/* Pipeline */
+.legend{display:flex;flex-wrap:wrap;gap:14px;font-size:13px;color:var(--muted)}
+.legend span{display:inline-flex;align-items:center;gap:6px}
+.dot{width:10px;height:10px;border-radius:3px;display:inline-block}
+.d-zero{background:var(--zero)} .d-ai{background:var(--accent)} .d-human{background:var(--human)} .d-loop{background:var(--warn)}
+.rail{list-style:none;margin:0;padding:0;display:grid;gap:0;position:relative}
+.rail li{display:grid;grid-template-columns:28px minmax(0,1fr) auto;gap:12px;align-items:start;padding-block:10px;position:relative}
+.rail li::after{content:"";position:absolute;left:13px;top:30px;bottom:-10px;width:2px;background:var(--line)}
+.rail li:last-child::after{display:none}
+.mark{width:28px;height:28px;border-radius:8px;display:grid;place-items:center;font:600 12px/1 var(--mono);color:var(--surface);position:relative;z-index:1}
+.k-zero .mark{background:var(--zero)} .k-ai .mark{background:var(--accent)} .k-human .mark{background:var(--human)} .k-loop .mark{background:var(--warn)}
+.rail h3{font-size:15px}
+.rail p{font-size:14px;color:var(--muted)}
+.tag{font:500 11.5px/1 var(--mono);padding:5px 8px;border-radius:5px;white-space:nowrap;margin-top:2px}
+.k-zero .tag{background:var(--zero-soft);color:var(--zero)} .k-ai .tag{background:var(--accent-soft);color:var(--accent)}
+.k-human .tag{background:var(--human-soft);color:var(--human)} .k-loop .tag{background:var(--warn-soft);color:var(--warn)}
+.k-human h3{color:var(--human)}
+
+/* Brain */
+.parts{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+.parts .box h3{font-size:15px}
+.parts .box p{font-size:13.5px;color:var(--muted)}
+.cycle{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:0;background:var(--surface);border:1px solid var(--line);border-radius:10px;overflow:hidden}
+.cycle div{padding:14px;display:grid;gap:4px;border-left:1px solid var(--line);min-width:0}
+.cycle div:first-child{border-left:0}
+.cycle .when{font:500 11.5px/1.3 var(--mono);color:var(--accent);text-transform:uppercase;letter-spacing:.06em}
+.cycle p{font-size:13.5px;color:var(--muted)}
+.facts{display:flex;flex-wrap:wrap;align-items:center;gap:8px;font-size:13.5px}
+.st{font:500 12px/1 var(--mono);padding:6px 9px;border-radius:5px;border:1px solid var(--line);background:var(--surface)}
+.st.u{color:var(--warn);border-color:var(--warn)} .st.v{color:var(--accent);border-color:var(--accent)} .st.r,.st.d{color:var(--muted)}
+.arrow{color:var(--muted)}
+
+/* Talk + rules */
+.two{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+table{width:100%;border-collapse:collapse;font-size:14px}
+td{padding:8px 0;border-top:1px solid var(--line);vertical-align:top}
+td:first-child{padding-right:14px;width:42%}
+.tablebox{overflow-x:auto}
+.rules{list-style:none;margin:0;padding:0;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+.rules li{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:12px 14px;font-size:14px}
+.rules li b{display:block;font-family:var(--display);font-size:15px;margin-bottom:2px}
+footer{padding-block:28px 48px;font-size:13px;color:var(--muted)}
+
+@media (max-width:720px){
+  .install,.parts{grid-template-columns:minmax(0,1fr)}
+  .steps,.two,.rules{grid-template-columns:minmax(0,1fr)}
+  .cycle{grid-template-columns:minmax(0,1fr)}
+  .cycle div{border-left:0;border-top:1px solid var(--line)}
+  .cycle div:first-child{border-top:0}
+  .rail li{grid-template-columns:28px minmax(0,1fr)}
+  .rail .tag{grid-column:2;justify-self:start;margin-top:0}
+}
+@media (prefers-reduced-motion:no-preference){html{scroll-behavior:smooth}}
+</style>
+
+<div class="wrap">
+<header>
+  <span class="eyebrow">Claude Code plugin · runs on your computer</span>
+  <h1>AI Workforce</h1>
+  <p class="lede">An AI team member that watches your Jira tickets, learns your codebase, prepares plans, code and tests, and then waits for your approval. Here is what happens from unzipping the plugin to a pull request.</p>
+  <div class="promise">
+    <span class="chip"><b>Local only</b> · no cloud server</span>
+    <span class="chip"><b>You approve</b> every PR</span>
+    <span class="chip"><b>Never</b> merges or deploys</span>
+    <span class="chip"><b>No AI mentions</b> in commits or PRs</span>
+  </div>
+</header>
+
+<nav aria-label="Sections">
+  <a href="#install">Install</a><a href="#onboarding">Onboarding</a><a href="#workflow">Ticket workflow</a><a href="#brain">The Brain</a><a href="#daily">Daily use</a><a href="#rules">Safety rules</a>
+</nav>
+
+<section id="install">
+  <div class="head"><span class="eyebrow">About 5 minutes</span><h2>Install from the zip</h2></div>
+  <div class="install">
+    <div class="box"><span class="n">1</span><h3>Unzip</h3><p class="muted">Put it in a permanent folder, not Downloads.</p><pre>C:\tools\ai-workforce</pre></div>
+    <div class="box"><span class="n">2</span><h3>Run the installer</h3><p class="muted">Builds the service, adds <code>aiw</code> to PATH, registers the plugin.</p><pre>scripts\install.ps1</pre></div>
+    <div class="box"><span class="n">3</span><h3>Restart Claude Code</h3><p class="muted">Then start the guided setup.</p><pre>/ai-workforce:aiw-setup</pre></div>
+  </div>
+</section>
+
+<section id="onboarding">
+  <div class="head"><span class="eyebrow">15 to 25 minutes · resumable</span><h2>Onboarding stages</h2>
+    <p>Setup asks one thing at a time, mostly as options you click. Stop anytime and run <code>aiw setup</code> to pick up where you left off.</p></div>
+  <ol class="steps">
+    <li><h3>Prerequisites check</h3><p>Node 22.13+, Git, Claude Code. <code>aiw doctor</code></p></li>
+    <li><h3>Background service</h3><p>Starts at login, no admin rights needed.</p></li>
+    <li><h3>Model access</h3><p>Claude Code login, an API key, or Mock for a free dry run.</p></li>
+    <li><h3>Your roles</h3><p>Backend, frontend, full-stack, QA, DevOps, BA, PM or UI/UX. Roles pick the playbooks.</p></li>
+    <li><h3>Connect tools</h3><p>Jira (sign in with Atlassian in the browser), GitHub (reuses <code>gh</code>), plus Slack, Teams, Notion, Figma if you use them.</p></li>
+    <li><h3>Notifications</h3><p>Two-way Teams bot, Slack, desktop alerts. Then <code>aiw notify test</code>.</p></li>
+    <li><h3>Projects</h3><p>Jira key + repo + local folder. Backend and frontend repos can be grouped under one key.</p></li>
+    <li><h3>Product documents</h3><p>Optional PRD or BRD (.pdf, .docx, .md). Can stay private on your PC.</p></li>
+    <li><h3>Build the Brain</h3><p>It studies the repos and writes a Handbook. You review it and confirm.</p></li>
+    <li><h3>Go live</h3><p><code>aiw live</code>. It starts watching your Jira.</p></li>
+  </ol>
+  <p class="note"><b>Secrets never go through the chat.</b> Keys and tokens are entered on a local page (127.0.0.1) and stored in your OS credential vault.</p>
+</section>
+
+<section id="workflow">
+  <div class="head"><span class="eyebrow">After go-live</span><h2>How a ticket becomes a pull request</h2>
+    <p>Each step is a fixed recipe called a playbook. Code controls the order; agents do the thinking inside each step. Cheap models handle small jobs and the large model only plans.</p></div>
+  <div class="legend">
+    <span><i class="dot d-zero"></i>No AI tokens</span><span><i class="dot d-ai"></i>AI agents</span><span><i class="dot d-loop"></i>Loops with a limit</span><span><i class="dot d-human"></i>You decide</span>
+  </div>
+  <ol class="rail">
+    <li class="k-zero"><span class="mark">J</span><div><h3>Watch Jira</h3><p>Polls every 2 to 5 minutes and compares with the last snapshot, so each change is handled once.</p></div><span class="tag">0 tokens</span></li>
+    <li class="k-ai"><span class="mark">T</span><div><h3>Triage</h3><p>Is it a bug or feature, how big, is it clear? Unclear tickets come back to you as a question. Size L asks before starting.</p></div><span class="tag">small model</span></li>
+    <li class="k-zero"><span class="mark">W</span><div><h3>Isolated workspace</h3><p>A separate git worktree. Your own checkout is never touched.</p></div><span class="tag">0 tokens</span></li>
+    <li class="k-ai"><span class="mark">C</span><div><h3>Context pack from the Brain</h3><p>Relevant Handbook facts, code map, past tasks and PRD sections.</p></div><span class="tag">search</span></li>
+    <li class="k-ai"><span class="mark">P</span><div><h3>Analyse and plan</h3><p>Then a fresh-eyes reviewer checks the plan. In <b>plan</b> autonomy you approve here before any code.</p></div><span class="tag">large model</span></li>
+    <li class="k-loop"><span class="mark">I</span><div><h3>Implement and test</h3><p>Write code, run the repo's own tests, lint and type checks. Repeats up to 3 times.</p></div><span class="tag">max 3</span></li>
+    <li class="k-loop"><span class="mark">R</span><div><h3>Code, security and QA review</h3><p>Three reviewers in parallel. Up to 2 rounds of fixes.</p></div><span class="tag">max 2</span></li>
+    <li class="k-zero"><span class="mark">F</span><div><h3>Final checks</h3><p>Rebase on the base branch, secret scan, final tests, strip any AI mentions, write the report.</p></div><span class="tag">0 tokens</span></li>
+    <li class="k-human"><span class="mark">A</span><div><h3>Your approval</h3><p>Notified in Teams, Slack, desktop or Claude Code. Waiting costs nothing. Reject with feedback and it re-runs.</p></div><span class="tag">you</span></li>
+    <li class="k-zero"><span class="mark">PR</span><div><h3>Draft pull request</h3><p>Pushed with your git identity, bound to the exact commit you approved. Then it writes the diary and updates the Brain.</p></div><span class="tag">0 tokens</span></li>
+  </ol>
+  <p class="note"><b>Other roles use other playbooks:</b> QA gets test plans, DevOps gets CI-failure fixes, BAs get user stories, PMs get a daily digest, designers get design reviews.</p>
+</section>
+
+<section id="brain">
+  <div class="head"><span class="eyebrow">Per project</span><h2>The Brain: how it learns</h2>
+    <p>The Brain is the project's memory. Every task reads from it and every finished task adds to it. The team reviews what it learns before it becomes trusted.</p></div>
+  <div class="parts">
+    <div class="box"><h3>Map</h3><p>Where things live in the code: modules, files, symbols.</p></div>
+    <div class="box"><h3>Handbook</h3><p>Architecture, standards, decisions, glossary. Stored in the repo under <code>.ai-workforce/knowledge/</code>.</p></div>
+    <div class="box"><h3>Diary</h3><p>What each finished task did and why.</p></div>
+    <div class="box"><h3>Index</h3><p>Full-text search across all of it, plus your product documents.</p></div>
+  </div>
+  <div class="cycle">
+    <div><span class="when">Onboarding</span><h3>Learn</h3><p>Reads the repos, history and docs. Detects team conventions.</p></div>
+    <div><span class="when">Every task</span><h3>Use</h3><p>Pulls only the relevant facts into the agents' context.</p></div>
+    <div><span class="when">After a task</span><h3>Propose</h3><p>Suggests new facts it discovered, marked unverified.</p></div>
+    <div><span class="when">Daily</span><h3>Refresh</h3><p>Re-maps changed code and re-detects branch, commit and PR style.</p></div>
+  </div>
+  <div class="facts" aria-label="Fact lifecycle">
+    <span class="muted">Each fact moves through:</span>
+    <span class="st u">unverified</span><span class="arrow">→ team confirms →</span><span class="st v">verified</span>
+    <span class="arrow">· later</span><span class="st r">replaced</span><span class="arrow">or</span><span class="st d">disputed</span>
+  </div>
+  <p class="note"><b>Unverified facts are hints, not rules.</b> Agents check them against the code. If code contradicts a fact, it is flagged for review instead of being silently rewritten.</p>
+</section>
+
+<section id="daily">
+  <div class="head"><span class="eyebrow">Day to day</span><h2>Talking to it</h2></div>
+  <div class="two">
+    <div class="box tablebox"><h3>In Claude Code or the terminal</h3>
+      <table><tbody>
+        <tr><td><code>aiw-inbox</code></td><td class="muted">What needs you: approvals, questions, failures</td></tr>
+        <tr><td><code>aiw-approve KAN-42</code></td><td class="muted">Approve the waiting PR or plan</td></tr>
+        <tr><td><code>aiw-reject KAN-42 "…"</code></td><td class="muted">Re-run with your feedback</td></tr>
+        <tr><td><code>aiw-run KAN-42</code></td><td class="muted">Start a ticket now</td></tr>
+        <tr><td><code>aiw-dashboard</code></td><td class="muted">Local web page: tasks, Brain, cost</td></tr>
+        <tr><td><code>aiw-pause</code></td><td class="muted">Holiday mode</td></tr>
+      </tbody></table></div>
+    <div class="box tablebox"><h3>In the Teams bot chat</h3>
+      <table><tbody>
+        <tr><td><code>status</code></td><td class="muted">What is running</td></tr>
+        <tr><td><code>approve KAN-42@nue-backend</code></td><td class="muted">Same as the command</td></tr>
+        <tr><td><code>reject KAN-42 "…"</code></td><td class="muted">Re-plan with feedback</td></tr>
+        <tr><td>Any question</td><td class="muted">"What does this project do?" answered from the repo and Brain, read-only</td></tr>
+      </tbody></table>
+      <p class="muted" style="font-size:13.5px">You are also told when someone comments on or reviews a PR it prepared.</p></div>
+  </div>
+</section>
+
+<section id="rules">
+  <div class="head"><span class="eyebrow">Built in, not optional</span><h2>Safety rules</h2></div>
+  <ul class="rules">
+    <li><b>Nothing publishes without you</b>Approval is tied to the exact commit. If the code changes, it asks again.</li>
+    <li><b>Never merges or deploys</b>It opens draft PRs only. Agents are not allowed to run <code>git push</code>.</li>
+    <li><b>No AI attribution</b>Commits use your git identity. Messages, PR text and Jira comments are checked for Claude or AI mentions.</li>
+    <li><b>Stays on your machine</b>Data lives in <code>~/.ai-workforce</code>. Work runs while your computer is on and catches up after sleep.</li>
+    <li><b>Budget guard</b>Daily token limits pause work instead of overspending. <code>aiw cost</code> shows spend.</li>
+    <li><b>Tickets are data</b>Text from tickets and documents is never treated as instructions.</li>
+  </ul>
+</section>
+
+<footer>Remove everything with <code>aiw uninstall --purge</code>, then <code>/plugin uninstall ai-workforce</code> in Claude Code.</footer>
+</div>
+
+</body>
+</html>

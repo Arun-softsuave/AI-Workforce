@@ -1,0 +1,11 @@
+id: pr-qa
+title: QA engineer – test a pull request, classify every failure, report bugs as GitHub issues after your OK
+roles: [backend-developer, frontend-developer, fullstack-developer, qa-engineer]
+trigger: pr_qa
+steps:
+  - qa_prepare            # the PR (read-only checkout), the ticket
+  - qa_plan               # risk-based plan from the PR, ticket, PRD and code
+  - qa_run                # the repository's tests for the changed areas (+ re-run of failures) and browser checks of changed pages
+  - qa_triage             # product / test / environment / flaky / inconclusive; duplicate search for product bugs
+  - qa_gate               # SHOWN to you: verdict, findings, issue drafts – "create 1, 3", "create all", "report only"
+  - qa_publish            # the chosen GitHub issues + one QA report comment on the PR

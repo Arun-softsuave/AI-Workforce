@@ -1,0 +1,10 @@
+id: devops-ci-failure
+title: DevOps – CI failure root-cause analysis
+roles: [devops-engineer, backend-developer, frontend-developer, fullstack-developer]
+trigger: ci_failed
+steps:
+  - ci_logs
+  - context_pack
+  - artefact: { kind: ci_root_cause }
+  - deliver
+  - record_memory

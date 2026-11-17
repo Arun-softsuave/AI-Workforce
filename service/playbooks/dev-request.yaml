@@ -1,0 +1,9 @@
+id: dev-request
+title: Developer – work without a ticket (requirements interview first)
+roles: [backend-developer, frontend-developer, fullstack-developer]
+trigger: request
+steps:
+  - context_pack
+  - requirements_interview   # asks the requester in rounds (questions with options) until nothing important is unclear
+  - requirements_confirm     # the requester confirms the summary, or says what to change (re-opens the interview)
+  - requirements_handoff     # then it continues like a ticket: triage -> plan -> plan approval -> build -> PR approval -> PR

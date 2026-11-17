@@ -1,0 +1,10 @@
+id: ba-stories
+title: Business Analyst – epic to user stories and acceptance criteria
+roles: [business-analyst]
+trigger: epic_created
+steps:
+  - context_pack
+  - artefact: { kind: user_stories }
+  - deliver
+  - request_approval: { action: post_jira_comment }
+  - publish

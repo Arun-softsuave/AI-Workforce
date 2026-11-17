@@ -1,0 +1,11 @@
+id: pr-fix
+title: Fix the review comments, failing CI checks (or QA issues) on your own pull request – shown to you before anything is pushed, then CI watched until green
+roles: [backend-developer, frontend-developer, fullstack-developer]
+trigger: pr_fix
+steps:
+  - fix_prepare           # the PR, its open comments, its FAILING CI CHECKS with their logs (or QA issues), the ticket; the PR branch in its own folder
+  - fix_plan              # each item decided with the Brain, ticket, PRD and code: fix / answer / disagree / other repo / ask you
+  - fix_apply             # the code changes – the normal implement + test loop (only when something needs a change)
+  - fix_review: { reviewers: [combined] }
+  - fix_gate              # SHOWN to you: per comment what was done and the reply; push only after your OK
+  - fix_publish           # push to the same PR (never forced, never merged), reply in each thread, then QA starts

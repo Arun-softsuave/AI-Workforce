@@ -1,0 +1,9 @@
+id: pr-review
+title: Review a pull request (yours or a teammate's) – comments are shown in Teams before anything is posted
+roles: [backend-developer, frontend-developer, fullstack-developer]
+trigger: pr_review
+steps:
+  - fetch_pr              # the PR from GitHub + its code checked out read-only (no branch is created)
+  - review_pr             # ticket + comments, PRD (project documents, linked pages), team rules, code graph → verdict + line comments
+  - review_gate           # shown in Teams: post / post 1, 3 / drop 2 / change 2: … / cancel
+  - post_review           # ONE comment review (never approve / request changes, never merge)
