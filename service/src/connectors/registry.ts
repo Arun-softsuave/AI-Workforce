@@ -12,6 +12,7 @@ import { teamsPersonal, NOTES_CHAT, AIW_PREFIX } from "./teamsPersonal.js";
 
 const TEAMS_HELP_SHORT = 'Reply here with "aiw help" to see commands, e.g. "aiw inbox" or "aiw approve KAN-42@nue-backend".';
 import type { ConnectionTest } from "./types.js";
+import { publish } from "../live/bus.js";
 
 export const PROVIDERS = ["jira", "github", "slack", "teams", "teams-personal", "notion", "figma"] as const;
 export type Provider = (typeof PROVIDERS)[number];
@@ -42,11 +43,13 @@ function record(p: Provider, t: ConnectionTest, meta: Record<string, unknown>, s
     ON CONFLICT(provider) DO UPDATE SET account=excluded.account, scopes=excluded.scopes, status=excluded.status, meta=excluded.meta, updated_at=excluded.updated_at`)
     .run(p, t.account ?? null, (t.scopes ?? []).join(","), status, JSON.stringify(meta), nowIso());
   audit("user", "connector.connect", p, { account: t.account, status });
+  publish("connector", { provider: p, status });
 }
 
 export function markConnection(p: Provider, status: "connected" | "expired" | "pending-admin" | "error", detail?: string): void {
   db().prepare("UPDATE connections SET status=?, meta=json_set(coalesce(meta,'{}'),'$.lastError',?), updated_at=? WHERE provider=?")
     .run(status, detail ?? null, nowIso(), p);
+  publish("connector", { provider: p, status });
 }
 
 export interface ConnectParams {

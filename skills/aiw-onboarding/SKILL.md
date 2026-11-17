@@ -54,11 +54,13 @@ Run the `aiw` CLI with Bash. If `aiw` is not on PATH, use `node "<plugin root>/s
      last resort: `aiw connect github --browser`.
    - **Notion** – *Sign in with Notion in the browser (Recommended)*: `aiw connect notion`. They choose the workspace and the pages
      AI Workforce may read, then Allow. Fallback: `aiw connect notion --browser` (integration token).
-   - **Figma** – Figma's online MCP server only admits approved apps, so there is no browser sign-in for AI Workforce. Instead,
-     *Use the Figma desktop app (Recommended, no token)*: install/open the Figma desktop app, open a file, Dev Mode (Shift+D) →
-     "Enable desktop MCP server" (Dev or Full seat), then `aiw connect figma`. Tasks read the design that is open in the app; if it is
-     not open, the user is asked in Teams to open it. Fallback that reads any file while the app is closed: `aiw connect figma --browser`
-     (personal access token, scopes File content: read-only + Current user: read).
+   - **Figma – token first.** Figma must stay connected all the time (also when the Figma app is closed), and Figma's online MCP
+     server only admits approved apps, so there is no browser sign-in for AI Workforce. Options:
+     *Personal access token in the local page (Recommended)*: `aiw connect figma --browser` – the user creates a token in Figma
+     (Settings → Security → Personal access tokens, scopes File content: read-only + Current user: read) and pastes it into the local
+     page, never into the chat. It reads any file and is checked regularly, with a Teams alert if it stops working.
+     *Also use the Figma desktop app (optional)*: open a file, Dev Mode (Shift+D) → "Enable desktop MCP server" (Dev or Full seat),
+     then `aiw connect figma`. Tasks then read the design that is open in the app.
    - **Slack / work Teams webhook** – these services have no browser sign-in for outside apps (Slack requires an admin-approved Slack
      app; work Teams requires an Azure app). Say so in one line, offer *Skip (Recommended when using the Teams bot)*, otherwise
      `aiw connect <tool> --browser`.
@@ -103,6 +105,15 @@ Run the `aiw` CLI with Bash. If `aiw` is not on PATH, use `node "<plugin root>/s
    If the repo isn't cloned locally, offer to clone it first.
    After adding projects, run `aiw pause` so no work starts before the Brain and documents are ready (resumed at go-live).
 
+8b. **Team** – one sentence: the plugin learns who works on each repo so it can request reviews on its PRs.
+   `aiw team detect <project>` suggests teammates (GitHub contributors and recent git history) and shows whether the repo has a
+   CODEOWNERS file; it also saves the user's own GitHub login. Offer the suggestions as options and add the chosen ones with
+   `aiw team add --github <login> --name "<name>"` (`aiw team me --github <login>` if the user's own login is wrong; `aiw team list` to show).
+   Then reviewers, per project – options:
+   *From CODEOWNERS (Recommended when the repo has one)* → `aiw team reviewers <project> --codeowners` (owners of the changed files) ·
+   *A fixed list* → `aiw team reviewers <project> --list login1,org/team` · *No reviewers* → `aiw team reviewers <project> --none`.
+   The PR author is never asked to review their own PR.
+
 9. **Product documents** – options: *Yes, I have a PRD / BRD / spec* · *No / later*.
    If yes: ask for the file path(s) (.pdf .docx .md .txt), then options: *Private – keep it on this PC only (Recommended for confidential docs)* ·
    *Shared – store it in the repo for the team*. `aiw brain add-doc <project> "<path>" [--private]` (stored for every repo in a group).
@@ -119,7 +130,9 @@ Run the `aiw` CLI with Bash. If `aiw` is not on PATH, use `node "<plugin root>/s
     Overrides: `aiw conventions set <project> --base dev` (or --branch / --commit / --checks), then `aiw conventions confirm <project>`.
     If the summary says **Environment: BROKEN**, tell the user the exact repair command it prints (e.g. `uv sync`). A working
     Python elsewhere in the repo (e.g. `.venv-local`) is used automatically; otherwise that repo's work continues "not tested locally".
-    Mention the hard rule: nothing in commits, branches, PRs, Jira or code ever mentions Claude/AI, and PRs are drafts – never merged by the plugin.
+    Mention the hard rule: nothing in commits, branches, PRs, Jira or code ever mentions Claude/AI, and PRs are never merged by the plugin.
+    From what it learned (docstring style, test layout, CI checks, the team's instruction files) the plugin writes a short **rules card**
+    that every coding, review and fix step follows. Short instruction files are used word for word.
 
 10c. **Testing on this computer (optional, recommended)** – one sentence: tests, QA checks and PR screenshots run the real app here.
     The test profile of each repo is detected automatically the first time it is needed; nothing to type for that. Explain the rules in
@@ -135,6 +148,27 @@ Run the `aiw` CLI with Bash. If `aiw` is not on PATH, use `node "<plugin root>/s
     - **A signed-in test session** for the live app and screenshots (MFA apps): the USER runs `aiw qa token <frontend project>` (access +
       refresh token of a session from their LOCAL backend), or `aiw qa account <frontend project> <demo email> --totp` (demo account +
       authenticator secret). Without one, QA asks once in Teams and those checks say "not tested in the live local app".
+
+10d. **Preferences** – `aiw prefs` shows the current choices. Ask one question at a time (recommended option first):
+    - Pull requests: *Normal, ready for review (Recommended)* · *Draft* → `aiw prefs --draft-pr no|yes`
+    - Failing CI and lint checks on the plugin's PRs: *Fix and push without asking (Recommended)* · *Show the fix in Teams first*
+      → `aiw prefs --auto-fix-ci yes|no`. Review-comment fixes and QA issues are always shown in Teams first.
+    - Plan approval: *Ask me (Recommended)* · *Don't ask* → `aiw prefs --plan-approval ask|skip`
+    - PR approval before raising it: *Ask me (Recommended)* · *Don't ask* → `aiw prefs --pr-approval ask|skip`
+    - When someone asks me to review: *Tell me and wait (Recommended)* · *Review straight away* → `aiw prefs --auto-review no|yes`;
+      review comments *Shown first (Recommended)* · *Posted directly* → `--auto-post-review no|yes`;
+      QA findings *Shown first (Recommended)* · *GitHub issues created directly* → `--auto-qa-issues no|yes`
+    - Tasks at once: *3 (Recommended)* · *1* · *5* → `aiw prefs --parallel N`
+    Flags can be combined in one `aiw prefs` call. Show the final summary it prints.
+
+10e. **Ready check** – one sentence: it finds now what would otherwise fail in the middle of a ticket. Read-only: it never edits
+    files or commits, and tests never touch the `.env` database.
+    `aiw ready` (all projects) or `aiw ready <project>`. It checks the model, Jira/GitHub connections, Teams, preferences and team,
+    then per repo: push access and the base branch, reviewers, the rules card and CI checks, lint/format tools, the test runner and a
+    temporary test database, and PR screenshots (Playwright). Show the result as it is; for each ✘ line give the printed fix and offer
+    *Fix it now* · *Later*. Work still runs with open items – anything that can't run here is reported as "not tested locally".
+    Re-run `aiw ready <project>` after a fix. Coming later: a deeper **environment doctor** under `aiw doctor` (language versions,
+    installed dependencies, `.env` key names, database and services, a one-test smoke run) – today `aiw doctor` checks the prerequisites only.
 
 11. **Go live** – options: *Go live now (Recommended)* · *Not yet*.
     `aiw resume-all` then `aiw live`. Explain: tickets assigned to the user (updated in the last 24 h) are picked up; older ones via `aiw run <KEY>`;

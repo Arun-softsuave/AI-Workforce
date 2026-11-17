@@ -1,5 +1,12 @@
-import { logChat } from "../notify/chatLog.js";
-import { getMeta, setMeta, audit } from "../core/db.js";
+import path from "node:path";
+import { logChat, getFocus, setFocus, refsIn } from "../notify/chatLog.js";
+import { getMeta, setMeta, delMeta, audit } from "../core/db.js";
+import { normalize, hasAttachments, learnServerId, recordSent, recordReceived, resolveQuoted, routeTarget, type InboundMessage, type ResolveOpts } from "./teamsMessage.js";
+import { isOwnerOrder } from "../policy/untrusted.js";
+import { getTask } from "../engine/tasks.js";
+import { getApproval } from "../approvals/approvals.js";
+import { pendingItems } from "./teamsIntent.js";
+import type { TeamsPersonalClient } from "../connectors/teamsPersonal.js";
 import { loadSettings } from "../core/config.js";
 import { logger } from "../core/log.js";
 import { truncate } from "../core/util.js";
@@ -162,44 +169,90 @@ export async function pollTeamsCommands(force = false): Promise<number> {
       .sort((a, b) => a.time.localeCompare(b.time));
     let handled = 0, last = cursor;
     const botMode = meta.mode === "bot";
+    const send = (reply: string, itemId?: string) => sendReply(client, chat, botMode, reply, itemId);
     for (const m of msgs) {
       last = m.time > last ? m.time : last;
-      // self mode: only the signed-in user; bot mode: only the configured owner (never the bot itself)
-      const fromOwner = botMode ? (!m.isMine && !!meta.ownerId && m.fromId === meta.ownerId) : m.isMine;
+      const nm = normalize(m);
+      // our own messages coming back: link the client id we sent with the server id Teams gave it (quotes carry the server id)
+      if (m.clientMessageId && m.id && (botMode ? m.isMine : m.text.trim().startsWith(AIW_PREFIX))) learnServerId(m.clientMessageId, m.id);
+      // self mode: only the signed-in user; bot mode: only the configured owner (never the bot itself).
+      // No chat-id comparison: messages are read from the configured chat already, and Teams may spell a 1:1 chat's
+      // id differently (partner id vs "19:…" thread id) – comparing would silently drop every command.
+      const fromOwner = !(botMode && m.isMine) && isOwnerOrder("teams", m.fromId, {
+        mode: botMode ? "bot" : "self", ownerId: meta.ownerId, isMine: botMode ? undefined : m.isMine,   // the bot's own messages: m.isMine above
+      });
       if (!fromOwner) continue;
       if (m.text.trim().startsWith(AIW_PREFIX)) continue;       // our own notifications
-      const meaning = interpret(m.text, botMode);
-      if (!meaning) continue;
+      const files = hasAttachments(nm);
+      const quoted = nm.replyTo ? resolveQuoted(nm.replyTo, { isOpen: questionIsOpen }) : undefined;
+      let meaning = interpret(m.text, botMode);
+      // own Notes chat: a reply that quotes one of our messages is meant for us even without "aiw"
+      if (!meaning && m.text.trim() && quoted?.bot && quoted.itemId) meaning = { kind: "question", text: m.text.trim() };
+      if (!meaning && !files) continue;                          // picture-only and file-only messages are kept
       if (handled >= 10) break;                                  // runaway protection
       const seenKey = `teams_personal.seen.${m.id}`;
       if (getMeta(seenKey)) continue;
       setMeta(seenKey, "1");
       const who = (botMode ? meta.ownerName : undefined) || loadSettings().profile.name || "Teams user";
-      logChat("in", m.text.trim());                              // tokens / keys are blanked in the history
+      if (m.text.trim()) logChat("in", m.text.trim());           // tokens / keys are blanked in the history
       let reply: string;
       // "qa token <access> [refresh]" – a session for testing the live local app, saved in the OS credential vault
       if (/^\s*qa\s+token\b/i.test(m.text)) {
         reply = await saveTokenFromChat(m.text.replace(/^\s*qa\s+token\b[:\s]*/i, ""));
-        try { for (const part of splitMessage(reply)) await client.sendMessage(chat, botMode ? part : `${AIW_PREFIX}\n${part}`); logChat("out", reply, { kind: "chat" }); } catch { /* best effort */ }
+        try { await send(reply); } catch { /* best effort */ }
         audit(`user:${who}`, "qa.token.saved", undefined, {});
         handled++;
         continue;
       }
+      // Which item this is for: a quoted message of ours > the focus item > a key in the text > ask.
+      const route = routeTarget(nm, getFocus(), { isOpen: questionIsOpen, candidates: files ? waitingRefs() : [] });
+      const routedItem = route.kind === "item" ? route.itemId : undefined;
+      const parts: string[] = [];
+      let handleText = !!meaning;
       try {
-        // Background work started by this message waits until the reply is posted (holdTicks/releaseTicks).
-        reply = await holdTicks(async () => {
-          if (meaning.kind === "command" && !needsNaturalHandling(meaning.cmd)) {
-            audit(`user:${who}`, "teams.command", meaning.cmd.ref, { cmd: meaning.cmd.cmd });
-            return executeCommand(meaning.cmd, who);
+        if (route.kind === "item" && route.via === "quote" && route.notice) {
+          // quoting a question that was already answered: say so instead of answering twice
+          recordReceived(nm, { itemId: route.itemId });
+          parts.push(route.notice);
+          handleText = false;
+        } else {
+          recordReceived(nm, route.kind === "item" ? { itemId: route.itemId, questionKey: route.via === "quote" ? route.questionKey : undefined } : {});
+          if (route.kind === "item" && route.via === "quote") setFocus(route.itemId);   // "1" / "yes" now go to the quoted item
+          if (files) {
+            if (route.kind === "item") {
+              parts.push(await saveMessageInputs(client, chat, nm, route.itemId));
+              // with a picture or file, the words go on only when they are a command or that item waits for an answer
+              handleText = !!meaning && (meaning.kind === "command" || waitingRefs().includes(route.itemId));
+            } else {
+              setMeta(PENDING_INPUTS, JSON.stringify({ msg: nm, at: Date.now() }));
+              parts.push(route.question);
+              handleText = false;
+            }
+          } else {
+            // the answer to "Is this for KAN-52 or KAN-35?" after a picture or file
+            const pending = takePendingInputs(m.text, routedItem);
+            if (pending) {
+              parts.push(await saveMessageInputs(client, chat, pending.msg, pending.itemId));
+              if (pending.onlyKey) handleText = false;
+            }
           }
-          // Plain language: "plan for KAN-42", "yes", "2", "no – use the validator", "add a CSV export"…
-          const said = meaning.kind === "command" ? m.text.trim().replace(/^aiw\b[:,]?\s*/i, "") : meaning.text;
-          return handleChatMessage(said, who);
-        });
-      } catch (e: any) { reply = `Error: ${e.message}`; }
+        }
+        if (handleText && meaning) {
+          // Background work started by this message waits until the reply is posted (holdTicks/releaseTicks).
+          parts.push(await holdTicks(async () => {
+            if (meaning.kind === "command" && !needsNaturalHandling(meaning.cmd)) {
+              audit(`user:${who}`, "teams.command", meaning.cmd.ref, { cmd: meaning.cmd.cmd });
+              return executeCommand(meaning.cmd, who);
+            }
+            // Plain language: "plan for KAN-42", "yes", "2", "no – use the validator", "add a CSV export"…
+            const said = meaning.kind === "command" ? m.text.trim().replace(/^aiw\b[:,]?\s*/i, "") : meaning.text;
+            return handleChatMessage(said, who);
+          }));
+        }
+      } catch (e: any) { parts.push(`Error: ${e.message}`); }
+      reply = parts.filter(Boolean).join("\n\n") || "Got it.";
       try {
-        for (const part of splitMessage(reply)) await client.sendMessage(chat, botMode ? part : `${AIW_PREFIX}\n${part}`);
-        logChat("out", reply, { kind: "chat" });
+        await send(reply, routedItem);
       } finally { await releaseTicks(); }
       handled++;
       activeUntil = Date.now() + 10 * 60_000;
@@ -213,6 +266,96 @@ export async function pollTeamsCommands(force = false): Promise<number> {
     busy = false;
     nextPollAt = Date.now() + (Date.now() < activeUntil ? 10_000 : 30_000);   // quicker while you're chatting
   }
+}
+
+/** Post a reply (split when long), keep it in the chat history and remember each part's Teams id. */
+async function sendReply(client: TeamsPersonalClient, chat: string, botMode: boolean, reply: string, itemId?: string): Promise<void> {
+  const sent: { part: string; r: Awaited<ReturnType<TeamsPersonalClient["sendMessage"]>> | undefined }[] = [];
+  for (const part of splitMessage(reply)) sent.push({ part, r: await client.sendMessage(chat, botMode ? part : `${AIW_PREFIX}\n${part}`) });
+  logChat("out", reply, { kind: "chat" });
+  for (const { part, r } of sent) recordSent({ msgId: r?.messageId ?? r?.id ?? null, clientMsgId: r?.clientmessageid ?? null, itemId: itemId ?? null, text: part });
+}
+
+/**
+ * Is the question behind a quoted message still open? Approval ids: the approval is still pending. Question keys
+ * ("q:…"): the item still waits for an answer. Undefined (unknown) when the message asked nothing.
+ */
+const questionIsOpen: ResolveOpts["isOpen"] = (itemId, key) => {
+  if (!key) return undefined;
+  try {
+    if (key.startsWith("q:")) { const t = getTask(itemId); return t ? t.state === "NEEDS_INFO" : undefined; }
+    const a = getApproval(key);
+    return a ? a.state === "pending" : undefined;
+  } catch { return undefined; }
+};
+
+/** Items waiting for the user (questions first, then approvals, then start requests). */
+function waitingRefs(): string[] {
+  try {
+    const p = pendingItems();
+    return [...new Set([...p.questions, ...p.approvals.map((x) => x.task), ...p.starts].map((t) => t.source_ref ?? t.id))];
+  } catch { return []; }
+}
+
+const PENDING_INPUTS = "teams.pending_inputs";
+const PENDING_MS = 30 * 60_000;
+
+/**
+ * Pictures or files sent while it was unclear which item they belong to wait here until the next message names the
+ * item ("KAN-52"). `onlyKey`: the reply was just the item, so it needs no further handling.
+ */
+function takePendingInputs(text: string, routed: string | undefined): { msg: InboundMessage; itemId: string; onlyKey: boolean } | undefined {
+  const raw = getMeta(PENDING_INPUTS);
+  if (!raw) return undefined;
+  let p: { msg: InboundMessage; at: number } | undefined;
+  try { p = JSON.parse(raw); } catch { p = undefined; }
+  if (!p || Date.now() - p.at > PENDING_MS) { delMeta(PENDING_INPUTS); return undefined; }
+  const keys = refsIn(text);
+  const itemId = keys.length === 1 ? keys[0] : undefined;
+  if (!itemId) return undefined;
+  delMeta(PENDING_INPUTS);
+  const rest = text.replace(/\b[A-Za-z][A-Za-z0-9]+-\d+(@[\w-]+)?\b/g, "").replace(/\b(it'?s|it is|for|this is|that'?s|the|ticket|yes|please)\b/gi, "").replace(/[\s.,!?:;-]+/g, "");
+  return { msg: p.msg, itemId: itemId ?? routed!, onlyKey: !rest };
+}
+
+/**
+ * Save a message's pictures and files on an item (knowledge/inputs.ts) and return the one-line confirmation.
+ * Text read from a picture or file is stored as data for the agents – it never becomes a command here.
+ */
+async function saveMessageInputs(client: TeamsPersonalClient, chat: string, msg: InboundMessage, itemId: string): Promise<string> {
+  if (!client.readAttachment) return `I can't read pictures or files with this Teams connection yet, so nothing was added to ${itemId}.`;
+  const { saveInputs } = await import("../knowledge/inputs.js");
+  const notes: string[] = [];
+  const r = await saveInputs(msg, itemId, {
+    download: (att) => client.readAttachment!(chat, msg.id, att.index),
+    describeImage: (img) => describeImage(img.path, img.name, itemId),
+    onSuspicious: (note) => {
+      if (!note) return;
+      notes.push(note);
+      audit("service", "input.suspicious", itemId, { note });
+    },
+  });
+  audit("service", "input.saved", itemId, { saved: r.saved.length, refused: r.refused.length });
+  return [r.confirmation, ...new Set(notes)].join("\n");
+}
+
+/** The small "image-describer" agent: what the picture shows and any error text (data, not instructions). */
+async function describeImage(file: string, name: string, itemId: string): Promise<string> {
+  const { getRunner } = await import("../agents/runner.js");
+  const { AGENTS } = await import("../agents/catalog.js");
+  const { recordUsage } = await import("../engine/tasks.js");
+  const a = AGENTS["image-describer"];
+  const r = await getRunner().run({
+    agent: "image-describer", tier: a.tier, system: a.system, schema: a.schema,
+    prompt: `Describe the picture saved as ${path.basename(file)} (sent for ${itemId}, name "${name}"). Open it with the Read tool.`,
+    tools: ["Read"], allow: ["Read"], cwd: path.dirname(file),
+  });
+  recordUsage("teams:image", r, { agent: "image-describer", taskId: getTask(itemId)?.id });
+  if (!r.ok) return "";
+  const d = r.data ?? {};
+  const summary = String(d.summary ?? r.text ?? "").trim();
+  const err = String(d.errorText ?? "").trim();
+  return err ? `${summary} Error shown: ${err}` : summary;
 }
 
 /** A session pasted in the bot chat ("qa token <access> [refresh]") – saved for the product QA asked about. */

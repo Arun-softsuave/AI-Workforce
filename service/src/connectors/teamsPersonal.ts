@@ -16,7 +16,19 @@ import { serviceRoot } from "../core/paths.js";
 export const NOTES_CHAT = "48:notes";
 export const AIW_PREFIX = "🤖 AI Workforce";
 
-export interface TpMessage { id: string; conversationId: string; from: string; fromId: string; isMine: boolean; time: string; text: string }
+export interface TpMessage {
+  id: string; conversationId: string; from: string; fromId: string; isMine: boolean; time: string; text: string;
+  /** The message this one quotes (Teams "reply"), when there is one. */
+  replyTo?: { messageId: string | null; from: string | null; preview: string; clientMessageId?: string | null; fromId?: string | null };
+  clientMessageId?: string;
+  /** Files first, then pictures: `index` is what readAttachment takes. */
+  attachments?: { index: number; kind: "image" | "file"; name: string; ext?: string }[];
+  images?: { index: number; name: string }[];
+  files?: { name: string | null; index: number }[];
+}
+
+/** What sendMessage returns: the server id when Teams gave one, else the client id. */
+export interface TpSent { sent: boolean; id?: string; messageId?: string | null; clientmessageid?: string }
 export interface TpChat { id: string; title: string; type?: string; unread?: boolean }
 
 export interface TeamsPersonalClient {
@@ -28,12 +40,15 @@ export interface TeamsPersonalClient {
   listChats(limit?: number, type?: "chat" | "group"): Promise<TpChat[]>;
   findChats(query: string, type?: "chat" | "group"): Promise<TpChat[]>;
   getChatMembers(chatId: string): Promise<{ mri: string; name: string | null; isMe: boolean }[]>;
-  sendMessage(chatId: string, text: string): Promise<{ sent: boolean }>;
+  sendMessage(chatId: string, text: string): Promise<TpSent>;
   getMessages(chatId: string, since?: string): Promise<TpMessage[]>;
   /**
    * Put files in the signed-in account's OneDrive ("AI Workforce/<folder>/") and return a view-only link to the
    * folder (or to the single file) that opens in the browser. Optional so test fakes may omit it.
    */
+  /** One picture or file of a message (index from TpMessage.attachments), at most 10 MB. Optional so test fakes may omit it. */
+  readAttachment?(chatId: string, messageId: string, index: number): Promise<{ bytes: Uint8Array; name?: string; mimeType?: string | null }>;
+  listAttachments?(chatId: string, messageId: string): Promise<{ index: number; kind: "image" | "file"; name: string; ext?: string }[]>;
   shareFiles?(folder: string, files: { local: string; name: string }[]): Promise<{ url: string; files: { name: string; url: string }[] }>;
 }
 
@@ -87,7 +102,8 @@ export async function teamsPersonal(): Promise<TeamsPersonalClient> {
   const base = path.join(serviceRoot(), "vendor", "teams-personal");
   const auth: any = await import(pathToFileURL(path.join(base, "auth.js")).href);
   const core: any = await import(pathToFileURL(path.join(base, "core", "teams.js")).href);
-  const client = core.createTeamsClient(auth.getSkypeToken);
+  // the Graph token lets readAttachment fetch files shared through OneDrive (pictures work without it)
+  const client = core.createTeamsClient(auth.getSkypeToken, { getGraphToken: () => auth.getGraphToken() });
   real = {
     hasSavedLogin: () => auth.hasSavedLogin(),
     startLogin: async () => { const l = await auth.startLogin(); return { userCode: l.userCode, verificationUrl: l.verificationUrl, expiresAt: l.expiresAt }; },
@@ -100,6 +116,8 @@ export async function teamsPersonal(): Promise<TeamsPersonalClient> {
     // mentionRecipient:false – never @mention someone just because a notification went to a 1:1 chat
     sendMessage: (chatId, text) => client.sendMessage(chatId, text, { mentionRecipient: false }),
     getMessages: (chatId, since) => client.getMessages(chatId, { limit: 30, since }),
+    readAttachment: (chatId, messageId, index) => client.readAttachment(chatId, messageId, index, { maxBytes: 10 * 1024 * 1024 }),
+    listAttachments: (chatId, messageId) => client.listAttachments(chatId, messageId),
     shareFiles: (folder, files) => shareViaOneDrive(() => auth.getGraphToken(), folder, files),
   };
   return real;

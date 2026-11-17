@@ -17,6 +17,8 @@ import { notify, markInboxRead } from "../notify/router.js";
 import { expireApprovals, decide, latestApproval, type Approval } from "../approvals/approvals.js";
 import { removeWorktree } from "../git/git.js";
 import { clients } from "../connectors/registry.js";
+import { publish } from "../live/bus.js";
+import { recordActivity, clearActivity, progressFrom } from "../live/activity.js";
 
 /**
  * Playbook Engine: a deterministic state machine. Code decides the order of steps; agents work inside them.
@@ -181,7 +183,7 @@ export async function tick(): Promise<void> {
       if (BUILD_STEPS.has(stepOf(t) ?? "") && buildingIn(t.project_id) >= s.limits.maxPerProject) continue;
       running.add(t.id);
       // when a run ends, look again at once: a finished part may let the next part (or its lead) continue
-      runTask(t.id).catch((e) => logger.error("runTask crashed", { task: t.id, error: e.message })).finally(() => { running.delete(t.id); setImmediate(() => { tick().catch(() => {}); }); });
+      runTask(t.id).catch((e) => logger.error("runTask crashed", { task: t.id, error: e.message })).finally(() => { running.delete(t.id); try { clearActivity(t.id); } catch { /* live view only */ } setImmediate(() => { tick().catch(() => {}); }); });
     }
   } finally {
     ticking = false;
@@ -258,6 +260,7 @@ export async function runTask(taskId: string): Promise<Task> {
       return transition(task.id, "QUEUED", `waiting for a free build slot in ${project.id}`);
     }
     const sid = startStep(task.id, task.run_no, task.step_index, spec.name);
+    liveStep(task, spec.name, pb.steps.length, "start");
     const ctx: StepCtx = {
       task, project, settings, runner, params: spec.params, usage: { tokensIn: 0, tokensOut: 0, cost: 0, agents: [] },
       agent: undefined as any,
@@ -274,6 +277,7 @@ export async function runTask(taskId: string): Promise<Task> {
       return retryOrFail(getTask(task.id)!, `${spec.name}: ${e.message}`);
     }
     flushUsage(ctx, sid, result.status === "ok" || result.status === "done" ? "ok" : result.status, "reason" in result ? result.reason : undefined, (result as any).note);
+    liveStep(task, spec.name, pb.steps.length, "end");
     if (ctx.task.worktree !== task.worktree || ctx.task.branch !== task.branch) updateTask(task.id, { worktree: ctx.task.worktree, branch: ctx.task.branch });
     task = getTask(task.id)!;
     switch (result.status) {
@@ -599,3 +603,15 @@ export function housekeeping(): number {
 }
 
 export { latestApproval };
+
+
+/** Live dashboard: which step a job is on (activity line + "job" event). Best effort, never stops the work. */
+function liveStep(task: Task, step: string, total: number, phase: "start" | "end"): void {
+  try {
+    if (phase === "start") {
+      recordActivity(task.id, null, step, step.replace(/_/g, " "), progressFrom(task.step_index, total), task.tokens_used ?? null,
+        { force: true, ref: task.source_ref ?? undefined });
+    }
+    publish("job", { taskId: task.id, ref: task.source_ref, step, phase });
+  } catch { /* live view only */ }
+}

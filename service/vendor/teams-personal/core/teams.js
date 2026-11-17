@@ -100,10 +100,21 @@ function conversationType(c) {
   return 'one-on-one';
 }
 
-function isUserMessage(m) {
+export function isUserMessage(m) {
   if (m.properties?.deletetime) return false;
   if (m.messagetype === 'Event/Call') return true;
-  return /^(RichText|Text)/.test(m.messagetype || '') && Boolean(stripHtml(m.content));
+  if (!/^(RichText|Text)/.test(m.messagetype || '')) return false;
+  // Picture-only and file-only messages have no text but are still real messages.
+  return Boolean(stripHtml(m.content)) || attachmentsOf(m).length > 0;
+}
+
+/** The server message id from a send response: the body's id, else the last part of the Location header. */
+export function sentMessageId(data, headers) {
+  const fromBody = data?.id ?? data?.messageId ?? null;
+  if (fromBody) return String(fromBody);
+  const loc = headers?.get?.('Location') || headers?.get?.('location') || '';
+  const m = String(loc).match(/\/messages\/([^/?#]+)/);
+  return m ? decodeURIComponent(m[1]) : null;
 }
 
 const REPLY_RE = /<blockquote[^>]*itemtype="http:\/\/schema\.skype\.com\/Reply"[^>]*>([\s\S]*?)<\/blockquote>/i;
@@ -638,6 +649,14 @@ export function createTeamsClient(getSkypeToken, hooks = {}) {
       };
     }
     if (m.properties?.edittime) out.edited = true;
+    if (m.clientmessageid) out.clientMessageId = String(m.clientmessageid);
+    // Files and pasted pictures, in the order readAttachment takes (files first, then pictures).
+    const attachments = attachmentsOf(m);
+    if (attachments.length) {
+      out.attachments = attachments.map(({ src, ...a }) => a);
+      const images = attachments.filter((a) => a.kind === 'image');
+      if (images.length) out.images = images.map((a) => ({ index: a.index, name: a.name }));
+    }
     const fwd = parseJsonish(m.properties?.originalMessageContext);
     if (fwd?.originalSender) {
       out.forwarded = { from: nameOf(fwd.originalSender), originalTime: fwd.originalSentTime || null };
@@ -771,10 +790,14 @@ export function createTeamsClient(getSkypeToken, hooks = {}) {
     const clientmessageid = randomDigits();
     const body = { clientmessageid, content: html, messagetype: 'RichText/Html', contenttype: 'text', imdisplayname: displayName || await selfName() };
     if (mentions.length) body.properties = { mentions: JSON.stringify(mentions) };
-    const res = await request(`${CHATSVC}/conversations/${encodeURIComponent(conversationId)}/messages`, { method: 'POST', body });
+    const { data: res, headers } = await request(`${CHATSVC}/conversations/${encodeURIComponent(conversationId)}/messages`, { method: 'POST', body, withHeaders: true });
     await forgetChats();
+    const messageId = sentMessageId(res, headers);
     return {
       sent: true,
+      // the server id when Teams returns it (quotes of this message carry that id), else the client id
+      id: messageId || clientmessageid,
+      messageId,
       clientmessageid,
       mentioned: mentions.map((m) => m.displayName),
       arrivalTime: res.OriginalArrivalTime ?? null,
@@ -839,11 +862,13 @@ export function createTeamsClient(getSkypeToken, hooks = {}) {
       qtdMsgs: JSON.stringify([{ messageId: String(original.id), sender: author, time: messageTimeMs(original) }]),
       ...(mentions.length ? { mentions: JSON.stringify(mentions) } : {}),
     };
-    await request(`${CHATSVC}/conversations/${encodeURIComponent(conversationId)}/messages`, {
+    const { data: res, headers } = await request(`${CHATSVC}/conversations/${encodeURIComponent(conversationId)}/messages`, {
       method: 'POST',
       body: { clientmessageid, content: quote + html, messagetype: 'RichText/Html', contenttype: 'text', imdisplayname: await selfName(), properties },
+      withHeaders: true,
     });
-    return { sent: true, repliedTo: { messageId: String(original.id), from: author === self ? 'You' : authorName }, mentioned: mentions.map((m) => m.displayName) };
+    const sentId = sentMessageId(res, headers);
+    return { sent: true, id: sentId || clientmessageid, messageId: sentId, clientmessageid, repliedTo: { messageId: String(original.id), from: author === self ? 'You' : authorName }, mentioned: mentions.map((m) => m.displayName) };
   }
 
   async function assertMine(conversationId, messageId, { allowDeleted = false } = {}) {
@@ -945,6 +970,14 @@ export function createTeamsClient(getSkypeToken, hooks = {}) {
    * download link Graph returns is fetched without any token. Pictures come from Skype's media service.
    * Returns { kind, name, ext, mimeType, size, bytes, openUrl }.
    */
+  /**
+   * The files and pasted pictures of one message, without downloading them:
+   * [{ index, kind: 'file'|'image', name, ext }]. Read one with readAttachment(conversationId, messageId, index).
+   */
+  async function listAttachments(conversationId, messageId) {
+    return attachmentsOf(await rawMessage(conversationId, messageId)).map(({ src, shareUrl, driveId, itemId, ...a }) => a);
+  }
+
   async function readAttachment(conversationId, messageId, index = 0, { maxBytes = LIMITS.readBytes } = {}) {
     const list = attachmentsOf(await rawMessage(conversationId, messageId));
     if (!list.length) throw new Error('That message has no files or pictures. Use teams_get_shared_files to find one.');
@@ -1118,7 +1151,7 @@ export function createTeamsClient(getSkypeToken, hooks = {}) {
 
   return {
     displayName: selfName, membership, listGroupChats, getGroupInfo, getPinnedMessages, getMessageResponses, createGroupChat, renameGroup, setMember, leaveGroup,
-    searchMessages, getSharedFiles, readAttachment,
+    searchMessages, getSharedFiles, listAttachments, readAttachment,
     whoAmI, listChats, findChats, getChatMembers, getMessages, getMessage, getUnread, getMyRecentMessages, getMentions,
     sendMessage, replyToMessage, editMessage, deleteMessage, react, markRead,
   };

@@ -6,6 +6,7 @@ import { paths } from "../core/paths.js";
 import { truncate } from "../core/util.js";
 import { audit } from "../core/db.js";
 import { getRunner, untrusted } from "../agents/runner.js";
+import { recordUsage } from "../engine/tasks.js";
 import { AGENTS } from "../agents/catalog.js";
 import { docstringLine, NEVER_PUSH } from "./standards.js";
 import { ciSummaryLines } from "./ciPipeline.js";
@@ -44,6 +45,7 @@ export async function teamRules(p: ProjectConfig, opts: { useAi?: boolean } = {}
       agent: "rules-writer", tier: def.tier, system: def.system, schema: def.schema, tools: [], maxTurns: 2, maxBudgetUsd: 0.5,
       prompt: `Repository: ${p.id}\n\n${untrusted("instruction-files", truncate(raw, 40_000))}`,
     });
+    recordUsage(`rules-card:${p.id}`, r, { agent: "rules-writer" });
     const rules: string[] = Array.isArray(r.data?.rules) ? r.data.rules.map(String).filter(Boolean) : [];
     if (r.ok && rules.length) {
       const text = rules.map((x) => `- ${x.replace(/^[-•]\s*/, "")}`).join("\n");

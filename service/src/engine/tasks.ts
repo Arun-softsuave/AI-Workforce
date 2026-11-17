@@ -1,5 +1,6 @@
 import { db, audit, tx } from "../core/db.js";
 import { newId, nowIso, safeJson } from "../core/util.js";
+import { publish } from "../live/bus.js";
 
 /** Task lifecycle (PRD §7). Every transition is validated and audited. */
 export const STATES = [
@@ -113,6 +114,8 @@ export function transition(id: string, to: State, note?: string, patch: Partial<
     for (const [k, v] of Object.entries(patch)) { sets.push(`${k}=?`); args.push(v ?? null); }
     db().prepare(`UPDATE tasks SET ${sets.join(", ")} WHERE id=?`).run(...args, t.id);
     audit("service", "task.transition", t.id, { from: t.state, to, note });
+    // the dashboard re-reads the board and "Needs you" when an item changes state
+    if (t.state !== to) { try { publish("item", { taskId: t.id, ref: t.source_ref, from: t.state, to }); } catch { /* live view only */ } }
     return getTask(t.id)!;
   });
 }
@@ -138,17 +141,63 @@ export function addUsage(id: string, tokens: number, cost: number): void {
   db().prepare("UPDATE tasks SET tokens_used = tokens_used + ?, cost_usd = cost_usd + ?, updated_at=? WHERE id=?").run(tokens, cost, nowIso(), id);
 }
 
-export interface StepRow { id: number; name: string; status: string; agent: string | null; model: string | null; tokens_in: number; tokens_out: number; cost_usd: number; started_at: string; ended_at: string | null; error: string | null; output: string | null }
+export interface StepRow { id: number; name: string; status: string; agent: string | null; model: string | null; tokens_in: number; tokens_out: number; cost_usd: number; started_at: string; ended_at: string | null; error: string | null; output: string | null; fresh_in?: number; cache_read?: number; cache_write?: number; effort?: string | null }
+
+/** Token counts of one or more agent calls. tokensIn = freshIn + cacheRead + cacheWrite. */
+export interface StepUsage { agent?: string; model?: string; tokensIn?: number; tokensOut?: number; freshIn?: number; cacheRead?: number; cacheWrite?: number; effort?: string; cost?: number; output?: unknown; error?: string }
 
 export function startStep(taskId: string, runNo: number, idx: number, name: string): number {
   const r = db().prepare("INSERT INTO steps (task_id, run_no, idx, name, status, started_at) VALUES (?,?,?,?,?,?)").run(taskId, runNo, idx, name, "running", nowIso());
   return Number(r.lastInsertRowid);
 }
 
-export function endStep(stepId: number, status: string, u: { agent?: string; model?: string; tokensIn?: number; tokensOut?: number; cost?: number; output?: unknown; error?: string } = {}): void {
+export function endStep(stepId: number, status: string, u: StepUsage = {}): void {
   db().prepare("UPDATE steps SET status=?, agent=?, model=?, tokens_in=?, tokens_out=?, cost_usd=?, ended_at=?, output=?, error=? WHERE id=?")
     .run(status, u.agent ?? null, u.model ?? null, u.tokensIn ?? 0, u.tokensOut ?? 0, u.cost ?? 0, nowIso(),
       u.output === undefined ? null : JSON.stringify(u.output).slice(0, 20_000), u.error ?? null, stepId);
+  const split = u.freshIn !== undefined || u.cacheRead !== undefined || u.cacheWrite !== undefined;
+  if (split) {
+    db().prepare("UPDATE steps SET fresh_in=?, cache_read=?, cache_write=?, effort=COALESCE(?, effort) WHERE id=?")
+      .run(u.freshIn ?? 0, u.cacheRead ?? 0, u.cacheWrite ?? 0, u.effort ?? null, stepId);
+  } else {
+    // the split was added call by call (addStepUsage) or is unknown: then all input counts as fresh
+    db().prepare("UPDATE steps SET fresh_in = CASE WHEN COALESCE(fresh_in,0)+COALESCE(cache_read,0)+COALESCE(cache_write,0) > 0 THEN fresh_in ELSE ? END, effort=COALESCE(?, effort) WHERE id=?")
+      .run(u.tokensIn ?? 0, u.effort ?? null, stepId);
+  }
+}
+
+/**
+ * Add one agent call's fresh / cache-read / cache-write split to the task's running step (the step's totals are
+ * written by endStep when it finishes). Effort keeps the highest seen in the step.
+ */
+export function addStepUsage(taskId: string, u: { freshIn?: number; cacheRead?: number; cacheWrite?: number; effort?: string }): void {
+  try {
+    const row = db().prepare("SELECT id, effort FROM steps WHERE task_id=? AND status='running' ORDER BY id DESC LIMIT 1").get(taskId) as { id: number; effort: string | null } | undefined;
+    if (!row) return;
+    const rank = (e?: string | null) => ["low", "medium", "high", "xhigh", "max"].indexOf(e ?? "");
+    const effort = rank(u.effort) > rank(row.effort) ? u.effort! : row.effort;
+    db().prepare("UPDATE steps SET fresh_in=COALESCE(fresh_in,0)+?, cache_read=COALESCE(cache_read,0)+?, cache_write=COALESCE(cache_write,0)+?, effort=? WHERE id=?")
+      .run(u.freshIn ?? 0, u.cacheRead ?? 0, u.cacheWrite ?? 0, effort ?? null, row.id);
+  } catch { /* best effort */ }
+}
+
+/** The usage fields of an agent result, ready for endStep / recordUsage. */
+export function usageOf(r: { agent?: string; model?: string; tokensIn: number; tokensOut: number; freshIn?: number; cacheRead?: number; cacheWrite?: number; effort?: string; costUsd: number; error?: string }, agent?: string): StepUsage {
+  return { agent: agent ?? r.agent, model: r.model, tokensIn: r.tokensIn, tokensOut: r.tokensOut, freshIn: r.freshIn, cacheRead: r.cacheRead, cacheWrite: r.cacheWrite, effort: r.effort, cost: r.costUsd, error: r.error };
+}
+
+/**
+ * Usage of an agent call made outside a task step (Brain onboarding, document reading, rules card, Teams intent…).
+ * It is stored as a finished steps row so the cost view and `aiw bench` see it: task_id is the task when there is one,
+ * otherwise "system:<scope>". It never throws – cost recording must not break the work.
+ */
+export function recordUsage(scope: string, r: Parameters<typeof usageOf>[0], opts: { taskId?: string; agent?: string } = {}): void {
+  try {
+    if (!r || (!r.tokensIn && !r.tokensOut && !r.costUsd)) return;
+    const sid = startStep(opts.taskId ?? `system:${scope}`, 0, -1, scope);
+    endStep(sid, r.error ? "failed" : "ok", usageOf(r, opts.agent));
+    if (opts.taskId) addUsage(opts.taskId, r.tokensIn + r.tokensOut, r.costUsd);
+  } catch { /* best effort */ }
 }
 
 export function stepsFor(taskId: string): StepRow[] {

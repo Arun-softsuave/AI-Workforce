@@ -104,6 +104,7 @@ const HELP = `AI Workforce – local AI team member
 Setup
   aiw setup                         Show onboarding progress and the next step (resumable)
   aiw doctor                        Check prerequisites (Node, git, disk, network, proxy)
+  aiw doctor <project> [--smoke] [--verbose]   Can this project's tests run here? (versions, packages, .env names, database)
   aiw service install|start|stop|status|uninstall
   aiw model --provider claude|claude-login|mock [--key-stdin] [--small ID --medium ID --large ID]
                                     claude = API key · claude-login = your Claude Code login · mock = offline dry run
@@ -112,7 +113,8 @@ Setup
   aiw connect jira   [--site host] [--relogin]   Sign in with your Atlassian account in the browser (no API token)
   aiw connect notion [--relogin]                 Sign in with your Notion account in the browser (no integration token)
   aiw connect github [--relogin]                 Sign in to GitHub in the browser with a one-time code (no token)
-  aiw connect figma                              Use the Figma desktop app's MCP server (no token; app must be open)
+  aiw connect figma                              Paste a Figma personal access token in a local page (recommended)
+  aiw connect figma --desktop                    Use the Figma desktop app's MCP server instead (no token; app must be open)
   aiw connect <tool> --browser      Fallback: enter a token / URL in a local page (secrets never pass through the chat)
   aiw connect <jira|github|slack|teams|notion|figma> [--site --email --token-stdin --from-gh --user-id --webhook-stdin]
                                     Slack and work Teams always need an app token / webhook URL (no browser sign-in exists)
@@ -147,6 +149,9 @@ Daily use
   aiw approve <ticket> | reject <ticket> "reason" | answer [<ticket>] "answer" | run <ticket> | start <ticket|all>
   aiw cancel <ticket> | resume <ticket> | refresh <ticket> | pause [--until ISO] | resume-all
   aiw poll | cost [--days 7] | dashboard | statusline | uninstall [--purge]
+  aiw dashboard [--no-open]         Open the live dashboard in your browser (works only on this computer)
+  aiw bench [report]                Token and cost baseline: costly steps, agents and tickets
+  aiw bench runs | plan <tickets…> | compare <runA> <runB> | mark <runId> <ticket> yes|no
   aiw ask "question"                Ask the project assistant (same one that answers in Teams)
   aiw chat [--daily-tokens N] [--new]   Chat assistant budget / start a fresh conversation
 Add --json to any command for machine-readable output.`;
@@ -175,10 +180,43 @@ export async function main(argv: string[]): Promise<number> {
       return 0;
     }
     case "doctor": {
+      // "aiw doctor <project>": can this repository's tests run here? (Python/Node version, packages, .env names, database)
+      if (sub) return envDoctorCmd(sub, !!a.smoke, !!a.verbose, json);
       const checks = await doctor();
       progress("prereqs", checks.every((c) => c.ok || !c.required) ? "done" : "failed", checks.filter((c) => !c.ok).map((c) => c.name).join(", ") || undefined);
-      out(json ? checks : checks.map((c) => `${c.ok ? "OK  " : c.required ? "FAIL" : "WARN"}  ${c.name}${c.detail ? ` – ${c.detail}` : ""}`).join("\n"), json);
+      out(json ? checks : [checks.map((c) => `${c.ok ? "OK  " : c.required ? "FAIL" : "WARN"}  ${c.name}${c.detail ? ` – ${c.detail}` : ""}`).join("\n"),
+        loadProjects().length ? `\nCheck a project's local setup: aiw doctor <${loadProjects().map((p) => p.id).join("|")}>` : ""].join("\n").trimEnd(), json);
       return checks.some((c) => !c.ok && c.required) ? 1 : 0;
+    }
+    case "bench": {
+      const B = await import("../bench/benchmark.js");
+      if (!sub || sub === "report") {
+        const r = B.baselineReport(undefined, { since: str(a.since) });
+        out(json ? r : B.renderBaseline(r), json); return 0;
+      }
+      if (sub === "compare") {
+        const [x, y] = [third, a._[3]];
+        if (!x || !y) { out("Usage: aiw bench compare <runA> <runB>   (aiw bench runs lists them)", json); return 1; }
+        const c = B.compareRuns(x, y);
+        out(json ? c : B.renderComparison(c), json); return 0;
+      }
+      if (sub === "runs") {
+        const runs = B.listBenchmarkRuns();
+        out(json ? runs : runs.length ? runs.map((r) => `${r.runId}  v${r.version}  ${r.tickets} ticket(s)  ${B.fmtUsd(r.cost)}  ${r.createdAt}`).join("\n") : "No benchmark runs yet.", json); return 0;
+      }
+      if (sub === "plan") {
+        const tickets = a._.slice(2);
+        if (!tickets.length) { out("Usage: aiw bench plan KAN-40 KAN-52 …", json); return 1; }
+        const p = B.benchmarkPlan(tickets);
+        out(json ? p : p.text, json); return 0;
+      }
+      if (sub === "mark") {
+        const [run, ticket, verdict] = a._.slice(2);
+        if (!run || !ticket || !/^(yes|no)$/i.test(verdict ?? "")) { out("Usage: aiw bench mark <runId> <ticket> yes|no", json); return 1; }
+        const ok = B.markAccepted(run, ticket, /^yes$/i.test(verdict));
+        out(ok ? "Saved." : `No row for ${ticket} in run ${run}.`, json); return ok ? 0 : 1;
+      }
+      out("Usage: aiw bench [report|runs|plan <tickets…>|compare <runA> <runB>|mark <runId> <ticket> yes|no]", json); return 1;
     }
     case "service": {
       if (sub === "install") {
@@ -258,7 +296,8 @@ export async function main(argv: string[]): Promise<number> {
       if (p === "jira" && (a.oauth || !manual)) return connectJiraOAuth(a, json);
       if (p === "notion" && (a.oauth || !manual)) return connectNotionOAuth(a, json);
       if (p === "github" && !manual) return connectGitHubBrowser(a, json);
-      if (p === "figma" && (a.desktop || !manual)) return connectFigmaDesktop(a, json);
+      if (p === "figma" && a.desktop) return connectFigmaDesktop(a, json);
+      if (p === "figma" && !manual) return openConnectPage(p, json);       // a Figma token first: reads any file, app open or not
       if (a.browser) return openConnectPage(p, json);
       const secretFromStdin = a["token-stdin"] || a["webhook-stdin"] || a["bot-token-stdin"] ? await readStdin() : undefined;
       const res = await connect(p, {
@@ -761,8 +800,8 @@ async function connectFigmaDesktop(_a: Args, json: boolean): Promise<number> {
       "  1. Install and open the Figma desktop app (figma.com/downloads) and sign in.",
       "  2. Open a design file, switch to Dev Mode (Shift+D), and in the right panel click \"Enable desktop MCP server\"",
       "     (or Figma menu → Preferences → Enable Dev Mode MCP Server). Needs a Dev or Full seat.",
-      "  3. Run `aiw connect figma` again.",
-      "Fallback (reads any file, also when the app is closed): aiw connect figma --browser  (paste a personal access token)",
+      "  3. Run `aiw connect figma --desktop` again.",
+      "Recommended instead (reads any file, also when the app is closed): aiw connect figma  (paste a personal access token)",
     ].join("\n"), json);
     return 1;
   }
@@ -869,6 +908,21 @@ async function projectCmd(sub: string | undefined, id: string | undefined, a: Ar
   }
   out("Usage: aiw project add|list|show|set|remove", json);
   return 1;
+}
+
+/** "aiw doctor <project>": the environment doctor for one repository (always a fresh check, no cache). */
+async function envDoctorCmd(id: string, smoke: boolean, verbose: boolean, json: boolean): Promise<number> {
+  const p = getProject(id);
+  if (!p) { out(`No project "${id}". Projects: ${loadProjects().map((x) => x.id).join(", ") || "none – add one with aiw project add"}`, json); return 1; }
+  const E = await import("../engine/envDoctor.js");
+  const r = await E.checkEnvironment(p.local.path, { project: p, force: true, smoke });
+  if (json) { out(r, true); return r.ok ? 0 : 1; }
+  const lines = [E.envReport(r)];
+  if (verbose || !r.ok) {
+    for (const c of r.checks) lines.push(`${c.ok ? "OK  " : c.warn ? "WARN" : "FAIL"}  ${c.name}${c.detail ? ` – ${c.detail}` : ""}${!c.ok && c.fix ? `\n      Fix: ${c.fix}` : ""}`);
+  }
+  out(lines.join("\n"), false);
+  return r.ok ? 0 : 1;
 }
 
 interface Check { name: string; ok: boolean; required: boolean; detail?: string }

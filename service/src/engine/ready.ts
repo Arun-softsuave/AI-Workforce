@@ -5,6 +5,7 @@ import { audit } from "../core/db.js";
 import { truncate } from "../core/util.js";
 import { clients, isConnected } from "../connectors/registry.js";
 import { getRunner } from "../agents/runner.js";
+import { recordUsage } from "./tasks.js";
 import { AGENTS } from "../agents/catalog.js";
 import * as G from "../git/git.js";
 import { expandCheck } from "../brain/conventions.js";
@@ -62,7 +63,9 @@ async function checkTests(p: ProjectConfig): Promise<ReadyItem[]> {
   // the test profile (how this repository tests, which database it needs) – detected now instead of in the middle of a ticket
   const agent = async (name: string, prompt: string, opts: any = {}) => {
     const def = AGENTS[name];
-    return getRunner().run({ agent: name, tier: def.tier, system: def.system, schema: def.schema, prompt, maxBudgetUsd: 1, ...opts });
+    const r = await getRunner().run({ agent: name, tier: def.tier, system: def.system, schema: def.schema, prompt, maxBudgetUsd: 1, ...opts });
+    recordUsage(`ready:${p.id}`, r, { agent: name });
+    return r;
   };
   const prof = loadSettings().models.provider === "mock" ? profileOf(p) : await ensureProfile(p, agent);
   if (!prof.testCommand) return [{ area: "Tests", state: "warn", detail: "No test command found for this repository.", fix: `Set one: \`aiw project set ${p.id} --test-cmd "<command>"\`.` }];

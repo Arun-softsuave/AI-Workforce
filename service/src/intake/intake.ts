@@ -11,6 +11,7 @@ import { groupMembers, isGroupLead } from "../engine/routing.js";
 import { pollPrActivity, pollReviewedPrs } from "./prActivity.js";
 import { cancelTask } from "../engine/engine.js";
 import { notify } from "../notify/router.js";
+import { runTimed } from "../core/timers.js";
 
 /**
  * Event Gate (zero tokens): polls trackers, diffs against stored snapshots, emits idempotent events
@@ -288,14 +289,17 @@ export async function pollAll(): Promise<{ items: number; tasks: number; errors:
     try { const r = await pollJira(); items += r.items; tasks += r.tasks.length; } catch (e: any) { errors.push(`jira: ${e.message}`); logger.warn("jira poll failed", { error: e.message }); }
   }
   if (isConnected("github")) {
-    try { tasks += (await pollCi()).length; } catch (e: any) { errors.push(`github: ${e.message}`); logger.warn("ci poll failed", { error: e.message }); }
-    try { await pollPrActivity(); } catch (e: any) { logger.warn("PR activity poll failed", { error: e.message }); }
-    try { await pollReviewedPrs(); } catch (e: any) { logger.warn("reviewed PR poll failed", { error: e.message }); }
-    try { const { pollCiWatches } = await import("../engine/prFix.js"); await pollCiWatches(); } catch (e: any) { logger.warn("CI watch failed", { error: e.message }); }
+    // one "PR watcher" row on the dashboard for the PR polls; each poll keeps its own error handling
+    await runTimed("PR watcher", async () => {
+      try { tasks += (await pollCi()).length; } catch (e: any) { errors.push(`github: ${e.message}`); logger.warn("ci poll failed", { error: e.message }); }
+      try { await pollPrActivity(); } catch (e: any) { logger.warn("PR activity poll failed", { error: e.message }); }
+      try { await pollReviewedPrs(); } catch (e: any) { logger.warn("reviewed PR poll failed", { error: e.message }); }
+    }).catch(() => {});
+    try { const { pollCiWatches } = await import("../engine/prFix.js"); await runTimed("CI watch", () => pollCiWatches()); } catch (e: any) { logger.warn("CI watch failed", { error: e.message }); }
   }
   if (isConnected("jira")) {
     // open tickets by name, for Teams messages like "start the invite email task" (one search every 15 minutes)
-    try { const { refreshTicketIndex } = await import("./ticketIndex.js"); await refreshTicketIndex(); } catch (e: any) { logger.warn("ticket index refresh failed", { error: e.message }); }
+    try { const { refreshTicketIndex } = await import("./ticketIndex.js"); await runTimed("Ticket index", () => refreshTicketIndex()); } catch (e: any) { logger.warn("ticket index refresh failed", { error: e.message }); }
   }
   tasks += scheduleDigests().length;
   setMeta("last_poll", JSON.stringify({ at: nowIso(), items, tasks, errors }));

@@ -7,7 +7,8 @@ import { truncate, slugify } from "../core/util.js";
 import { audit } from "../core/db.js";
 import { logger } from "../core/log.js";
 import { type Runner, type AgentResult, untrusted } from "../agents/runner.js";
-import { AGENTS } from "../agents/catalog.js";
+import { AGENTS, effortFor, type Effort } from "../agents/catalog.js";
+import { compact as compactOutput, type CompactProfile } from "../agents/tools/compact.js";
 import { buildContextPack, proposeFacts, recordTaskMemory, refreshProject } from "../brain/brain.js";
 import { syncHandbookInto } from "../brain/handbook.js";
 import { loadCodeMap } from "../brain/codemap.js";
@@ -22,7 +23,7 @@ import { getSecret } from "../core/secrets.js";
 import { requestApproval, latestApproval, verifyBinding, decide } from "../approvals/approvals.js";
 import { notify, markInboxRead } from "../notify/router.js";
 import { checkBudget } from "./budget.js";
-import { mergeData, getTask, jiraKey, partsOf, createTask, transition, updateTask, type Task } from "./tasks.js";
+import { mergeData, getTask, jiraKey, partsOf, createTask, transition, updateTask, addStepUsage, type Task } from "./tasks.js";
 import { groupMembers, describeMembers, heuristicTargets } from "./routing.js";
 import { getPlaybook, stepIndex } from "./playbooks.js";
 import { branchNameFor, commitMessageFor, rulesBlock, prTemplateText, expandCheck } from "../brain/conventions.js";
@@ -31,7 +32,8 @@ import { captureScreenshots, screenshotsLine, withScreenshots } from "./screensh
 import { isPythonBackend, findPython, profileTestCommand, testEnvironment, testsNeedDatabase, testsForChange, withResults, testRunPassed } from "./localStack.js";
 import { ensureProfile, profileOf } from "./testProfile.js";
 
-export interface Usage { tokensIn: number; tokensOut: number; cost: number; agents: string[]; model?: string }
+/** tokensIn = freshIn + cacheRead + cacheWrite (the split is also written to the running step row call by call). */
+export interface Usage { tokensIn: number; tokensOut: number; cost: number; agents: string[]; model?: string; freshIn?: number; cacheRead?: number; cacheWrite?: number; effort?: string }
 
 export interface StepCtx {
   task: Task;
@@ -40,7 +42,11 @@ export interface StepCtx {
   runner: Runner;
   params: Record<string, any>;
   usage: Usage;
-  agent(name: string, prompt: string, opts?: { cwd?: string; dirs?: string[]; tools?: string[]; allow?: string[]; tier?: "small" | "medium" | "large"; maxTurns?: number; system?: string }): Promise<AgentResult>;
+  agent(name: string, prompt: string, opts?: { cwd?: string; dirs?: string[]; tools?: string[]; allow?: string[]; tier?: "small" | "medium" | "large"; maxTurns?: number; system?: string;
+    /** Default: the effort table (agents/catalog.ts), by ticket size for the implementer. */
+    effort?: Effort;
+    /** Compact run_tests / run_lint / git_diff_stat tools in the worktree (needs cwd). */
+    compact?: CompactProfile }): Promise<AgentResult>;
   save(patch: Record<string, any>): Task;
 }
 
@@ -74,15 +80,25 @@ export function makeAgentCaller(ctxRef: () => StepCtx) {
     if (tools?.some((t) => /^(Edit|Write|Bash)/.test(t)) && !opts.cwd) throw new Error(`${name}: refusing to run a writing agent without an isolated workspace`);
     // extra folders (other repositories) are only ever given to read-only agents
     if (opts.dirs?.length && [...(tools ?? []), ...(opts.allow ?? [])].some((t) => /^(Edit|Write|Bash)/.test(t))) throw new Error(`${name}: extra folders are read-only`);
+    const effort = opts.effort ?? effortFor(name, ctx.task.size, ctx.settings.cost?.effort);
     const r = await ctx.runner.run({
       agent: name, tier: opts.tier ?? def.tier, system: `${opts.system ?? def.system}\n\n${NO_ATTRIBUTION_RULE}`, prompt, schema: def.schema,
-      cwd: opts.cwd, additionalDirectories: opts.dirs, tools, allow: opts.allow, maxTurns: opts.maxTurns,
+      cwd: opts.cwd, additionalDirectories: opts.dirs, tools, allow: opts.allow, maxTurns: opts.maxTurns, effort,
+      compact: opts.cwd ? opts.compact : undefined,
       // the agents that understand and build the change may look up linked tickets, PRs, designs and pages (read-only)
       // code graph: a lead task may look at every repository of the product, a single task at its own
       lookup: LOOKUP_AGENTS.has(base) ? { repo: ctx.project.github?.repo, codeRepos: ctx.task.playbook === "dev-lead" ? groupMembers(ctx.project).map((m) => m.id) : [ctx.project.id] } : undefined,
     });
     ctx.usage.tokensIn += r.tokensIn; ctx.usage.tokensOut += r.tokensOut; ctx.usage.cost += r.costUsd;
     ctx.usage.agents.push(name); ctx.usage.model = r.model;
+    // fresh input vs prompt-cache reads / writes (a runner that doesn't split counts everything as fresh)
+    const cacheRead = r.cacheRead ?? 0, cacheWrite = r.cacheWrite ?? 0;
+    const freshIn = r.freshIn ?? Math.max(0, r.tokensIn - cacheRead - cacheWrite);
+    ctx.usage.freshIn = (ctx.usage.freshIn ?? 0) + freshIn;
+    ctx.usage.cacheRead = (ctx.usage.cacheRead ?? 0) + cacheRead;
+    ctx.usage.cacheWrite = (ctx.usage.cacheWrite ?? 0) + cacheWrite;
+    ctx.usage.effort = r.effort ?? effort ?? ctx.usage.effort;
+    addStepUsage(ctx.task.id, { freshIn, cacheRead, cacheWrite, effort: r.effort ?? effort });
     // keep the budget view current between calls
     ctx.task = { ...ctx.task, tokens_used: ctx.task.tokens_used + r.tokensIn + r.tokensOut, cost_usd: ctx.task.cost_usd + r.costUsd };
     if (!r.ok) throw new Error(`${name} agent failed: ${r.error ?? "unknown error"}`);
@@ -173,6 +189,43 @@ function testsLine(d: Record<string, any>): string {
 }
 const feedbackBlock = (t: Task) => (t.data.feedback?.length ? `\n## Human feedback from earlier review (must be addressed)\n${t.data.feedback.map((f: string) => `- ${f}`).join("\n")}` : "");
 
+/**
+ * Environment doctor before a build (W2 12a). With settings.workflow.untestedWork "pause", a repository whose tests
+ * can't run here stops the task as "Blocked: environment" with a short report – never a failed build. With "continue"
+ * (default) nothing is checked up front; the report is used later as the fix hint when the tests can't run.
+ */
+async function environmentGate(ctx: StepCtx): Promise<StepResult | undefined> {
+  if (ctx.settings.workflow.untestedWork !== "pause") return undefined;
+  const report = await environmentReport(ctx);
+  if (!report) {
+    if (ctx.task.data.blocked?.reason === "environment") ctx.save({ blocked: null });
+    return undefined;
+  }
+  ctx.save({ blocked: { reason: "environment", report, at: new Date().toISOString() } });
+  return { status: "pause", reason: `Blocked: environment. ${report}` };
+}
+
+/** The doctor's short report when this repository's tests can't run here, else undefined (cached 1 h; never throws). */
+async function environmentReport(ctx: StepCtx, force = false): Promise<string | undefined> {
+  const repo = ctx.project.local.path;
+  if (!repo || !fs.existsSync(repo)) return undefined;
+  try {
+    const { checkEnvironment, envReport } = await import("./envDoctor.js");
+    const env = await checkEnvironment(repo, { project: ctx.project, force });
+    return env.ok ? undefined : envReport(env);
+  } catch (e: any) {
+    logger.warn("environment check failed", { project: ctx.project.id, error: e.message });
+    return undefined;
+  }
+}
+
+/** The change itself for the reporter (it has no tools, so it can't read files): cut to keep the call small. */
+function reportDiff(ctx: StepCtx): string {
+  const wt = ctx.task.worktree, base = ctx.task.data.baseSha;
+  if (!wt || !base || !fs.existsSync(wt)) return "";
+  try { const diff = G.diffAgainst(wt, base); return diff.trim() ? `## The change (diff, may be cut)\n${untrusted("diff", truncate(diff, 12_000))}` : ""; } catch { return ""; }
+}
+
 function implementerAllow(testCmd?: string): string[] {
   const allow = ["Read", "Edit", "Write", "Glob", "Grep", "Bash(git status:*)", "Bash(git diff:*)", "Bash(ls:*)", "Bash(dir:*)"];
   if (testCmd) allow.push(`Bash(${testCmd}:*)`, `Bash(${testCmd})`);
@@ -203,7 +256,8 @@ async function runChecks(ctx: StepCtx, wt: string): Promise<{ ok: boolean; outpu
     if (!cmd) continue;
     ran.push(raw);
     const r = await G.runCommand(cmd, wt, 10 * 60_000);
-    if (r.code !== 0) return { ok: false, output: `$ ${raw}\n${truncate(r.output, 4000)}`, ran };
+    // only the errors with file:line (compact), not the whole log
+    if (r.code !== 0) return { ok: false, output: `$ ${raw}\n${compactOutput(r.output, r.code).text}`, ran };
   }
   return { ok: true, output: "", ran };
 }
@@ -720,6 +774,14 @@ export const STEPS: Record<string, StepFn> = {
     // Tests that cannot run on this computer don't stop the work: build anyway and say so clearly (settings.workflow.untestedWork).
     const testCmd = ctx.task.data.testsUnavailable ? undefined : testCommandOf(ctx);
     const loops = ctx.settings.limits.implementLoops;
+    if (testCmd) { const blocked = await environmentGate(ctx); if (blocked) return blocked; }
+    // compact test / lint / diff tools: the agent sees failures with file:line, never a full log (§9.1.2). A suite that
+    // needs a temporary database is run by the plugin, so run_tests is not offered for it.
+    const safeOnly = isSafeTestsOnly(ctx);
+    const compactProfile: CompactProfile = {
+      testCommand: safeOnly ? undefined : testCmd, testFiles: profileOf(ctx.project).testFiles,
+      lintCommands: ctx.project.conventions?.checks ?? [], base: ctx.task.data.baseSha,
+    };
     let lastFailure = "";
     for (let i = 1; i <= loops; i++) {
       const unavailable = ctx.task.data.testsUnavailable;
@@ -733,12 +795,12 @@ export const STEPS: Record<string, StepFn> = {
         unavailable
           ? `## Tests\nThe tests CANNOT run on this computer (${unavailable.reason}). Still add or update focused tests in the project's test structure, and check your change and the tests very carefully by reading the code. Do not try to run them.`
           : testCmd && isSafeTestsOnly(ctx) ? "## Tests\nAdd or update focused tests in the project's test structure. Do NOT run the test suite yourself: it needs a temporary database that I set up – I run the tests after your change and give you the output if they fail."
-          : testCmd ? `## Test command\n${testCmd}` : "## Tests\nNo test command detected – add focused tests where the project has a test structure.",
+          : testCmd ? `## Test command\nRun the tests with the run_tests tool (pass the test files for your change). The command it runs: ${testCmd}` : "## Tests\nNo test command detected – add focused tests where the project has a test structure.",
         lastFailure ? `## Previous attempt failed – fix this\n${untrusted("test-output", truncate(lastFailure, 6000))}` : "",
       ].filter(Boolean).join("\n\n");
       ctx.save({ implementAttempt: i, implementLoops: loops });
       // a Python backend's tests need a temporary database the agent cannot set up – the plugin runs them instead
-      const r = await ctx.agent("implementer", prompt, { cwd: wt, allow: implementerAllow(isSafeTestsOnly(ctx) ? undefined : testCmd), maxTurns: 60 });
+      const r = await ctx.agent("implementer", prompt, { cwd: wt, allow: implementerAllow(safeOnly ? undefined : testCmd), maxTurns: 60, compact: compactProfile });
       const asked = normaliseQuestions(r.data.questions, 3);
       if (asked.length) {
         // Keep the work done so far (committed in the task branch), then ask instead of guessing.
@@ -763,14 +825,16 @@ export const STEPS: Record<string, StepFn> = {
       // The test command itself could not run here (missing Python, database or Docker…): that says nothing about the code.
       const env = t.envError ? `no safe test database – ${t.envError}` : environmentFailure(t.output);
       if (env && ctx.settings.workflow.untestedWork !== "pause") {
-        markUntested(ctx, `the test command could not run here (${env})`);
+        markUntested(ctx, `the test command could not run here (${env})`, await environmentReport(ctx, true));
         ctx.save({ implementation: r.data, tests: { ran: false, unavailable: ctx.task.data.testsUnavailable.reason }, checks: checks.ran });
         return { status: "ok", note: `not tested on this computer: ${env}` };
       }
       // flaky check: re-run once before spending another AI round
       const again = await runTests(ctx, testCmd, wt);
       if (again.code === 0) { ctx.save({ implementation: r.data, tests: { ran: true, passed: true, attempts: i, flaky: true }, checks: checks.ran }); return { status: "ok", note: "tests passed on re-run (flaky)" }; }
-      lastFailure = failingSection(t.output);
+      // only the failures with file:line (about 1.5 KB) when the output is recognised; else the failing section
+      const c = compactOutput(t.output, t.code);
+      lastFailure = c.failures.length ? c.text : truncate(failingSection(t.output), 4000);
     }
     ctx.save({ tests: { ran: true, passed: false, lastFailure: truncate(lastFailure, 3000) } });
     return { status: "fail", reason: `Tests or project checks still failing after ${loops} attempts` };
@@ -881,7 +945,8 @@ export const STEPS: Record<string, StepFn> = {
       template ? `## The team's PR template – the body MUST follow it: keep every heading and checkbox, fill each section, tick only boxes that are true\n${template}` : "",
       ticketBlock(ctx.task), `## Plan\n${json(d.plan ?? {})}`, `## Implementation\n${json(d.implementation ?? {})}`,
       `## Tests\n${json(d.tests ?? {})}`, `## Reviews\n${json(d.reviews ?? {})}`, `## Changed files\n${(d.changedFiles ?? []).join("\n")}`,
-    ].join("\n\n"));
+      reportDiff(ctx),
+    ].filter(Boolean).join("\n\n"));
     const reviewLine = Object.entries(d.reviews ?? {}).map(([k, v]: any) => `${k} ${v.pass ? "OK" : "issues"}`).join(", ");
     const checksLine = (d.checks ?? []).length ? `**Project checks:** ${d.checks.join(" · ")} – passed` : "";
     const appendix = [

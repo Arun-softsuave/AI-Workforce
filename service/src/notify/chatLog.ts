@@ -1,5 +1,6 @@
 import { db, getMeta, setMeta, delMeta } from "../core/db.js";
 import { nowIso, truncate } from "../core/util.js";
+import { publish } from "../live/bus.js";
 
 /**
  * The Teams conversation, both directions: what AI Workforce sent (questions, plans, results, chat replies) and what
@@ -31,6 +32,7 @@ export function logChat(direction: "in" | "out", text: string, opts: { kind?: st
     if (opts.taskRef && !refs.includes(opts.taskRef)) refs.unshift(opts.taskRef);
     db().prepare("INSERT INTO chat_log (ts, direction, kind, text, task_ref, refs) VALUES (?,?,?,?,?,?)")
       .run(nowIso(), direction, opts.kind ?? null, truncate(text, 8000), opts.taskRef ?? null, JSON.stringify(refs));
+    publish("feed", { at: nowIso(), tone: direction === "in" ? "wait" : "work", text: `${direction === "in" ? "You" : "Sent you"}: ${truncate(text.replace(/\s+/g, " "), 140)}`, ref: opts.taskRef });
   } catch { /* history is best effort – never block a message */ }
 }
 

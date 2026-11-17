@@ -6,6 +6,7 @@ import { db, audit } from "../core/db.js";
 import { getProject, loadSettings, type ProjectConfig } from "../core/config.js";
 import { addFact, type HandbookFile } from "./handbook.js";
 import { getRunner, untrusted } from "../agents/runner.js";
+import { recordUsage } from "../engine/tasks.js";
 import { AGENTS } from "../agents/catalog.js";
 
 /**
@@ -144,5 +145,6 @@ async function extractFacts(title: string, text: string): Promise<{ file: string
     agent: "doc-reader", tier: def.tier, system: def.system, schema: def.schema,
     prompt: `Document: ${title}\n\n${untrusted(`document:${title}`, truncate(text, 60_000))}`,
   });
+  recordUsage("brain:documents", r, { agent: "doc-reader" });
   return r.ok ? (r.data?.facts ?? []) : [];
 }

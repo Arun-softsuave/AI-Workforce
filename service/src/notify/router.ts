@@ -4,6 +4,7 @@ import { newId, nowIso, inTimeWindow, redactSecrets } from "../core/util.js";
 import { logger } from "../core/log.js";
 import { senders, ACTION_KINDS, type Notice, type Sender } from "./channels.js";
 import { getTask, mergeData } from "../engine/tasks.js";
+import { publish } from "../live/bus.js";
 
 /**
  * Notification Router (PRD §8):
@@ -38,6 +39,11 @@ export async function notify(n: Notice, now = new Date()): Promise<{ delivered: 
   // 1. Inbox: always for action-needed items, and as an activity record for others.
   const inboxKey = `${n.kind}:${n.taskId ?? "-"}:${n.dedupeKey ?? ""}:inbox`;
   insertRow(n, "inbox", inboxKey, action ? "unread" : "read");
+  try {
+    const tone = n.kind === "approval_needed" || n.kind === "needs_info" ? "you" : n.kind === "failed" || n.kind === "paused" ? "bad" : n.kind === "done" ? "ok" : "work";
+    publish("feed", { at: nowIso(), tone, text: n.title, ref: n.taskRef, taskId: n.taskId });
+    if (action) publish("needs", { taskId: n.taskId });
+  } catch { /* live view only */ }
 
   // 2. External channels.
   const quiet = inTimeWindow(s.notifications.quietHours, now, s.profile.timezone) && !n.urgent;

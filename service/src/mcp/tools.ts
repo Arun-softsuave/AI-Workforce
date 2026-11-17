@@ -139,4 +139,25 @@ server.registerTool("aiw_jira_search", {
 server.registerTool("aiw_cost", { description: "Token usage and cost by project, day and task.", inputSchema: { days: z.number().optional() } },
   async ({ days }) => text(cost(days ?? 7)));
 
+server.registerTool("aiw_bench_report", {
+  description: "Token and cost baseline: the costliest steps, agents and tickets. With runA and runB, compares two benchmark runs ticket by ticket (lower is better; regressions are marked).",
+  inputSchema: { runA: z.string().optional(), runB: z.string().optional() },
+}, async ({ runA, runB }) => {
+  const B = await import("../bench/benchmark.js");
+  if (runA && runB) return text(B.renderComparison(B.compareRuns(runA, runB)));
+  return text(B.renderBaseline(B.baselineReport()));
+});
+
+server.registerTool("aiw_doctor", {
+  description: "Environment doctor for one project: can its tests run on this computer? Checks Python/Node versions, the virtual environment and packages, .env key names (never values), the database and docker-compose services. Returns a short report and how to fix each problem.",
+  inputSchema: { project: z.string(), smoke: z.boolean().optional() },
+}, async ({ project, smoke }) => {
+  const { getProject, loadProjects } = await import("../core/config.js");
+  const p = getProject(project);
+  if (!p) return text(`No project ${project}. Projects: ${loadProjects().map((x) => x.id).join(", ") || "none"}`);
+  const E = await import("../engine/envDoctor.js");
+  const r = await E.checkEnvironment(p.local.path, { project: p, force: true, smoke: !!smoke });
+  return text({ ok: r.ok, report: E.envReport(r), checks: r.checks });
+});
+
 await server.connect(new StdioServerTransport());

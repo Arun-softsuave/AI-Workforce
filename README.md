@@ -32,13 +32,17 @@ Testers: see **QUICKSTART.md** for install, onboarding, the Teams bot and a test
 | Background service (autostart at login, no admin) | `aiw service install` |
 | Model access | `aiw model --provider claude-login` (your Claude Code login) · `--provider claude --key-stdin` (API key) · `--provider mock` (offline dry run) |
 | Profile & roles | `aiw profile --name "Asha" --roles backend-developer,qa-engineer --tz Asia/Kolkata` |
-| Connectors (browser sign-in, no tokens) | `aiw connect jira` (Atlassian sign-in) · `aiw connect github` (one-time code) · `aiw connect notion` (Notion sign-in) · `aiw connect figma` (Figma desktop app, no sign-in) |
+| Connectors (browser sign-in, no tokens) | `aiw connect jira` (Atlassian sign-in) · `aiw connect github` (one-time code) · `aiw connect notion` (Notion sign-in) |
+| Figma (token first – stays connected when the app is closed) | `aiw connect figma --browser` (personal access token in the local page) · optional: `aiw connect figma` (Figma desktop app) |
 | Connectors that need an app token / URL | `aiw connect slack --browser` · `aiw connect teams --browser` – these services offer no browser sign-in for outside apps |
 | Teams (two-way bot) | `aiw connect teams-personal --bot` – sign in with a separate personal Microsoft account that acts as the bot |
 | Notifications | `aiw notify --primary teams-personal --fallback desktop,inbox` then `aiw notify test` |
 | Project | `aiw project add --id payment-service --path D:/work/payment-service --jira-keys PAY --autonomy prepare` |
 | Product documents | `aiw brain add-doc payment-service "D:/docs/PRD.pdf"` (.pdf .docx .md .txt, `--private` keeps it out of the repo) |
 | Brain | `aiw brain onboard payment-service` → review `.ai-workforce/knowledge/` → `aiw brain confirm payment-service` |
+| Team and reviewers | `aiw team detect payment-service` → `aiw team add --github LOGIN --name "Name"` → `aiw team reviewers payment-service --codeowners` |
+| Preferences | `aiw prefs` (e.g. `--draft-pr no --auto-fix-ci yes --plan-approval ask`) |
+| Ready check | `aiw ready` (or `aiw ready payment-service`) |
 | Go live | `aiw live` |
 
 `--browser` opens a page served by the local service (127.0.0.1, session token), so secrets go straight to the OS
@@ -104,6 +108,16 @@ reply ("1", "yes", "no, use X") goes to the item the bot asked about last, even 
 check the code and decide" leaves the decision to the agent (it says what it chose in the plan). An unclear message gets
 one short question ("Do you mean KAN-52 (…) or KAN-35 (…)?") instead of a list. When you ask about a waiting question, the
 assistant answers from the code and offers to send that answer to the task with one "yes".
+
+## What's new in 0.7 / 0.8
+
+- **Normal PRs** – pull requests are raised ready for review, not as drafts (`aiw prefs --draft-pr yes` to change).
+- **CI fixed without asking** – failing CI and lint checks on the plugin's PRs are fixed and pushed straight away (`aiw prefs --auto-fix-ci no` to see them first). Review-comment fixes and QA issues are still shown in Teams first.
+- **Reviewers** – `aiw team detect` / `aiw team reviewers`: reviews are requested from CODEOWNERS or a fixed list, never from the PR author.
+- **Tickets by name** – in Teams, "start the invite email task" finds the ticket (`aiw tickets find "invite email"`).
+- **Rules card** – a short card of the team's own rules (branch and commit style, docstring style, test layout, CI checks, files never to commit) that every coding, review and fix step follows.
+- **Ready check** – `aiw ready` finds on day one what would fail mid-ticket: push access, lint tools, test runner and test database, screenshots, CI.
+- **Coming:** a new dashboard, and a deeper environment check under `aiw doctor`.
 
 ## Fixing a failed pull request's CI (0.6.7)
 

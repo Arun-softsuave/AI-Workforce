@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="referrer" content="no-referrer">
+<meta name="aiw-token" content="__AIW_TOKEN__">
+<title>AI Workforce</title>
+<link rel="stylesheet" href="/web/app.css">
+<script src="/web/app.js" defer></script>
+</head>
+<body>
+<div class="app">
+  <aside class="side" aria-label="Main navigation">
+    <div class="brand"><div class="mark">AW</div><div><b>AI Workforce</b><small class="mono" id="hostLbl"></small></div></div>
+    <nav class="nav" id="nav"></nav>
+    <div class="side-foot">
+      <button class="ghost" id="pauseBtn" type="button"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></svg><span>Pause new work</span></button>
+      <button class="ghost" id="themeBtn" type="button"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M21 13A9 9 0 1 1 11 3a7 7 0 0 0 10 10z"/></svg><span>Switch theme</span></button>
+    </div>
+  </aside>
+
+  <main>
+    <div class="wrap">
+      <nav class="mobile-nav" id="mnav" aria-label="Sections"></nav>
+      <div class="top">
+        <h1 id="viewTitle">Overview</h1>
+        <span class="badge" id="mockBadge" hidden>Test model</span>
+        <span class="sp"></span>
+        <span class="clock" id="clock" aria-live="polite"></span>
+        <button class="btn sm mobile-only" id="pauseBtnM" type="button">Pause</button>
+        <button class="btn sm mobile-only" id="themeBtnM" type="button" aria-label="Switch theme">Theme</button>
+        <button class="btn" id="tourBtn" type="button"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M9.5 9a2.5 2.5 0 1 1 3.5 2.3c-.6.3-1 .9-1 1.6V14M12 17.5v.01"/></svg>How to use</button>
+      </div>
+      <div id="pausedBar" class="paused-bar" hidden><span>New work is paused. Running tasks finish their current step, then wait.</span><button class="btn sm" id="resumeBtn" type="button">Resume</button></div>
+      <div id="errorBar" class="error-bar" hidden></div>
+      <div id="view"><div class="empty">Loading…</div></div>
+    </div>
+  </main>
+</div>
+
+<div id="scrim" class="scrim" hidden></div>
+<aside id="drawer" class="drawer" hidden aria-label="Ticket details"></aside>
+<div id="tour" class="tour" hidden role="dialog" aria-live="polite"></div>
+<div id="toast" class="toast" hidden role="status"></div>
+</body>
+</html>

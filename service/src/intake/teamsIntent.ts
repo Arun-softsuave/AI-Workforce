@@ -5,7 +5,7 @@ import { truncate } from "../core/util.js";
 import { normaliseQuestions, formatChoices, optionNumber, plainNumbers } from "../core/questions.js";
 import { getRunner, untrusted } from "../agents/runner.js";
 import { AGENTS } from "../agents/catalog.js";
-import { listTasks, getTask, type Task } from "../engine/tasks.js";
+import { listTasks, getTask, recordUsage, type Task } from "../engine/tasks.js";
 import { latestApproval, type Approval } from "../approvals/approvals.js";
 import { decideAndApply, answerTask, cancelTask, startAwaiting, resumeTask, tick } from "../engine/engine.js";
 import { createRequest, resolveProduct } from "../engine/requests.js";
@@ -318,6 +318,7 @@ async function aiIntent(text: string, p: Pending): Promise<Intent | undefined> {
   try {
     const r = await getRunner().run({ agent: "intent", tier: def.tier, system: def.system, schema: def.schema, maxTurns: 2,
       prompt: `${context}\n\nThe message:\n${untrusted("teams-message", truncate(text, 2000))}` });
+    recordUsage("teams:intent", r, { agent: "intent" });
     if (!r.ok || !r.data?.intent) return undefined;
     const one = (x: any): Intent => {
       const refs = Array.isArray(x.refs) ? x.refs.map((k: string) => ticketKeyIn(String(k))).filter((k: string | undefined): k is string => !!k) : [];

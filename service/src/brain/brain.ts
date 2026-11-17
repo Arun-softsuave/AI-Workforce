@@ -10,6 +10,7 @@ import { buildCodeMap, loadCodeMap, findInMap, mapSummary, type CodeMap } from "
 import { readDoc, setNarrative, addFact, activeFacts, setFactStatus, readHandbook, type HandbookFile } from "./handbook.js";
 import { rebuildIndex, searchBrain, queryTerms, writeDiary, indexDiaryEntry } from "./index.js";
 import { getRunner, untrusted } from "../agents/runner.js";
+import { recordUsage } from "../engine/tasks.js";
 import { AGENTS } from "../agents/catalog.js";
 import { git } from "../git/git.js";
 import { listDocuments } from "./docs.js";
@@ -54,6 +55,7 @@ export async function onboardProject(projectId: string, opts: { useAi?: boolean;
       agent: "onboarder", tier: def.tier, system: def.system, schema: def.schema, cwd: repo,
       tools: def.tools, maxTurns: incremental ? 12 : 20, maxBudgetUsd: incremental ? 1 : 2, prompt,
     });
+    recordUsage(`brain:${projectId}`, r, { agent: "onboarder" });
     tokens = r.tokensIn + r.tokensOut;
     if (r.ok && r.data) {
       const d = r.data;

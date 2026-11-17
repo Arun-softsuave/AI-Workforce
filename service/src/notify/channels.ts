@@ -3,7 +3,8 @@ import { execFile } from "node:child_process";
 import { slackPost, slackOpenDm } from "../connectors/slack.js";
 import { teamsPost } from "../connectors/teams.js";
 import { connectionMeta, isConnected } from "../connectors/registry.js";
-import { teamsPersonal, NOTES_CHAT, AIW_PREFIX } from "../connectors/teamsPersonal.js";
+import { teamsPersonal, NOTES_CHAT, AIW_PREFIX, type TpSent } from "../connectors/teamsPersonal.js";
+import { recordSent } from "../intake/teamsMessage.js";
 import { db } from "../core/db.js";
 import type { Channel } from "../core/config.js";
 import { formatQuestions, formatChoices, type Question } from "../core/questions.js";
@@ -73,6 +74,13 @@ export function chatText(n: Notice): string {
   return blocks.join("\n\n").replace(/\n{3,}/g, "\n\n").trim();
 }
 
+/** Which question a message asks: the approval id, or the question's dedupe key. Null for plain updates. */
+export function questionKeyOf(n: Notice): string | null {
+  if (n.approvalId) return n.approvalId;
+  if (n.kind === "needs_info" || n.questions?.length) return `q:${n.dedupeKey ?? n.taskId ?? n.taskRef ?? ""}`;
+  return null;
+}
+
 export interface Sender { send(n: Notice, threadRef?: string): Promise<string | undefined> }
 
 export const ACTION_KINDS = new Set(["needs_info", "approval_needed", "failed", "paused", "burst", "connector_problem", "stale", "pr_changes_requested"]);
@@ -126,9 +134,12 @@ export const senders: Record<Exclude<Channel, "inbox">, Sender> = {
       const text = chatText(n);
       // In bot mode the sender's name already says who it is; in your own Notes chat EVERY part carries the prefix,
       // so our own messages are never read back as your commands.
-      for (const part of splitMessage(text)) await client.sendMessage(chat, meta.mode === "bot" ? part : `${AIW_PREFIX}\n${part}`);
+      const sent: { part: string; r: TpSent | undefined }[] = [];
+      for (const part of splitMessage(text)) sent.push({ part, r: await client.sendMessage(chat, meta.mode === "bot" ? part : `${AIW_PREFIX}\n${part}`) });
       // remember the conversation: a reply like "1" or "you decide" is about the last thing we asked
       logChat("out", text, { kind: n.kind, taskRef: n.taskRef });
+      // remember each part's Teams id, so a quote of this message later goes back to this item and question
+      for (const { part, r } of sent) recordSent({ msgId: r?.messageId ?? r?.id ?? null, clientMsgId: r?.clientmessageid ?? null, itemId: n.taskRef ?? null, questionKey: questionKeyOf(n), text: part });
       if (n.taskRef && ["needs_info", "approval_needed", "burst", "paused", "failed", "stale"].includes(n.kind)) setFocus(n.taskRef);
       return undefined;
     },

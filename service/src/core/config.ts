@@ -9,7 +9,19 @@ export type Size = "S" | "M" | "L";
 
 export interface Settings {
   profile: { name: string; timezone?: string; workingHours: string; roles: string[] };
-  models: { provider: "claude" | "claude-login" | "mock"; small: string; medium: string; large: string };
+  /** fallback: the model used when the chosen one is overloaded (default: the next tier's model). */
+  models: { provider: "claude" | "claude-login" | "mock"; small: string; medium: string; large: string; fallback?: string };
+  /** Cost controls for every agent call (see agents/catalog.ts for the per-agent effort and turn tables). */
+  cost: {
+    /** Upper limit in USD for ONE agent call (generous: it only stops a run that has gone badly wrong). */
+    maxBudgetUsd: number;
+    /** Tell the model its token budget so it paces itself (alpha in the SDK; off by default). */
+    taskBudget: boolean;
+    /** Token budget per call by tier, used only when taskBudget is on. */
+    taskBudgetTokens: Record<Tier, number>;
+    /** Override the effort of one agent, e.g. { reviewer: "low" }. */
+    effort?: Record<string, "low" | "medium" | "high" | "xhigh" | "max">;
+  };
   limits: {
     maxParallel: number; maxPerProject: number; burstThreshold: number;
     pollMinutes: number; pollMinutesOffHours: number; askBeforeStart: Size[];
@@ -90,6 +102,7 @@ export interface ProjectConfig {
 export const DEFAULT_SETTINGS: Settings = {
   profile: { name: "", workingHours: "09:00-18:00", roles: [] },
   models: { provider: "claude", small: "claude-haiku-5-5", medium: "claude-sonnet-5-5", large: "claude-opus-5-5" },
+  cost: { maxBudgetUsd: 25, taskBudget: false, taskBudgetTokens: { small: 60_000, medium: 300_000, large: 600_000 } },
   limits: {
     maxParallel: 3, maxPerProject: 2, burstThreshold: 5, pollMinutes: 3, pollMinutesOffHours: 3,
     askBeforeStart: ["L"], implementLoops: 3, reviewRounds: 2, maxDiffLines: 1500,

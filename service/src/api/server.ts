@@ -11,6 +11,9 @@ import { markInboxRead } from "../notify/router.js";
 import { runTicket, pollAll } from "../intake/intake.js";
 import { askBrain, brainSummary, onboardProject, confirmBrain, refreshProject } from "../brain/brain.js";
 import { dashboardHtml, connectHtml } from "./dashboard.js";
+import { dashboardRoutes, overviewSnapshot } from "./dashboardData.js";
+import { handleStream } from "./stream.js";
+import { webPage, webAsset, webHeaders } from "./web.js";
 
 /**
  * Local API + dashboard. Bound to 127.0.0.1 only. Every /api call needs the X-AIW-Token header
@@ -69,6 +72,17 @@ r("POST", /^\/api\/connect\/([a-z]+)$/, async (m, b) => {
 });
 r("DELETE", /^\/api\/connect\/([a-z]+)$/, (m) => { disconnect(m[1] as Provider); return { ok: true }; });
 r("GET", /^\/api\/slack-manifest$/, () => SLACK_APP_MANIFEST);
+r("GET", /^\/api\/bench$/, async () => { const B = await import("../bench/benchmark.js"); return { text: B.renderBaseline(B.baselineReport()) }; });
+r("GET", /^\/api\/projects\/([^/]+)\/env$/, async (m, _b, u) => {
+  const { getProject } = await import("../core/config.js");
+  const p = getProject(decodeURIComponent(m[1]));
+  if (!p) throw new HttpErr(404, "project not found");
+  const E = await import("../engine/envDoctor.js");
+  const res = await E.checkEnvironment(p.local.path, { project: p, force: true, smoke: u.searchParams.get("smoke") === "1" });
+  return { ...res, report: E.envReport(res) };
+});
+// Live dashboard data (read-only): overview, needs, working, board, timeline, agents, timers, connections, feed
+for (const [m, re, h] of dashboardRoutes) r(m, re, h);
 
 class HttpErr extends Error { constructor(public status: number, msg: string) { super(msg); } }
 
@@ -84,9 +98,25 @@ export function startApiServer(port: number, token: string): Promise<{ server: h
       // Pages: the token is passed once in the query string by the CLI ("aiw dashboard").
       if (req.method === "GET" && (url.pathname === "/" || url.pathname.startsWith("/connect/"))) {
         if (url.searchParams.get("t") !== token) return send(401, "<h1>Open the dashboard with <code>aiw dashboard</code></h1>", "text/html");
-        if (url.pathname === "/") return send(200, dashboardHtml(token), "text/html");
+        if (url.pathname === "/") {
+          const html = webPage(token);                         // the live dashboard (service/web); old page if it is missing
+          if (!html) return send(200, dashboardHtml(token), "text/html");
+          res.writeHead(200, webHeaders("text/html; charset=utf-8"));
+          return res.end(html);
+        }
         return send(200, connectHtml(url.pathname.split("/")[2], token), "text/html");
       }
+      // Static files of the dashboard (scripts, styles): no data in them, so no token (a <script src> cannot send one).
+      if (req.method === "GET" && url.pathname.startsWith("/web/")) {
+        const host = String(req.headers.host ?? "");
+        if (!/^(127\.0\.0\.1|localhost)(:\d+)?$/.test(host)) return send(403, { error: "bad host" });
+        const a = webAsset(url.pathname);
+        if (!a) return send(404, { error: "not found" });
+        res.writeHead(200, webHeaders(a.type));
+        return res.end(a.body);
+      }
+      // Live updates (Server-Sent Events): EventSource cannot send headers, so the stream checks ?t= itself.
+      if (req.method === "GET" && url.pathname === "/api/stream") { handleStream(req, res, token, { snapshot: overviewSnapshot }); return; }
       if (!url.pathname.startsWith("/api/")) return send(404, { error: "not found" });
       if (req.headers["x-aiw-token"] !== token) return send(401, { error: "missing or invalid session token" });
       const host = String(req.headers.host ?? "");
@@ -99,7 +129,7 @@ export function startApiServer(port: number, token: string): Promise<{ server: h
       send(404, { error: "no such endpoint" });
     } catch (e: any) {
       logger.error("api error", { path: url.pathname, error: e.message });
-      send(e instanceof HttpErr ? e.status : 500, { error: e.message });
+      send(typeof e?.status === "number" ? e.status : 500, { error: e.message });
     }
   });
   return new Promise((resolve, reject) => {
