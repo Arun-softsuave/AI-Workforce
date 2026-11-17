@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
-import { httpJson, truncate } from "../core/util.js";
+import { httpJson, truncate, sha256, HttpError } from "../core/util.js";
+import { getMeta, setMeta } from "../core/db.js";
 import { getSecret } from "../core/secrets.js";
 import type { CiRun, ConnectionTest } from "./types.js";
 
@@ -49,7 +50,24 @@ export interface GitHubClient {
   searchIssues?(repo: string, text: string): Promise<{ number: number; title: string; url: string; state: string }[]>;
   getIssue?(repo: string, num: number): Promise<{ number: number; title: string; body: string; url: string; state: string; author: string }>;
   commentOnIssue?(repo: string, num: number, body: string): Promise<{ url: string }>;
+  /** Conditional GET (ETag / 304) of an API path such as "/repos/o/r/pulls?state=open": a 304 costs no rate limit. */
+  getCached?<T = any>(path: string): Promise<Conditional<T>>;
+  /** Re-run one Actions job (a flaky check, once). */
+  rerunJob?(repo: string, jobId: number): Promise<{ ok: boolean }>;
+  /** Re-run the failed jobs of one Actions workflow run. */
+  rerunFailedJobs?(repo: string, runId: number): Promise<{ ok: boolean }>;
+  /** Whether a PR can be merged. mergeable null = GitHub is still working it out (ask again later). */
+  mergeable?(repo: string, num: number): Promise<MergeableInfo>;
+  /** PRs and commits in these repositories that mention a Jira key (title, description or commit message). */
+  searchByKey?(repos: string[], key: string): Promise<{ prs: PrRefInfo[]; commits: CommitRef[] }>;
+  /** Change the base branch of a PR (stacked work after its parent merged). */
+  retargetPr?(repo: string, num: number, base: string): Promise<{ number: number; url: string; base: string }>;
 }
+
+/** Result of a conditional GET: status 304 means `data` is the cached body and `changed` is false. */
+export interface Conditional<T = any> { status: number; data: T; changed: boolean; etag?: string }
+export interface MergeableInfo { mergeable: boolean | null; state: string; headSha: string; baseRef: string; baseSha: string; prState: string; merged: boolean }
+export interface CommitRef { repo: string; sha: string; message: string; url: string; author: string; date: string }
 
 export interface PrRefInfo { repo: string; number: number; title: string; url: string; author: string; state: string; headRef?: string; updated?: string }
 export interface ReviewThread {
@@ -293,10 +311,122 @@ export function createGitHubClient(token?: string): GitHubClient | undefined {
       ];
       return out.sort((a, b) => a.at.localeCompare(b.at));
     },
+    getCached<T = any>(path: string) { return conditionalGet<T>(`${API}${path}`, headers); },
+    async rerunJob(repo, jobId) {
+      await gh(`/repos/${repo}/actions/jobs/${jobId}/rerun`, { method: "POST", retries: 0 } as RequestInit);
+      return { ok: true };
+    },
+    async rerunFailedJobs(repo, runId) {
+      await gh(`/repos/${repo}/actions/runs/${runId}/rerun-failed-jobs`, { method: "POST", retries: 0 } as RequestInit);
+      return { ok: true };
+    },
+    async mergeable(repo, num) {
+      const p = (await conditionalGet<any>(`${API}/repos/${repo}/pulls/${num}`, headers)).data;
+      return {
+        mergeable: p.mergeable === true ? true : p.mergeable === false ? false : null, state: String(p.mergeable_state ?? "unknown"),
+        headSha: p.head?.sha ?? "", baseRef: p.base?.ref ?? "", baseSha: p.base?.sha ?? "", prState: p.state ?? "", merged: !!p.merged,
+      };
+    },
+    async searchByKey(repos, key) {
+      const k = key.trim().toUpperCase();
+      if (!/^[A-Z][A-Z0-9]+-\d+$/.test(k) || !repos.length) return { prs: [], commits: [] };
+      const scope = repos.map((r) => `repo:${r}`).join(" ");
+      const hit = mentionsKey(k);
+      const [prRes, commitRes] = await Promise.all([
+        gh(`/search/issues?per_page=50&sort=updated&q=${encodeURIComponent(`${k} is:pr ${scope}`)}`).catch(() => ({ items: [] })),
+        gh(`/search/commits?per_page=50&sort=committer-date&q=${encodeURIComponent(`${k} ${scope}`)}`).catch(() => ({ items: [] })),
+      ]);
+      const prs: PrRefInfo[] = (prRes.items ?? [])
+        .filter((i: any) => hit(`${i.title ?? ""}\n${i.body ?? ""}`))
+        .map((i: any) => ({
+          repo: String(i.repository_url ?? "").split("/repos/")[1] ?? "", number: i.number, title: i.title, url: i.html_url,
+          author: i.user?.login ?? "", state: i.pull_request?.merged_at ? "merged" : i.state, updated: i.updated_at,
+        }));
+      const commits: CommitRef[] = (commitRes.items ?? [])
+        .filter((c: any) => hit(c.commit?.message ?? ""))
+        .map((c: any) => ({
+          repo: c.repository?.full_name ?? "", sha: c.sha, message: String(c.commit?.message ?? "").split("\n")[0], url: c.html_url,
+          author: c.author?.login ?? c.commit?.author?.name ?? "", date: c.commit?.committer?.date ?? c.commit?.author?.date ?? "",
+        }));
+      return { prs, commits };
+    },
+    async retargetPr(repo, num, base) {
+      const r = await gh(`/repos/${repo}/pulls/${num}`, { method: "PATCH", body: JSON.stringify({ base }) });
+      return { number: r.number, url: r.html_url, base: r.base?.ref ?? base };
+    },
     gitAuthHeader() {
       return "AUTHORIZATION: basic " + Buffer.from(`x-access-token:${token}`).toString("base64");
     },
   };
+}
+
+/** Does this text name the Jira key exactly (KAN-45, not KAN-450 or XKAN-45)? Case-insensitive. */
+export function mentionsKey(key: string): (text: string) => boolean {
+  const re = new RegExp(`(^|[^A-Za-z0-9])${key.replace(/[^A-Za-z0-9-]/g, "")}(?![0-9])`, "i");
+  return (text) => re.test(text);
+}
+
+// ------------------------------------------------------------------ conditional GET (ETag / 304)
+
+/** In-memory ETag cache, backed by `meta` (gh.etag:<hash>) for bodies up to ETAG_META_MAX so a restart keeps it. */
+const etagMem = new Map<string, { etag: string; data: unknown }>();
+const ETAG_MEM_MAX = 2000;
+const ETAG_META_MAX = 200_000;
+const etagKey = (url: string) => `gh.etag:${sha256(url).slice(0, 32)}`;
+
+function cachedEtag(url: string): { etag: string; data: unknown } | undefined {
+  const m = etagMem.get(url);
+  if (m) return m;
+  try {
+    const raw = getMeta(etagKey(url));
+    if (!raw) return undefined;
+    const v = JSON.parse(raw);
+    if (v?.url !== url || !v.etag) return undefined;
+    const hit = { etag: v.etag as string, data: v.data };
+    etagMem.set(url, hit);
+    return hit;
+  } catch { return undefined; }
+}
+
+function storeEtag(url: string, etag: string, data: unknown, text: string): void {
+  if (etagMem.size >= ETAG_MEM_MAX) etagMem.delete(etagMem.keys().next().value!);
+  etagMem.set(url, { etag, data });
+  if (text.length > ETAG_META_MAX) return;
+  try { setMeta(etagKey(url), JSON.stringify({ url, etag, data })); } catch { /* the memory cache still works */ }
+}
+
+/** Tests only: forget the in-memory ETags (the meta copies stay). */
+export function _clearEtagCache(): void { etagMem.clear(); }
+
+/**
+ * GET with If-None-Match. A 304 returns the cached body with changed=false (and costs no rate limit). The ETag is sent
+ * only when its body is cached, so a 304 always has data. One retry on a network error or a 5xx; other errors throw HttpError.
+ */
+export async function conditionalGet<T = any>(url: string, headers: Record<string, string>, timeoutMs = 30_000): Promise<Conditional<T>> {
+  const hit = cachedEtag(url);
+  const where = url.replace(/[?#].*$/, "");
+  for (let attempt = 0; ; attempt++) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    try {
+      const res = await fetch(url, { headers: { ...headers, ...(hit ? { "If-None-Match": hit.etag } : {}) }, signal: ctrl.signal });
+      if (res.status === 304 && hit) return { status: 304, data: hit.data as T, changed: false, etag: hit.etag };
+      const text = await res.text();
+      if (res.ok) {
+        const data = (text ? JSON.parse(text) : {}) as T;
+        const etag = res.headers.get("etag");
+        if (etag) storeEtag(url, etag, data, text);
+        return { status: res.status, data, changed: true, etag: etag ?? undefined };
+      }
+      if (res.status >= 500 && attempt < 1) continue;
+      const ra = res.headers.get("retry-after");
+      throw new HttpError(res.status, `GET ${where} -> ${res.status}: ${truncate(text, 200)}`, ra && !isNaN(+ra) ? +ra * 1000 : undefined);
+    } catch (e: any) {
+      if (e instanceof HttpError) throw e;
+      if (attempt < 1) continue;
+      throw new Error(`Network error calling ${where}: ${e?.message ?? e}`);
+    } finally { clearTimeout(timer); }
+  }
 }
 
 function matchBranch(pattern: string, branch: string): boolean {

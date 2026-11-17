@@ -6,6 +6,8 @@ import { listTasks, type Task } from "../engine/tasks.js";
 import { latestApproval } from "../approvals/approvals.js";
 import { taskNow } from "../api/ops.js";
 import { notify } from "./router.js";
+import { buildDigest } from "../messenger/digest.js";
+import { messengerOn } from "../messenger/messenger.js";
 
 /**
  * Daily check-up (settings.workflow.checkupTime, default 10:00 local time): one message with everything that is
@@ -71,6 +73,12 @@ export async function maybeSendCheckup(now = new Date()): Promise<boolean> {
   if (getMeta("checkup.date") === today) return false;
   setMeta("checkup.date", today);                                         // once per day, even if sending fails
   const { title, body } = buildCheckup(now);
+  if (messengerOn(s)) {
+    // the morning digest (≤ 10 lines); the full check-up is kept behind "details digest"
+    const digest = buildDigest(now);
+    await notify({ kind: "checkup", title, body: digest.body, dedupeKey: today, details: `${title}\n\n${body}`, detailsRef: "digest" } as any);
+    return true;
+  }
   await notify({ kind: "checkup", title, body, dedupeKey: today });
   return true;
 }

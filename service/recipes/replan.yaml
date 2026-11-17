@@ -2,13 +2,14 @@ name: replan
 title: The ticket or the design changed (W13) – re-plan before building, ask "adapt?" after
 job: replan
 steps:
-  - summarise_change      # NEW STEP (not in STEPS yet): what changed in the ticket or the Figma frame (exact values)
-  - context_pack
-  - name: plan            # before building: re-plan with the change (the plan step reads the updated ticket)
+  - summarise_change      # what changed: ticket lines added/removed, Figma exact values; written into the design document
+  - name: context_pack    # before building: the plan is made again with the change
+    when: not_built
+  - name: plan
     when: not_built
   - name: plan_review
     when: not_built
   - name: plan_gate
     when: not_built
-  - name: ask_adapt       # NEW STEP: after building or after the PR: "adapt?" (adapted directly under "no approvals")
+  - name: ask_adapt       # after building or after the PR: "adapt?" (adapted directly under "no approvals")
     when: built

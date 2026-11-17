@@ -18,6 +18,10 @@ import { getFocus, clearFocus, recentChat } from "../notify/chatLog.js";
  * decision to the agent, an unclear message gets one short question, and the assistant's findings can be sent to a
  * waiting task with one "yes".
  */
+// This suite covers the older intent model, kept behind the Conductor switch as the rollback path
+// (settings conductor.enabled: false). The Conductor (the default) has the same situations in w3-conductor.test.ts
+// and test/situations/*.
+process.env.AIW_CONDUCTOR = "0";
 const OWNER = "8:live:owner";
 const sent: string[] = [];
 let chat: TpMessage[] = [];

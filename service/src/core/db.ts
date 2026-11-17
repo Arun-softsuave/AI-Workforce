@@ -123,6 +123,15 @@ const MIGRATIONS: string[] = [
   CREATE TABLE IF NOT EXISTS connector_health (provider TEXT PRIMARY KEY, state TEXT NOT NULL, since TEXT NOT NULL, last_ok TEXT,
     last_alert TEXT, detail TEXT);
   `,
+  // messenger (IMPLEMENTATION-PLAN §4 "migration 6", the notifications part): which item a message is about, the key
+  // routine messages are merged under (60 s), and the ref "details KAN-45" answers with the full text.
+  `
+  ALTER TABLE notifications ADD COLUMN item_id TEXT;
+  ALTER TABLE notifications ADD COLUMN merge_key TEXT;
+  ALTER TABLE notifications ADD COLUMN details_ref TEXT;
+  CREATE INDEX notifications_merge ON notifications(merge_key, channel, status);
+  CREATE INDEX notifications_details ON notifications(details_ref, created_at);
+  `,
 ];
 
 /** The schema version a fully migrated database has (one per MIGRATIONS entry). */

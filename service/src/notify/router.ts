@@ -5,6 +5,9 @@ import { logger } from "../core/log.js";
 import { senders, ACTION_KINDS, type Notice, type Sender } from "./channels.js";
 import { getTask, mergeData } from "../engine/tasks.js";
 import { publish } from "../live/bus.js";
+import { prepare, rowMeta, messengerOn, catchUpFor } from "../messenger/messenger.js";
+import { dueMerges, markMerged } from "../messenger/merge.js";
+import { messengerNowIso } from "../messenger/clock.js";
 
 /**
  * Notification Router (PRD §8):
@@ -14,6 +17,8 @@ import { publish } from "../live/bus.js";
  *    messages are retried on that channel and never moved to another one;
  *  - optional quiet hours hold non-urgent external messages until the next working window (off by default: 24h);
  *  - idempotent per (kind, task, dedupeKey, channel); no secrets or code in messages.
+ * Chat channels go through the Messenger (messenger/messenger.ts): short templates with "details KAN-x", routine
+ * updates about one item merged within 60 s, and one catch-up message after quiet hours.
  */
 let channelImpl: Partial<Record<Channel, Sender>> = senders;
 export function setSenders(s: Partial<Record<Channel, Sender>>): void { channelImpl = s; }
@@ -33,12 +38,15 @@ const dedupe = (a: Channel[]) => [...new Set(a.filter((c) => c !== "inbox"))];
 export async function notify(n: Notice, now = new Date()): Promise<{ delivered: Channel[]; held: Channel[] }> {
   const s = loadSettings();
   n = { ...n, title: redactSecrets(n.title), body: redactSecrets(n.body) };
+  const given = n as Notice & { details?: string; detailsRef?: string };
+  if (typeof given.details === "string") given.details = redactSecrets(given.details);
   const action = ACTION_KINDS.has(n.kind);
   const delivered: Channel[] = [], held: Channel[] = [];
+  const meta = rowMeta(n);
 
-  // 1. Inbox: always for action-needed items, and as an activity record for others.
+  // 1. Inbox: always for action-needed items, and as an activity record for others (full text, never shortened).
   const inboxKey = `${n.kind}:${n.taskId ?? "-"}:${n.dedupeKey ?? ""}:inbox`;
-  insertRow(n, "inbox", inboxKey, action ? "unread" : "read");
+  insertRow(n, "inbox", inboxKey, action ? "unread" : "read", { itemId: meta.itemId ?? meta.ref, detailsRef: given.details ? given.detailsRef ?? meta.ref : null });
   try {
     const tone = n.kind === "approval_needed" || n.kind === "needs_info" ? "you" : n.kind === "failed" || n.kind === "paused" ? "bad" : n.kind === "done" ? "ok" : "work";
     publish("feed", { at: nowIso(), tone, text: n.title, ref: n.taskRef, taskId: n.taskId });
@@ -55,19 +63,24 @@ export async function notify(n: Notice, now = new Date()): Promise<{ delivered: 
     const isFallback = !wanted.includes(ch);
     if (isFallback && primaryDone) break;
     const key = `${n.kind}:${n.taskId ?? "-"}:${n.dedupeKey ?? ""}:${ch}`;
-    const rowId = insertRow(n, ch, key, quiet ? "held" : "pending");
+    const p = prepare(n, ch, s, { quiet });
+    const status = quiet ? "held" : p.merge ? "merging" : "pending";
+    const rowId = insertRow(p.notice, ch, key, status, { itemId: p.itemId ?? meta.ref, mergeKey: p.mergeKey, detailsRef: p.detailsRef });
     if (!rowId) { primaryDone = true; continue; }            // already sent before -> idempotent
-    if (quiet) { held.push(ch); primaryDone = true; continue; }
-    const ok = await deliver(rowId, ch, n);
+    if (quiet || p.merge) { held.push(ch); primaryDone = true; continue; }
+    const ok = await deliver(rowId, ch, p.notice);
     if (ok) { delivered.push(ch); primaryDone = true; }
   }
   return { delivered, held };
 }
 
-function insertRow(n: Notice, ch: Channel, key: string, status: string): string | undefined {
+interface RowExtra { itemId?: string | null; mergeKey?: string | null; detailsRef?: string | null }
+
+function insertRow(n: Notice, ch: Channel, key: string, status: string, x: RowExtra = {}): string | undefined {
   const id = newId("n");
-  const r = db().prepare(`INSERT OR IGNORE INTO notifications (id, task_id, channel, kind, idem_key, title, body, action_needed, status, created_at)
-    VALUES (?,?,?,?,?,?,?,?,?,?)`).run(id, n.taskId ?? null, ch, n.kind, key, n.title, JSON.stringify(n), ACTION_KINDS.has(n.kind) ? 1 : 0, status, nowIso());
+  const r = db().prepare(`INSERT OR IGNORE INTO notifications (id, task_id, channel, kind, idem_key, title, body, action_needed, status, created_at, item_id, merge_key, details_ref)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(id, n.taskId ?? null, ch, n.kind, key, n.title, JSON.stringify(n), ACTION_KINDS.has(n.kind) ? 1 : 0, status, messengerNowIso(),
+    x.itemId ?? null, x.mergeKey ?? null, x.detailsRef ?? null);
   return r.changes ? id : undefined;
 }
 
@@ -92,12 +105,53 @@ function markRow(id: string, status: string, error?: string, ref?: string): void
     .run(status, error ?? null, ref ?? null, status, nowIso(), id);
 }
 
-/** Deliver messages held during quiet hours, and retry failed ones (max 5 attempts). */
+/** Send the routine updates kept for 60 s merging whose window has ended: one message per item and channel. */
+export async function flushMerges(): Promise<number> {
+  let n = 0;
+  for (const b of dueMerges()) {
+    if (b.rowIds.length === 1) {
+      db().prepare("UPDATE notifications SET status='pending' WHERE id=? AND status='merging'").run(b.rowIds[0]);
+      if (await deliver(b.rowIds[0], b.channel, b.notice)) n++;
+      continue;
+    }
+    const first = b.rowIds[0];
+    const id = insertRow(b.notice, b.channel, `merged:${first}:${b.channel}`, "pending", { itemId: b.notice.taskId ?? b.notice.taskRef ?? null, mergeKey: b.key });
+    if (!id) { markMerged(b.rowIds, "an earlier merge"); continue; }
+    markMerged(b.rowIds, id);
+    if (await deliver(id, b.channel, b.notice)) n++;
+  }
+  return n;
+}
+
+/** After quiet hours, per chat channel: the held plain updates become ONE catch-up message (questions follow on their own). */
+async function flushCatchUp(s: Settings): Promise<number> {
+  if (!messengerOn(s)) return 0;
+  const rows = db().prepare("SELECT id, channel, body FROM notifications WHERE channel!='inbox' AND status='held' ORDER BY created_at, rowid").all() as any[];
+  const byCh = new Map<Channel, { id: string; notice: Notice }[]>();
+  for (const r of rows) byCh.set(r.channel, [...(byCh.get(r.channel) ?? []), { id: r.id, notice: JSON.parse(r.body) }]);
+  let n = 0;
+  for (const [ch, held] of byCh) {
+    const c = catchUpFor(held);
+    if (!c) continue;
+    const id = insertRow(c.notice, ch, `catchup:${c.replaced[0]}:${ch}`, "pending");
+    if (!id) continue;
+    db().prepare(`UPDATE notifications SET status='merged', error=? WHERE status='held' AND id IN (${c.replaced.map(() => "?").join(",")})`).run(`in catch-up ${id}`, ...c.replaced);
+    if (await deliver(id, ch, c.notice)) n++;
+  }
+  return n;
+}
+
+/** Deliver messages held during quiet hours (as one catch-up), merged updates, and retry failed ones (max 5 attempts). */
 export async function flushNotifications(now = new Date()): Promise<number> {
   const s = loadSettings();
-  if (inTimeWindow(s.notifications.quietHours, now, s.profile.timezone)) return 0;
+  if (inTimeWindow(s.notifications.quietHours, now, s.profile.timezone)) {
+    // quiet hours began while updates were waiting to merge: they wait for the catch-up instead
+    db().prepare("UPDATE notifications SET status='held' WHERE status='merging'").run();
+    return 0;
+  }
+  let n = await flushMerges();
+  n += await flushCatchUp(s);
   const rows = db().prepare("SELECT id, channel, body, idem_key, status, attempts FROM notifications WHERE channel!='inbox' AND (status='held' OR (status='failed' AND attempts<5)) ORDER BY created_at LIMIT 50").all() as any[];
-  let n = 0;
   for (const r of rows) {
     const notice: Notice = JSON.parse(r.body);
     if (await deliver(r.id, r.channel, notice)) { n++; continue; }

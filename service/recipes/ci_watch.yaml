@@ -1,0 +1,5 @@
+name: ci_watch
+title: Watch the PR's CI until every check passes (W9) – one result message; a failure starts the next fix round (at most 3)
+job: ci_watch
+steps:
+  - ci_watch_check        # pending → wait (checked again by the CI timer); green → one message; red → ci_failed event; merged/closed → end

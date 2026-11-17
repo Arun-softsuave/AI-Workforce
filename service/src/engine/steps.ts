@@ -20,7 +20,8 @@ import { figmaFileSummary, figmaKeyFromText, figmaFramesFor, notionLinksIn, noti
 import { figmaNodeFromText } from "../connectors/figmaDesktop.js";
 import { isConnected } from "../connectors/registry.js";
 import { getSecret } from "../core/secrets.js";
-import { requestApproval, latestApproval, verifyBinding, decide } from "../approvals/approvals.js";
+import { requestApproval, latestApproval, verifyBinding, decide, approveByPolicy, pendingChanges, markChangesApplied } from "../approvals/approvals.js";
+import { needsApproval, canCreatePr, protectedHits as policyProtectedHits } from "../policy/gate.js";
 import { notify, markInboxRead } from "../notify/router.js";
 import { checkBudget } from "./budget.js";
 import { mergeData, getTask, jiraKey, partsOf, createTask, transition, updateTask, addStepUsage, type Task } from "./tasks.js";
@@ -187,7 +188,30 @@ function testsLine(d: Record<string, any>): string {
   if (d.testsUnavailable) return `⚠️ NOT run on this computer – ${d.testsUnavailable.reason}. The change and its tests were checked by reading only; the PR's CI must pass before merging.${d.testsUnavailable.fix ? `\nTo test locally: ${d.testsUnavailable.fix}` : ""}`;
   return d.tests?.ran ? (d.tests.passed ? `✅ passed${d.tests.attempts ? ` (attempt ${d.tests.attempts})` : ""}${d.tests.scope ? ` – ${d.tests.scope}` : ""}${d.tests.flaky ? ", one flaky run" : ""}` : "❌ failing") : "no test command in this repo";
 }
-const feedbackBlock = (t: Task) => (t.data.feedback?.length ? `\n## Human feedback from earlier review (must be addressed)\n${t.data.feedback.map((f: string) => `- ${f}`).join("\n")}` : "");
+/**
+ * E13: an agent is stuck after its round limit. The item pauses (not fails – "resume" retries from here) with
+ * data.stuck for the dashboard ("Stuck") and ONE short message: what failed, what it tried, the options.
+ */
+export function stuckResult(ctx: StepCtx, s: { step: string; failed: string; tried: string }): StepResult {
+  const ref = ctx.task.source_ref ?? ctx.task.id;
+  ctx.save({ stuck: { ...s, at: new Date().toISOString() } });
+  return { status: "pause", reason: `Stuck: ${s.failed}\nTried: ${s.tried}.\nReply "resume ${ref}" to retry, "take over ${ref}" to finish it yourself, or "cancel ${ref}".` };
+}
+
+const feedbackBlock = (t: Task) => {
+  const out: string[] = [];
+  if (t.data.feedback?.length) out.push(`\n## Human feedback from earlier review (must be addressed)\n${t.data.feedback.map((f: string) => `- ${f}`).join("\n")}`);
+  // D4: "yes, but skip the email part" – the owner approved with a change; it must be applied without another round
+  const changes = [...new Set([
+    ...(t.data.planChanges ?? []).map((c: any) => String(c?.text ?? c)),
+    ...(t.data.approvedChanges ?? []).filter((c: any) => c?.action === "implement_plan").map((c: any) => String(c.change)),
+  ].filter(Boolean))];
+  if (changes.length) out.push(`\n## Changes the owner asked for when approving the plan (must be applied)\n${changes.map((c) => `- ${c}`).join("\n")}`);
+  // W13: the design changed while building (Figma); the plan was not redone for a minor change
+  const dc = (t.data.designChanges ?? []) as any[];
+  if (dc.length) out.push(`\n## Design changes since the plan (follow the newer design)\n${dc.slice(-5).map((c) => `- ${truncate(String(c?.summary ?? c?.text ?? JSON.stringify(c)), 300)}`).join("\n")}`);
+  return out.join("");
+};
 
 /**
  * Environment doctor before a build (W2 12a). With settings.workflow.untestedWork "pause", a repository whose tests
@@ -557,9 +581,15 @@ async function requestLeadApproval(ctx: StepCtx): Promise<StepResult> {
   const bindings = parts.map((p) => ({ id: p.id, project: p.project_id, repo: getProject(p.project_id)?.github?.repo, branch: p.branch, baseSha: p.data.baseSha, headSha: G.headSha(p.worktree!), diffHash: G.diffHash(p.worktree!, p.data.baseSha) }));
   const ap = requestApproval(ctx.task.id, "create_pr", {});
   ctx.save({ partBindings: { approvalId: ap.id, parts: bindings } });
-  if (ctx.project.autonomy === "publish-drafts" || ctx.settings.workflow.prApproval === "skip") {
-    decide(ap.id, "approved", ctx.settings.workflow.prApproval === "skip" ? "policy:pr-approval-skip" : "policy:publish-drafts", "policy");
-    return { status: "ok", note: ctx.settings.workflow.prApproval === "skip" ? "PR approval skipped by your preference" : "auto-approved by project policy" };
+  {
+    // F2 + rails: directives and settings decide whether the PRs wait for you; rails (secrets, protected branches) refuse
+    const files = parts.flatMap((p) => (p.worktree && p.data.baseSha ? G.changedFiles(p.worktree, p.data.baseSha) : []));
+    const g = canCreatePr(ctx.task.id, { files, base: ctx.project.github?.baseBranch }, { settings: ctx.settings, project: ctx.project });
+    if (g.verdict === "deny") return { status: "fail", reason: g.reason };
+    if (g.verdict === "allow") {
+      approveByPolicy(ap.id, g.rule ?? "pr_approval");
+      return { status: "ok", note: g.by === "directive" ? "PR approval skipped by your rule" : g.by === "settings" ? "PR approval skipped by your settings" : g.reason };
+    }
   }
   const ref = ctx.task.source_ref ?? ctx.task.id;
   await notify({
@@ -752,15 +782,32 @@ export const STEPS: Record<string, StepFn> = {
   },
 
   async plan_gate(ctx) {
-    if (ctx.settings.workflow.planApproval === "skip") {
-      // your preference: no plan approval – the short plan is still sent so you know what is being built
+    // D4: the plan was approved with a change – re-plan with it once and go on to build without asking again
+    if (ctx.task.data.replanPending) {
+      const changes = pendingChanges(ctx.task.id, "implement_plan");
+      if (changes.length) {
+        const r = await (ctx.task.playbook === "dev-lead" && STEPS.lead_plan ? STEPS.lead_plan : STEPS.plan)(ctx);
+        if (r.status !== "ok") return r;
+        markChangesApplied(ctx.task.id, changes.map((c) => c.approvalId));
+        const t = getTask(ctx.task.id) ?? ctx.task;
+        await notify({ kind: "info", taskId: t.id, taskRef: t.source_ref ?? undefined, dedupeKey: `plan-changed:${changes.map((c) => c.approvalId).join(",")}`,
+          title: `📋 ${t.source_ref ?? t.id} – plan updated with your change (building now)`, body: planMessage(t), url: t.data.ticket?.url });
+        return { status: "ok", note: "re-planned with the change you approved" };
+      }
+      ctx.save({ replanPending: false });
+    }
+    // D5: a directive ("no need to ask for approval") or your settings decide whether the plan waits for you
+    const need = needsApproval("plan", ctx.task, { settings: ctx.settings, project: ctx.project });
+    const large = ctx.task.size === "L" && !!ctx.task.data.gateLargePlans;
+    if (!need.ask && !large) {
+      // "autonomy" mode on a project that doesn't gate plans: nothing to tell
+      if (need.by === "settings" && ctx.settings.workflow.planApproval === "autonomy") return { status: "ok", note: "not required" };
+      // no plan approval – the short plan is still sent so you know what is being built
       await notify({ kind: "info", taskId: ctx.task.id, taskRef: ctx.task.source_ref ?? undefined, dedupeKey: `plan-info:${ctx.task.data.planAt ?? ""}`,
         title: `📋 ${ctx.task.source_ref} – plan (starting now)`, body: planMessage(ctx.task), url: ctx.task.data.ticket?.url });
-      return { status: "ok", note: "plan approval skipped by your preference" };
+      return { status: "ok", note: need.by === "directive" ? "plan approval skipped by your rule" : "plan approval skipped by your preference" };
     }
-    const always = ctx.settings.workflow.planApproval === "always";
-    if (!always && ctx.project.autonomy !== "plan" && !(ctx.task.size === "L" && ctx.task.data.gateLargePlans)) return { status: "ok", note: "not required" };
-    const a = latestApproval(ctx.task.id);
+    const a = latestApproval(ctx.task.id, "implement_plan");
     if (a?.action === "implement_plan" && a.state === "approved" && a.requested_at >= (ctx.task.data.planAt ?? "")) return { status: "ok", note: "plan approved" };
     const ap = requestApproval(ctx.task.id, "implement_plan", {});
     await notify({ kind: "approval_needed", taskId: ctx.task.id, taskRef: ctx.task.source_ref ?? undefined, approvalId: ap.id, approvalAction: "implement_plan", dedupeKey: ap.id,
@@ -837,7 +884,9 @@ export const STEPS: Record<string, StepFn> = {
       lastFailure = c.failures.length ? c.text : truncate(failingSection(t.output), 4000);
     }
     ctx.save({ tests: { ran: true, passed: false, lastFailure: truncate(lastFailure, 3000) } });
-    return { status: "fail", reason: `Tests or project checks still failing after ${loops} attempts` };
+    // E13: the agent is stuck after its round limit – one message with what failed, what it tried and the options
+    const failed = truncate((lastFailure.split("\n").find((l) => l.trim()) ?? "tests or project checks").trim(), 200);
+    return stuckResult(ctx, { step: "implement", failed, tried: `${loops} attempts to make the tests and checks pass` });
   },
 
   async reviews(ctx) {
@@ -914,7 +963,7 @@ export const STEPS: Record<string, StepFn> = {
     if (secrets.length) return { status: "fail", reason: `Possible secrets in the change: ${secrets.map((s) => `${s.rule} in ${s.file}`).join(", ")}` };
     const stat = G.diffStat(wt, ctx.task.data.baseSha);
     const files = G.changedFiles(wt, ctx.task.data.baseSha);
-    const protectedHits = files.filter((f) => /^(\.github\/workflows|deploy|infra|terraform|helm|k8s)\//.test(f) || /Dockerfile|docker-compose/.test(f));
+    const protectedHits = policyProtectedHits(files);
     const warnings: string[] = [];
     if (stat.added + stat.removed > ctx.settings.limits.maxDiffLines) warnings.push(`Large change: ${stat.added + stat.removed} lines`);
     if (protectedHits.length) warnings.push(`Touches protected paths: ${protectedHits.join(", ")}`);
@@ -975,7 +1024,7 @@ export const STEPS: Record<string, StepFn> = {
   async request_approval(ctx) {
     const action = ctx.params.action ?? "create_pr";
     const d = ctx.task.data;
-    const existing = latestApproval(ctx.task.id);
+    const existing = latestApproval(ctx.task.id, action);
     if (existing && existing.action === action && existing.state === "approved") return { status: "ok", note: "already approved" };
     if (ctx.task.playbook === "dev-lead") return requestLeadApproval(ctx);
     const wt = ctx.task.worktree;
@@ -983,9 +1032,16 @@ export const STEPS: Record<string, StepFn> = {
       ? { repo: ctx.project.github?.repo, branch: ctx.task.branch ?? undefined, baseSha: d.baseSha, headSha: G.headSha(wt), diffHash: G.diffHash(wt, d.baseSha) }
       : {};
     const ap = requestApproval(ctx.task.id, action, binding);
-    if (action === "create_pr" && (ctx.project.autonomy === "publish-drafts" || ctx.settings.workflow.prApproval === "skip")) {
-      decide(ap.id, "approved", ctx.settings.workflow.prApproval === "skip" ? "policy:pr-approval-skip" : "policy:publish-drafts", "policy");
-      return { status: "ok", note: ctx.settings.workflow.prApproval === "skip" ? "PR approval skipped by your preference" : "auto-approved by project policy" };
+    if (action === "create_pr") {
+      // F2 + rails: a directive or your settings may skip the PR approval; protected paths always ask; rails refuse
+      const files = wt && d.baseSha ? G.changedFiles(wt, d.baseSha) : (d.changedFiles ?? []);
+      const g = canCreatePr(ctx.task.id, { branch: ctx.task.branch ?? undefined, base: ctx.project.github?.baseBranch, files,
+        secrets: wt && d.baseSha ? scanDiff(G.diffAgainst(wt, d.baseSha)) : 0 }, { settings: ctx.settings, project: ctx.project });
+      if (g.verdict === "deny") return { status: "fail", reason: g.reason };
+      if (g.verdict === "allow") {
+        approveByPolicy(ap.id, g.rule ?? "pr_approval");
+        return { status: "ok", note: g.by === "directive" ? "PR approval skipped by your rule" : g.by === "settings" ? "PR approval skipped by your settings" : g.reason };
+      }
     }
     const facts: [string, string][] = [];
     if (d.diffStat) facts.push(["Changes", `${d.diffStat.files} files, +${d.diffStat.added}/-${d.diffStat.removed}`]);
@@ -1008,7 +1064,7 @@ export const STEPS: Record<string, StepFn> = {
   },
 
   async publish(ctx) {
-    const a = latestApproval(ctx.task.id);
+    const a = latestApproval(ctx.task.id, ["create_pr", "post_jira_comment"]);
     if (!a || a.state !== "approved") return { status: "fail", reason: "No valid approval" };
     if (a.action === "post_jira_comment") {
       const jira = clients.jira();
@@ -1026,7 +1082,13 @@ export const STEPS: Record<string, StepFn> = {
     const gh = clients.github();
     const repo = ctx.project.github?.repo;
     if (!gh || !repo) return { status: "fail", reason: "GitHub is not connected for this project" };
-    G.pushBranch(wt, repo, ctx.task.branch!, gh.gitAuthHeader());
+    try { G.pushBranch(wt, repo, ctx.task.branch!, gh.gitAuthHeader()); }
+    catch (e: any) {
+      const refused = G.pushRefusal(e, repo, ctx.task.branch ?? undefined);
+      if (!refused) throw e;
+      ctx.save({ pushRefused: { at: new Date().toISOString(), repo, reason: refused } });
+      return { status: "pause", reason: refused };
+    }
     const raw = ctx.task.data.report ?? { title: ctx.task.title, body: "" };
     const report = { title: stripAttribution(raw.title ?? ""), body: stripAttribution(raw.body ?? "") };
     if (attributionHits(`${report.title}\n${report.body}`).length) return { status: "fail", reason: "Hard rule: PR text still mentions Claude/AI – fix the report and refresh" };
@@ -1244,7 +1306,7 @@ export const STEPS: Record<string, StepFn> = {
 
   /** One approval covered every repository: open one draft PR per repository, linked to each other. Never merged. */
   async publish_parts(ctx) {
-    const a = latestApproval(ctx.task.id);
+    const a = latestApproval(ctx.task.id, "create_pr");
     if (!a || a.state !== "approved" || a.action !== "create_pr") return { status: "fail", reason: "No valid approval" };
     const bind = ctx.task.data.partBindings;
     if (!bind || bind.approvalId !== a.id) return { status: "fail", reason: "The approval does not match the built change – refresh the task" };
@@ -1265,7 +1327,8 @@ export const STEPS: Record<string, StepFn> = {
       const raw = part.data.report ?? { title: part.title, body: "" };
       const report = { title: stripAttribution(raw.title ?? ""), body: stripAttribution(raw.body ?? "") };
       if (attributionHits(`${report.title}\n${report.body}`).length) return { status: "fail", reason: `Hard rule: the ${part.project_id} PR text still mentions Claude/AI` };
-      G.pushBranch(part.worktree!, repo, part.branch!, gh.gitAuthHeader());
+      try { G.pushBranch(part.worktree!, repo, part.branch!, gh.gitAuthHeader()); }
+      catch (e: any) { const refused = G.pushRefusal(e, repo, part.branch ?? undefined); if (!refused) throw e; return { status: "pause", reason: refused }; }
       report.body = withScreenshots(part, project, report.body, gh.gitAuthHeader());
       const existingPr = await gh.findOpenPr(repo, part.branch!);
       const pr = existingPr
@@ -1331,7 +1394,7 @@ export const STEPS: Record<string, StepFn> = {
 
   /** The requester confirms the summary (or says what to change, which re-opens the interview). */
   async requirements_confirm(ctx) {
-    const a = latestApproval(ctx.task.id);
+    const a = latestApproval(ctx.task.id, "confirm_requirements");
     if (a?.action === "confirm_requirements" && a.state === "approved") return { status: "ok", note: "requirements confirmed" };
     const ap = requestApproval(ctx.task.id, "confirm_requirements", {});
     await notify({ kind: "approval_needed", taskId: ctx.task.id, taskRef: ctx.task.source_ref ?? undefined, approvalId: ap.id, approvalAction: "confirm_requirements", dedupeKey: ap.id,

@@ -60,6 +60,12 @@ r("POST", /^\/api\/pause$/, (_m, b) => { pauseAll(b.until); return { ok: true };
 r("POST", /^\/api\/resume$/, async () => { resumeAll(); await tick(); return { ok: true }; });
 r("POST", /^\/api\/poll$/, async () => { const res = await pollAll(); await tick(); return res; });
 r("POST", /^\/api\/kick$/, async () => { await tick(); return { ok: true }; });
+// standing rules (directives), why an item is where it is, the item tree (dashboard + CLI over the API)
+r("GET", /^\/api\/rules$/, async () => (await import("./ops.js")).rulesView());
+r("POST", /^\/api\/rules$/, async (_m, b) => (await import("./ops.js")).addRule({ rule: String(b.rule ?? ""), value: b.value, ref: b.ref, scope: b.scope, until: b.until }, "dashboard"));
+r("POST", /^\/api\/rules\/([^/]+)\/remove$/, async (m) => (await import("./ops.js")).removeRule(decodeURIComponent(m[1]), "dashboard"));
+r("GET", /^\/api\/explain\/([^/]+)$/, async (m) => (await import("./ops.js")).explainItem(decodeURIComponent(m[1])));
+r("GET", /^\/api\/items$/, async (_m, _b, u) => (await import("./ops.js")).itemsTree({ all: u.searchParams.get("all") === "1", root: u.searchParams.get("ref") ?? undefined }));
 r("GET", /^\/api\/cost$/, (_m, _b, u) => cost(Number(u.searchParams.get("days") ?? 7)));
 r("GET", /^\/api\/brain\/([^/]+)$/, (m) => ({ summary: brainSummary(m[1]) }));
 r("POST", /^\/api\/brain\/([^/]+)\/ask$/, (m, b) => ({ answer: askBrain(m[1], String(b.q ?? "")) }));

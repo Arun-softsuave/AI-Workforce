@@ -2,9 +2,9 @@ name: ci_fix
 title: Fix failing CI checks on our PR (W9) – pushed without asking when settings.pr.autoFixCi is on, then CI watched again
 job: ci_fix
 steps:
-  - fix_prepare           # the PR, its FAILING CI CHECKS with their logs (job/item data.fix.mode = ci), the PR branch in its own folder
-  - fix_plan              # each failing check: caused by this PR / also fails on dev / flaky / needs a person
-  - fix_apply             # the normal implement + test loop (only when something needs a change)
+  - fix_prepare           # the PR's FAILING CI CHECKS with their logs, classified from the CI map: also fails on the base → left alone; needs a person → told, never faked; runner problem → re-run once; lint/format → the project's own fix command (no AI)
+  - fix_plan              # what is left (tests, types…): the fix agent decides each check
+  - fix_apply             # the normal implement + test loop (only when something needs a code change)
   - fix_review: { reviewers: [combined] }
-  - fix_gate              # autoFixCi on: approved by policy; off: shown to you first
-  - fix_publish           # push to the same PR (never forced, never merged); CI is watched again (round + 1, at most 3)
+  - fix_gate              # autoFixCi on: approved by policy (job-scoped approval); off: shown to you first
+  - fix_publish           # push to the same PR (never forced, never merged); CI is watched again (round + 1, at most 3); one result message

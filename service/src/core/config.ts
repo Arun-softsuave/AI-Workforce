@@ -32,6 +32,8 @@ export interface Settings {
     jiraComments: boolean; perKind?: Partial<Record<string, Channel[]>>;
     /** true: every message goes to the primary channel only – no desktop copies, no fallback channels. */
     exclusive: boolean;
+    /** The messenger (messenger/*): short chat messages, 60 s merging, one quiet-hours catch-up. Default on; false = off. */
+    messenger?: boolean;
   };
   workflow: {
     /** "always": every developer task waits for plan approval before any code. "autonomy": only when the project's autonomy is "plan". */
@@ -75,6 +77,10 @@ export interface Settings {
   team: { me?: { github?: string }; members: TeamMember[] };
   /** Which engine runs the work: "v1" (default, the playbook engine) or "v2" (the kernel: items, events, jobs, recipes). */
   engine: { version: EngineVersion };
+  /** The Teams Conductor (conductor/conductor.ts). On unless `enabled: false` (then the older intent model reads messages). */
+  conductor?: { enabled: boolean };
+  /** Figma: "token" (default) uses the access token; "desktop" uses the Figma desktop app's local MCP server. */
+  figma?: { mode?: "token" | "desktop" };
 }
 
 export type EngineVersion = "v1" | "v2";

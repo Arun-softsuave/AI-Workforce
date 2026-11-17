@@ -65,6 +65,43 @@ export function getFocus(): string | undefined {
 }
 export function clearFocus(): void { delMeta(FOCUS_KEY); }
 
+// --------------------------------------------------------------- catch-up (J10): what we sent while you were away
+
+/**
+ * What we sent since `sinceIso` (or since your message before the latest one), one line per item, newest message
+ * each. Plain text from the history, no model. The messenger's quiet-hours catch-up can use it too.
+ */
+export function awaySummary(sinceIso?: string, maxItems = 6): { count: number; lines: string[] } {
+  try {
+    let since = sinceIso;
+    if (!since) {
+      const ins = db().prepare("SELECT ts FROM chat_log WHERE direction='in' ORDER BY id DESC LIMIT 2").all() as { ts: string }[];
+      since = ins[1]?.ts ?? new Date(Date.now() - 24 * 3_600_000).toISOString();
+    }
+    const rows = db().prepare("SELECT text, task_ref, item_id, refs FROM chat_log WHERE direction='out' AND ts > ? ORDER BY id DESC LIMIT 200").all(since) as { text: string; task_ref: string | null; item_id: string | null; refs: string | null }[];
+    const byRef = new Map<string, string>();
+    let general = 0;
+    for (const r of rows) {
+      const refs: string[] = (() => { try { return JSON.parse(r.refs ?? "[]"); } catch { return []; } })();
+      const ref = r.item_id ?? r.task_ref ?? refs[0];
+      const first = truncate((r.text.split("\n").find((l) => l.trim() && !/^🤖/u.test(l.trim())) ?? r.text).replace(/[*_`]/g, "").replace(/\s+/g, " ").trim(), 90);
+      if (!ref) { general++; continue; }
+      if (!byRef.has(ref)) byRef.set(ref, first);            // rows are newest first: keep the newest per item
+    }
+    const lines = [...byRef.entries()].slice(0, maxItems).map(([ref, line]) => `- ${line.includes(ref) ? line : `${ref}: ${line}`}`);
+    if (byRef.size > maxItems) lines.push(`- and ${byRef.size - maxItems} more`);
+    if (general) lines.push(`- ${general} other update${general > 1 ? "s" : ""}`);
+    return { count: rows.length, lines };
+  } catch { return { count: 0, lines: [] }; }
+}
+
+/** "I'm back" / "what did I miss?" – one short catch-up message. */
+export function catchUpText(sinceIso?: string): string {
+  const s = awaySummary(sinceIso);
+  if (!s.count) return "Welcome back 👋 Nothing new while you were away.";
+  return `Welcome back 👋 While you were away (${s.count} message${s.count > 1 ? "s" : ""}):\n${s.lines.join("\n")}`;
+}
+
 export function pruneChat(): number {
   try {
     const since = new Date(Date.now() - KEEP_DAYS * 86_400_000).toISOString();

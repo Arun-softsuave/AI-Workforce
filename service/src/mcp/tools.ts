@@ -160,4 +160,35 @@ server.registerTool("aiw_doctor", {
   return text({ ok: r.ok, report: E.envReport(r), checks: r.checks });
 });
 
+server.registerTool("aiw_rules", {
+  description: "Standing rules in force (e.g. \"no plan approval for KAN-45\", \"only backend\"). action list (default) | add (rule, value, optional ref or scope, until) | remove (id from the list). Only add or remove a rule when the user explicitly asks. Hard rules (never merge, never force-push, no secrets) cannot be changed.",
+  inputSchema: {
+    action: z.enum(["list", "add", "remove"]).optional(), rule: z.string().optional(), value: z.string().optional(),
+    ref: z.string().optional(), scope: z.enum(["global", "item", "batch", "epic", "sprint"]).optional(), until: z.string().optional(), id: z.string().optional(),
+  },
+}, async ({ action, rule, value, ref, scope, until, id }) => {
+  const ops = await import("../api/ops.js");
+  if (!action || action === "list") { const r = await ops.rulesView(); return text(r.length ? r : "No rules in force – the settings apply."); }
+  if (action === "add") {
+    if (!rule || value === undefined) return text("Name the rule and its value, e.g. rule plan_approval, value skip, ref KAN-45.");
+    const v = value === "yes" || value === "true" ? true : value === "no" || value === "false" ? false : value;
+    return text((await ops.addRule({ rule, value: v, ref, scope, until }, "mcp")).message);
+  }
+  if (!id) return text("Give the rule's id (from the list).");
+  return text((await ops.removeRule(id, "mcp")).message);
+});
+
+server.registerTool("aiw_explain", {
+  description: "Why an item is where it is: its plan and decisions (design document), the user's answers and feedback, the last steps, rules in force, and what it waits for. Use for \"why did you …\" about a ticket.",
+  inputSchema: { ref: z.string() },
+}, async ({ ref }) => text((await (await import("../api/ops.js")).explainItem(ref)).text));
+
+server.registerTool("aiw_items", {
+  description: "Work items as a tree (sprint → epic → ticket → parts, plus PR and review items), each with its state and the job it runs. all=true includes finished ones; ref shows one item's tree.",
+  inputSchema: { all: z.boolean().optional(), ref: z.string().optional() },
+}, async ({ all, ref }) => {
+  const ops = await import("../api/ops.js");
+  return text(ops.itemsTreeText(ops.itemsTree({ all: !!all, root: ref })));
+});
+
 await server.connect(new StdioServerTransport());

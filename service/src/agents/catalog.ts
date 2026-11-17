@@ -369,12 +369,15 @@ export const AGENT_EFFORT: Record<string, Effort> = {
   "pr-reviewer": "medium", "integration-reviewer": "medium", "comment-resolver": "medium", coordinator: "medium", interviewer: "medium",
   "qa-planner": "medium", "qa-tester": "medium", "qa-triager": "medium", screenshotter: "medium", reporter: "medium", "report-writer": "medium",
   explorer: "high", lead: "high", planner: "high", "lead-planner": "high", contract: "high", implementer: "high",
+  // the Teams Conductor (conductor/conductor.ts registers its definition in AGENTS) and its small history summariser
+  conductor: "medium", "chat-summary": "low",
 };
 
 /** Default turn caps when the caller gives none. Agents without tools need only a few turns (one answer, one retry). */
 export const AGENT_MAX_TURNS: Record<string, number> = {
   triage: 2, intent: 2, "image-describer": 2, "rules-writer": 2, "memory-keeper": 3, reporter: 3, "report-writer": 3,
   reviewer: 3, "plan-reviewer": 3, "doc-reader": 3,
+  conductor: 2, "chat-summary": 1,
 };
 
 /** The effort for one agent call: your override (settings.cost.effort), else the table; the implementer works harder on M/L tickets. */

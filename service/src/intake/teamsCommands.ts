@@ -38,6 +38,9 @@ export const TEAMS_HELP = [
   "• \"resolve the comments on PR 90\" (your own PR) – I fix / answer each comment and show you everything first; \"1\" pushes to the same PR and replies; then QA runs",
   "• \"PR 90 failed, fix the CI\" (your own PR) – I read the failing checks' logs, fix them and show you first; after the push I watch CI until every check passes (a check that fails again is fixed again, up to 3 rounds)",
   "• \"QA PR 90\" – the QA engineer tests it; bugs come here as issue drafts first (\"create 1, 3\", \"create all\", \"report only\") · \"fix the QA issues on PR 90\"",
+  "• \"no need to ask for approval\", \"only backend\", \"from now on raise draft PRs\" – a rule I keep (said back once)",
+  "• \"KAN-47 first, it's urgent\" · \"pause everything until Monday\" · \"stop, I'll do KAN-45 myself\" / \"continue KAN-45\" · \"undo that\"",
+  "• \"why did you …?\" – I explain from the plan and the history · reply to one of my messages to answer exactly that question",
   "When several things are waiting, start your reply with the ticket: \"KAN-42 1\".",
   "",
   "Exact commands still work too:",
@@ -144,6 +147,11 @@ export function needsNaturalHandling(c: ParsedCommand): boolean {
   if (c.cmd === "resume") return true;                       // "resume", "resume KAN-52" (both halves) – handled in plain language
   if (NEEDS_REF.has(c.cmd) && !c.ref) return true;
   if (c.cmd === "start" && !c.ref) return true;
+  // "start KAN-62" (a ticket, a Jira link): the full start – someone else's ticket, an open PR, a missing clone are
+  // checked there (B5, B6, M6). Only "start all" stays the old command (start everything waiting to start).
+  if (c.cmd === "start" && c.ref && !/^all$/i.test(c.ref)) return true;
+  // "approve KAN-104 and start KAN-105", "cancel KAN-48 please": more words than the command – read the whole message (J3)
+  if (["approve", "cancel", "resume", "run", "show", "start"].includes(c.cmd) && c.reason) return true;
   // "run" / "show" / "cancel" with a word that is not a task ("run the tests please") – plain language
   if (["run", "show", "cancel", "resume", "approve", "reject"].includes(c.cmd) && c.ref && !/^([A-Z][A-Z0-9]+-\d+(@[\w-]+)?|t_[0-9a-f]+|a_[0-9a-f]+|TASK-\d+(@[\w-]+)?)$/i.test(c.ref)) return true;
   return false;
@@ -209,6 +217,7 @@ export async function pollTeamsCommands(force = false): Promise<number> {
       const routedItem = route.kind === "item" ? route.itemId : undefined;
       const parts: string[] = [];
       let handleText = !!meaning;
+      let rowId: number | undefined;
       try {
         if (route.kind === "item" && route.via === "quote" && route.notice) {
           // quoting a question that was already answered: say so instead of answering twice
@@ -216,7 +225,7 @@ export async function pollTeamsCommands(force = false): Promise<number> {
           parts.push(route.notice);
           handleText = false;
         } else {
-          recordReceived(nm, route.kind === "item" ? { itemId: route.itemId, questionKey: route.via === "quote" ? route.questionKey : undefined } : {});
+          rowId = recordReceived(nm, route.kind === "item" ? { itemId: route.itemId, questionKey: route.via === "quote" ? route.questionKey : undefined } : {});
           if (route.kind === "item" && route.via === "quote") setFocus(route.itemId);   // "1" / "yes" now go to the quoted item
           if (files) {
             if (route.kind === "item") {
@@ -246,7 +255,12 @@ export async function pollTeamsCommands(force = false): Promise<number> {
             }
             // Plain language: "plan for KAN-42", "yes", "2", "no – use the validator", "add a CSV export"…
             const said = meaning.kind === "command" ? m.text.trim().replace(/^aiw\b[:,]?\s*/i, "") : meaning.text;
-            return handleChatMessage(said, who);
+            // W1a: a quoted bot message names the item and question exactly; a quoted person's text is context (data)
+            return handleChatMessage(said, who, {
+              ...(route.kind === "item" && route.via === "quote" ? { quotedItem: route.itemId, quotedQuestion: route.questionKey } : {}),
+              ...(route.quotedContext ? { quotedContext: route.quotedContext } : {}),
+              fromMsg: rowId ?? null,
+            });
           }));
         }
       } catch (e: any) { parts.push(`Error: ${e.message}`); }

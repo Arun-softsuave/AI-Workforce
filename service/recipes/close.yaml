@@ -1,9 +1,8 @@
 name: close
-title: Close-out after the PR is merged (W14)
+title: Close-out after the PR is merged (W14) – never merges anything itself
 job: close
 steps:
-  - close_item            # NEW STEP (not in STEPS yet): item → DONE, Jira status/comment if allowed
-  - unblock_dependents    # NEW STEP: items that depend on this one may start; tell you the next PR in the merge order
-  - retarget_stacked      # NEW STEP: rebase and re-target stacked PRs to the base branch
-  - record_memory         # learning: repeated review comments become rules, decisions go to the Brain
-  - clean_worktree        # NEW STEP: remove this item's folder and local branch
+  - unblock_dependents    # items waiting on this one may start; the next PR in the merge order; merged out of order → warning
+  - retarget_stacked      # PRs stacked on this one: re-targeted to the base branch and brought up to date (a rebase job each)
+  - clean_worktree        # this item's folder and local branch are removed; the CI watch ends
+  - close_item            # LAST: PR_OPEN → MERGED → DONE, a Jira note when allowed, one short message

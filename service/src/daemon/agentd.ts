@@ -15,6 +15,7 @@ import { maybeSendCheckup } from "../notify/checkup.js";
 import { SlackSocket } from "../connectors/slack.js";
 import { pollTeamsCommands } from "../intake/teamsCommands.js";
 import { registerTimer, runTimed, setNextRun } from "../core/timers.js";
+import { startHealthLoop } from "../intake/health.js";
 
 /**
  * aiw-agentd – the always-on local worker. Starts at login, keeps working while Claude Code is closed,
@@ -38,6 +39,8 @@ async function main(): Promise<void> {
 
   // Every background job is listed on the dashboard ("every 2 min · last run 40 s ago · healthy").
   registerTimers(settings);
+  // Connector health (W3): every 5 min one cheap call per connector; down -> work that needs it waits, one reconnect message
+  const stopHealth = startHealthLoop();
 
   const slack = new SlackSocket(async (a) => {
     if (a.actionId !== "aiw_approve" && a.actionId !== "aiw_reject") return "";
@@ -99,6 +102,7 @@ async function main(): Promise<void> {
     logger.info("aiw-agentd stopping", { sig });
     clearInterval(timer);
     clearInterval(teamsTimer);
+    stopHealth();
     slack.stop();
     void import("../api/stream.js").then((S) => S.closeAllStreams()).catch(() => {});   // open live pages keep the server up otherwise
     server.close();
@@ -116,6 +120,7 @@ function registerTimers(s: ReturnType<typeof loadSettings>): void {
   try {
     registerTimer("Jira check", s.limits.pollMinutes * 60_000, "New and changed tickets");
     registerTimer("PR watcher", s.limits.pollMinutes * 60_000, "CI results, review comments and merges on your pull requests");
+    if (s.engine?.version === "v2") registerTimer("GitHub events", s.limits.pollMinutes * 60_000, "Pull request events (CI, comments, reviews, conflicts, merges, mentions)");
     registerTimer("CI watch", s.limits.pollMinutes * 60_000, "Pull requests waiting for their checks after a fix");
     registerTimer("Ticket index", "every 15 min", "Open tickets by name, for Teams messages");
     registerTimer("Teams inbox", 10_000, "Your messages to the bot");

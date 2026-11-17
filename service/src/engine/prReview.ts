@@ -9,10 +9,11 @@ import * as G from "../git/git.js";
 import { rulesBlock } from "../brain/conventions.js";
 import { buildContextPack } from "../brain/brain.js";
 import { stripAttribution, attributionHits } from "../core/attribution.js";
-import { requestApproval, latestApproval } from "../approvals/approvals.js";
+import { requestApproval } from "../approvals/approvals.js";
 import { notify } from "../notify/router.js";
 import { createTask, getTask, listTasks, mergeData, transition, updateTask, type Task } from "./tasks.js";
 import type { StepCtx, StepResult } from "./steps.js";
+import { jobScoped, prOf, jobFolderId, ownApproval } from "./steps/common.js";
 
 /**
  * Review anyone's pull request (a teammate's or your own) from Teams: "review PR 90", "review <link>", "review KAN-52 PR".
@@ -162,7 +163,11 @@ const ticketKeyRe = (keys: string[]) => (keys.length ? new RegExp(`\\b(${keys.ma
 export const REVIEW_STEPS: Record<string, (ctx: StepCtx) => Promise<StepResult>> = {
   /** Read the PR from GitHub and check its code out read-only (a detached worktree; no branch is created). */
   async fetch_pr(ctx) {
-    const r = ctx.task.data.review;
+    // a review job on a PR item (engine v2, e.g. "review requested" with autoReview) names its PR through the item
+    const scoped = jobScoped(ctx.task);
+    let r = ctx.task.data.review;
+    if (!r && scoped) { const p = prOf(ctx.task, ctx.project); if (p) { r = { repo: p.repo, num: p.num }; ctx.save({ review: r }); } }
+    if (!r) return { status: "fail", reason: "No pull request to review" };
     const gh = clients.github();
     if (!gh?.prForReview) return { status: "fail", reason: "GitHub is not connected" };
     const pr = await gh.prForReview(r.repo, r.num);
@@ -172,7 +177,7 @@ export const REVIEW_STEPS: Record<string, (ctx: StepCtx) => Promise<StepResult>>
     if (!wt || !fs.existsSync(wt) || ctx.task.data.reviewSha !== pr.headSha) {
       const sha = G.fetchPrHead(ctx.project.local.path, r.repo, r.num, gh.gitAuthHeader());
       if (wt && fs.existsSync(wt)) G.removeWorktree(ctx.project.local.path, wt);
-      wt = G.createDetachedWorktree(ctx.project.local.path, ctx.project.id, ctx.task.id, sha, ctx.project.conventions?.env?.linkedDirs ?? []);
+      wt = G.createDetachedWorktree(ctx.project.local.path, ctx.project.id, scoped ? jobFolderId(ctx.task.id, "review", r.num) : ctx.task.id, sha, ctx.project.conventions?.env?.linkedDirs ?? []);
       ctx.task = { ...ctx.task, worktree: wt };
     }
     // the linked Jira ticket, from the title, branch or description
@@ -238,9 +243,16 @@ export const REVIEW_STEPS: Record<string, (ctx: StepCtx) => Promise<StepResult>>
 
   /** Show the comments in Teams and wait: post all / post some / drop / change / cancel. */
   async review_gate(ctx) {
-    const a = latestApproval(ctx.task.id);
+    const a = await ownApproval(ctx.task, "reviewApprovalId", "post_review");
     if (a?.action === "post_review" && a.state === "approved" && a.requested_at >= (ctx.task.data.reviewAt ?? "")) return { status: "ok", note: "post approved" };
     const ap = requestApproval(ctx.task.id, "post_review", {});
+    ctx.save({ reviewApprovalId: ap.id });
+    // the policy gate: "post review comments without showing them first" (settings.pr.autoPostReview or your rule)
+    const { canComment } = await import("../policy/gate.js");
+    const { approveByPolicy } = await import("../approvals/approvals.js");
+    const g = canComment(ctx.task.id, { target: "teammate_pr" });
+    if (g.verdict === "deny") return { status: "fail", reason: g.reason };
+    if (g.verdict === "allow") { approveByPolicy(ap.id, g.rule ?? "post_review"); return { status: "ok", note: "posted without asking (your preference)" }; }
     const pr: PrReviewInfo = ctx.task.data.prInfo;
     await notify({ kind: "approval_needed", taskId: ctx.task.id, taskRef: ctx.task.source_ref ?? undefined, approvalId: ap.id, approvalAction: "post_review", dedupeKey: ap.id,
       title: `📝 Review of PR #${pr.number} ready – ${ctx.project.id}`, body: reviewPreview(getTask(ctx.task.id)!), url: pr.url });
@@ -249,7 +261,7 @@ export const REVIEW_STEPS: Record<string, (ctx: StepCtx) => Promise<StepResult>>
 
   /** Post the approved comments as ONE review of type COMMENT. Never approves, never requests changes, never merges. */
   async post_review(ctx) {
-    const a = latestApproval(ctx.task.id);
+    const a = await ownApproval(ctx.task, "reviewApprovalId", "post_review");
     if (!a || a.state !== "approved" || a.action !== "post_review") return { status: "fail", reason: "No approval to post the review" };
     const gh = clients.github();
     if (!gh?.createReview) return { status: "fail", reason: "GitHub is not connected" };

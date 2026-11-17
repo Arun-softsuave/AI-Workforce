@@ -20,7 +20,7 @@ export function statusSnapshot() {
     paused: isPaused() ? pausedUntil : null,
     profile: loadSettings().profile,
     provider: loadSettings().models.provider,
-    connections: listConnections().map((c) => ({ provider: c.provider, account: c.account, status: c.status })),
+    connections: listConnections().map((c) => ({ provider: c.provider, account: c.account, status: c.status, health: healthOf(c.provider) })),
     projects: loadProjects().map((p) => ({ id: p.id, jira: p.jira?.keys, repo: p.github?.repo, path: p.local.path, roles: p.roles, autonomy: p.autonomy, status: p.status })),
     tasks: Object.fromEntries(counts.map((c) => [c.state, c.n])),
     lastPoll: safeJson<{ at: string; items: number; tasks: number; errors: string[] } | null>(getMeta("last_poll"), null),
@@ -163,3 +163,98 @@ export function inboxSummaryLine(): string {
 }
 
 export function cost(days = 7) { return costReport(days); }
+
+// ------------------------------------------------------------------ rules (directives), explain, items tree, engine
+
+/** Standing rules in force (aiw rules / MCP aiw_rules / dashboard): id, plain echo, until. */
+export async function rulesView(): Promise<{ id: string; scope: string; target: string; rule: string; value: unknown; text: string; until: string | null }[]> {
+  const D = await import("../policy/directives.js");
+  return D.activeDirectives().map((d) => ({
+    id: d.id, scope: d.scope, target: d.scope === "global" ? "everything" : (getTask(d.scope_id ?? "")?.source_ref ?? d.scope_id ?? ""), rule: d.rule, value: d.value,
+    text: D.echoDirective(d), until: d.until_at,
+  }));
+}
+
+/** Add a rule from this computer (CLI / dashboard / MCP): an owner channel, still checked against the hard rails. */
+export async function addRule(o: { rule: string; value: unknown; ref?: string; scope?: string; until?: string }, channel: "cli" | "dashboard" | "mcp"): Promise<{ ok: boolean; message: string }> {
+  const D = await import("../policy/directives.js");
+  const scope = (o.scope ?? (o.ref ? "item" : "global")) as any;
+  if (!(D.SCOPES as readonly string[]).includes(scope)) return { ok: false, message: `Scope must be one of ${D.SCOPES.join(", ")}.` };
+  let scopeId: string | null = null;
+  if (scope !== "global") {
+    const t = o.ref ? getTask(o.ref) : undefined;
+    if (!t) return { ok: false, message: o.ref ? `No item ${o.ref}.` : "Name the item: --ref KAN-45." };
+    scopeId = t.id;
+  }
+  const r = D.setDirective({ scope, scopeId, rule: o.rule, value: o.value, until: o.until ?? null }, { channel, owner: true });
+  return r.ok ? { ok: true, message: r.echo } : { ok: false, message: r.message };
+}
+
+/** Remove a rule by its id (from `aiw rules`). */
+export async function removeRule(id: string, channel: "cli" | "dashboard" | "mcp"): Promise<{ ok: boolean; message: string }> {
+  const D = await import("../policy/directives.js");
+  const r = D.clearDirective(id, { channel, owner: true });
+  return r.ok ? { ok: true, message: r.echo } : { ok: false, message: r.message };
+}
+
+/** J8 on this computer: why an item is where it is – design document, decisions, your answers, last steps, rules, holds. */
+export async function explainItem(ref: string): Promise<{ ok: boolean; text: string }> {
+  const t = getTask(ref);
+  if (!t) return { ok: false, text: `No item ${ref}.` };
+  const { toolExplain } = await import("../conductor/tools.js");
+  const r = await toolExplain({ ref: t.id }, { who: "cli", original: "" });
+  const lines = [r.reply ?? ""];
+  try { const D = await import("../policy/directives.js"); const rules = D.describeInForce(t); if (rules) lines.push(`Rules in force: ${rules}`); } catch { /* no rules */ }
+  if (t.data.stuck) lines.push(`Stuck: ${t.data.stuck.failed} (tried ${t.data.stuck.tried}).`);
+  if (t.data.blockedBy) lines.push(`Waiting for: ${(t.data.blockedBy.connectors ?? []).join(", ")} to reconnect.`);
+  if (t.data.takenOver && !t.data.handedBack) lines.push("You took it over – nothing runs until you hand it back.");
+  try {
+    const jobs = db().prepare("SELECT type, state, activity, error FROM jobs WHERE item_id=? ORDER BY created_at DESC LIMIT 5").all(t.id) as any[];
+    if (jobs.length) lines.push(`Jobs: ${jobs.map((j) => `${j.type} ${j.state}${j.activity ? ` (${j.activity})` : ""}`).join(" · ")}`);
+  } catch { /* v1: no jobs */ }
+  return { ok: true, text: lines.filter(Boolean).join("\n") };
+}
+
+export interface TreeLine { id: string; ref: string; level: string; state: string; title: string; depth: number; job?: string }
+
+/** Items as a tree (sprint → epic → ticket → part; PR and review items on their own), active ones unless `all`. */
+export function itemsTree(opts: { all?: boolean; root?: string } = {}): TreeLine[] {
+  const closed = ["DONE", "CANCELLED", "FAILED", "MERGED", "CLOSED"];
+  const rows = db().prepare("SELECT id, source_ref, title, state, level, parent_id, created_at FROM tasks ORDER BY created_at").all() as any[];
+  const keep = rows.filter((r) => opts.all || !closed.includes(r.state));
+  const byParent = new Map<string, any[]>();
+  for (const r of keep) { const k = r.parent_id ?? ""; byParent.set(k, [...(byParent.get(k) ?? []), r]); }
+  const ids = new Set(keep.map((r) => r.id));
+  let jobsOf: (id: string) => string | undefined = () => undefined;
+  try {
+    const st = db().prepare("SELECT type, state FROM jobs WHERE item_id=? AND state IN ('queued','running','waiting') AND type<>'ci_watch' ORDER BY created_at DESC LIMIT 1");
+    jobsOf = (id) => { const j = st.get(id) as any; return j ? `${j.type} ${j.state}` : undefined; };
+  } catch { /* v1 database without jobs */ }
+  const out: TreeLine[] = [];
+  const walk = (r: any, depth: number, seen: Set<string>) => {
+    if (seen.has(r.id)) return;
+    seen.add(r.id);
+    out.push({ id: r.id, ref: r.source_ref ?? r.id, level: r.level ?? "ticket", state: r.state, title: r.title ?? "", depth, job: jobsOf(r.id) });
+    for (const c of byParent.get(r.id) ?? []) walk(c, depth + 1, seen);
+  };
+  const root = opts.root ? getTask(opts.root) : undefined;
+  if (opts.root && !root) return [];
+  const tops = root ? [rows.find((r) => r.id === root.id)] : keep.filter((r) => !r.parent_id || !ids.has(r.parent_id));
+  const seen = new Set<string>();
+  for (const r of tops) if (r) walk(r, 0, seen);
+  return out;
+}
+
+/** The tree as plain text lines ("  KAN-45 [ticket] Working – Refund limit · build running"). */
+export function itemsTreeText(lines: TreeLine[]): string {
+  if (!lines.length) return "No active items.";
+  return lines.map((l) => `${"  ".repeat(l.depth)}${l.ref} [${l.level}] ${l.state}${l.title ? ` – ${l.title}` : ""}${l.job ? ` · ${l.job}` : ""}`).join("\n");
+}
+
+/** The health loop's last check for a connection (intake/health.ts): up / down / limited / off, or undefined. */
+function healthOf(provider: string): string | undefined {
+  try {
+    const r = db().prepare("SELECT state FROM connector_health WHERE provider=?").get(provider === "teams-personal" ? "teams" : provider) as { state: string } | undefined;
+    return r?.state;
+  } catch { return undefined; }
+}

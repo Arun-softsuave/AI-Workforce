@@ -238,7 +238,10 @@ test("'PR 7 failed, fix it and make CI pass' fixes the FAILING CI CHECKS (not th
   assert.equal((ruleIntent("fix PR 7") as any).intent?.intent, "fix_ci");
   assert.equal((ruleIntent("resolve the comments on PR 7") as any).intent?.intent, "resolve_comments");
   const msg = "Backend pr failed -> https://github.com/acme/shop/pull/7 check and fix it and notify me ensure it must pass all the ci tests";
-  setRunner(new MockRunner({ intent: () => ({ intent: "fix_ci", ref: "", text: msg, project: "", delegated: false }) }));
+  setRunner(new MockRunner({
+    conductor: () => ({ calls: [{ tool: "fix_pr", args: { text: msg, mode: "ci" } }], reply: "" }),      // the Conductor (default)
+    intent: () => ({ intent: "fix_ci", ref: "", text: msg, project: "", delegated: false }),             // the older intent model
+  }));
   const started = await say(msg);
   assert.match(started, /Fixing the failing CI checks[\s\S]*PR #7 in acme\/shop – FIX-7@shop[\s\S]*watch CI until every check passes/);
 

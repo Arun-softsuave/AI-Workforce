@@ -1,10 +1,7 @@
 name: rebase
-title: Keep our PR mergeable (W13) – rebase onto the base branch the team's way, never force-push
+title: Keep our PR mergeable (W13) – bring the base in the team's way, never force-push
 job: rebase
 steps:
-  - rebase_prepare        # NEW STEP (not in STEPS yet): the PR branch in its own folder, the base branch fetched
-  - rebase_apply          # NEW STEP: rebase or merge the base in (the team's way); simple conflicts resolved, a real conflict stops and tells you
-  - name: reviews         # only when the rebase changed code
-    params: { reviewers: [combined] }
-    when: job.rebase.changed
-  - rebase_publish        # NEW STEP: push (never forced); a merge commit when the team merges the base in
+  - rebase_prepare        # the PR's head and base fetched; a folder of this job's own (conflicts), or the item's folder (new commits)
+  - rebase_apply          # merge the base in (a team that rebases is told – no force-push); simple conflicts resolved and tested, a real one stops and tells you
+  - rebase_publish        # a normal push (never forced); agent-resolved conflicts are shown first; CI is watched again

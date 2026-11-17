@@ -130,6 +130,20 @@ export function pushBranch(wt: string, repoFullName: string, branch: string, aut
   git(wt, ["push", "--quiet", remoteUrl(repoFullName), `HEAD:refs/heads/${branch}`], { extraHeader: authHeader });
 }
 
+/**
+ * F9: a push GitHub refused for a reason a person must fix (access or branch protection), as one plain line with what
+ * is needed – or undefined for any other error (network, conflict…), which the caller handles as before.
+ */
+export function pushRefusal(err: unknown, repoFullName: string, branch?: string): string | undefined {
+  const m = String((err as any)?.message ?? err ?? "");
+  const name = repoFullName.split("/").pop() ?? repoFullName;
+  if (/GH006|protected branch|branch protection|required status check|review(s)? required|refusing to allow|pre-receive hook declined/i.test(m))
+    return `Can't push to ${name}: branch protection blocks it${branch ? ` on ${branch}` : ""}. Ask a repo admin to allow pushes to this branch (or the rule that blocks it), then say "resume".`;
+  if (/\b403\b|permission to .* denied|Permission denied|write access|not allowed to push|Repository not found|could not read Username|Authentication failed|\b401\b/i.test(m))
+    return `Can't push to ${name}: needs write access. Your GitHub account (or token) needs "Contents: write" on ${repoFullName} – ask a repo admin, or reconnect with \`aiw connect github\`, then say "resume".`;
+  return undefined;
+}
+
 /** Fetch a pull request's head commit (also from forks) into the local clone, without touching any branch. */
 export function fetchPrHead(repoDir: string, repoFullName: string, num: number, authHeader?: string): string {
   const ref = `refs/aiw/pr/${num}`;

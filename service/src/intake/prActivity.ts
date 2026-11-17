@@ -1,5 +1,6 @@
 import { db, getCursor, setCursor, getMeta, setMeta } from "../core/db.js";
-import { getProject } from "../core/config.js";
+import { getProject, engineVersion } from "../core/config.js";
+import type { ReviewThread } from "../connectors/github.js";
 import { nowIso, truncate } from "../core/util.js";
 import { logger } from "../core/log.js";
 import { clients } from "../connectors/registry.js";
@@ -19,6 +20,15 @@ function watchedTasks(): Task[] {
   return rows.map((r) => getTask(r.id)!).filter(Boolean);
 }
 
+/**
+ * Engine v2: intake/github.ts emits PR activity as events once it has polled a repository (meta gh.since:<repo>), and
+ * the reactions tell you – so this old poller leaves those repositories alone (one message, not two). Repositories the
+ * producer has not reached yet (or engine v1) keep this poller.
+ */
+export function producerCovers(repo: string | undefined): boolean {
+  return !!repo && engineVersion() === "v2" && !!getMeta(`gh.since:${repo.toLowerCase()}`);
+}
+
 export async function pollPrActivity(): Promise<number> {
   const gh = clients.github();
   if (!gh) return 0;
@@ -29,7 +39,7 @@ export async function pollPrActivity(): Promise<number> {
     const p = getProject(t.project_id);
     const repo = p?.github?.repo;
     const pr = t.data.pr as { number: number; url: string } | undefined;
-    if (!repo || !pr) continue;
+    if (!repo || !pr || producerCovers(repo)) continue;
     const cursorName = `pr:${repo}#${pr.number}`;
     const since = getCursor(cursorName) ?? t.data.prOpenedAt ?? t.updated_at;
     const started = nowIso();
@@ -79,6 +89,7 @@ export async function pollReviewedPrs(): Promise<number> {
   }
   let sent = 0;
   for (const [k, t] of latest) {
+    if (producerCovers(t.data.review.repo)) continue;            // engine v2: new_commits events → reactions (re-review offer)
     const due = getMeta(`reviewed.check:${k}`);
     if (due && Date.now() - new Date(due).getTime() < 15 * 60_000) continue;        // at most every 15 minutes per PR
     setMeta(`reviewed.check:${k}`, nowIso());
@@ -87,6 +98,8 @@ export async function pollReviewedPrs(): Promise<number> {
       if (pr.state !== "open" || !t.data.reviewSha || pr.headSha === t.data.reviewSha) continue;
       if (getMeta(`reviewed.told:${k}`) === pr.headSha) continue;
       setMeta(`reviewed.told:${k}`, pr.headSha);
+      let counts = "";
+      try { const c = resolvedCounts((await gh.reviewThreads?.(t.data.review.repo, t.data.review.num)) ?? [], getMeta("github.login") ?? ""); if (c.total) counts = `Resolved ${c.resolved} of ${c.total} of your threads. `; } catch { /* optional */ }
       await notify({
         kind: "pr_comment", taskId: t.id, taskRef: t.source_ref ?? undefined, dedupeKey: `reviewed:${k}:${pr.headSha}`,
         title: `🔁 ${pr.author} pushed new commits to PR #${pr.number} you reviewed`,
@@ -99,4 +112,17 @@ export async function pollReviewedPrs(): Promise<number> {
     }
   }
   return sent;
+}
+
+const same = (a?: string | null, b?: string | null) => !!a && !!b && a.toLowerCase() === b.toLowerCase();
+
+/**
+ * K3 / H3: how many of the reviewer's threads the author has dealt with – resolved, or answered by someone other than
+ * the reviewer after the reviewer's last word. For "Sneha resolved 4 of 4 – re-review?".
+ */
+export function resolvedCounts(threads: ReviewThread[], reviewer: string): { resolved: number; total: number } {
+  if (!reviewer) return { resolved: 0, total: 0 };
+  const mine = threads.filter((t) => t.comments.length && same(t.comments[0].author, reviewer));
+  const done = mine.filter((t) => t.resolved || !same(t.comments[t.comments.length - 1].author, reviewer));
+  return { resolved: done.length, total: mine.length };
 }

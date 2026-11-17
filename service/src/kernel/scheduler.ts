@@ -8,6 +8,9 @@
  * Rules, in the order a held job's reason is chosen:
  *  1. everything paused (aiw pause)                         → "paused"
  *  2. the item's state: BLOCKED, AWAITING_START, NEEDS_INFO, PAUSED, closed → "blocked…", "needs your start", …
+ *     the item was taken over by you (data.takenOver)      → "you took it over"
+ *  2b. a connector the job's next step needs is down / rate limited (intake/healthGate) → "blocked: GitHub disconnected"
+ *  2c. a budget is used up and stopForBudget is on (engine/budget checkScopeBudget)   → "budget: …"
  *  3. job.data.retryAt in the future                       → "retrying later"
  *  4. the item already has an active job (one per item)    → "waiting for its current job"
  *  5. waves: a depends_on edge to an item not MERGED/DONE (a stacks_on edge to a PR_OPEN item is enough)
@@ -20,9 +23,11 @@
  */
 import { db, getMeta } from "../core/db.js";
 import { safeJson } from "../core/util.js";
-import type { Settings } from "../core/config.js";
+import { loadSettings, getProject, type Settings } from "../core/config.js";
+import { checkScopeBudget } from "../engine/budget.js";
 import type { State } from "../engine/tasks.js";
 import { rowToJob } from "./mailbox.js";
+import { blockingConnector, unavailableConnectors, type HealthProvider, type HealthRow } from "../intake/healthGate.js";
 import {
   DEFAULT_LIMITS,
   type Edge, type HoldReason, type Item, type Job, type JobType, type LimitsFrom, type PickRunnable, type SchedulerLimits,
@@ -34,7 +39,7 @@ export const isBuildJob = (j: Pick<Job, "type">): boolean => BUILD_JOB_TYPES.inc
 
 /** The fields of an item the scheduler reads (an Item satisfies it; tests may pass plain objects). */
 export type SchedItem = Pick<Item, "id" | "project_id" | "state" | "priority" | "due" | "areas"> &
-  Partial<Pick<Item, "source_ref" | "title" | "error" | "created_at">>;
+  Partial<Pick<Item, "source_ref" | "title" | "error" | "created_at" | "source" | "data">>;
 
 /** Everything decide() needs, read once. */
 export interface SchedulerSnapshot {
@@ -48,12 +53,16 @@ export interface SchedulerSnapshot {
   edges: Edge[];
   /** True while AI Workforce is paused. */
   paused?: boolean;
+  /** Connectors that are down or rate limited now (connector_health); none when absent. */
+  down?: Map<HealthProvider, HealthRow>;
+  /** Items whose budget is used up while settings.workflow.stopForBudget is on: item id → plain reason. */
+  overBudget?: Record<string, string>;
   now?: Date;
 }
 
 /** Why a job waits (finer than the contract's HoldReason). */
 export type WaitCode =
-  | "paused" | "blocked" | "needs_start" | "needs_answer" | "item_paused" | "item_closed" | "retry_later"
+  | "paused" | "blocked" | "budget" | "taken_over" | "needs_start" | "needs_answer" | "item_paused" | "item_closed" | "retry_later"
   | "item_busy" | "depends_on" | "area_lock" | "repo_busy" | "slots";
 
 export interface WaitingJob { jobId: string; itemId: string; code: WaitCode; reason: string }
@@ -68,7 +77,7 @@ export interface Decision {
 
 /** WaitCode → the contract's HoldReason (types.ts has no code for the item-state holds; they show as paused). */
 const HOLD: Record<WaitCode, HoldReason> = {
-  paused: "paused", blocked: "connector", needs_start: "paused", needs_answer: "paused", item_paused: "paused",
+  paused: "paused", blocked: "connector", budget: "budget", taken_over: "paused", needs_start: "paused", needs_answer: "paused", item_paused: "paused",
   item_closed: "paused", retry_later: "retry_later", item_busy: "slots", depends_on: "depends_on",
   area_lock: "area_lock", repo_busy: "repo_busy", slots: "slots",
 };
@@ -145,6 +154,14 @@ export function decide(limits: SchedulerLimits, snap: SchedulerSnapshot): Decisi
     if (it.state === "NEEDS_INFO") { hold(job, "needs_answer", "waiting for your answer"); continue; }
     if (it.state === "PAUSED") { hold(job, "item_paused", "paused"); continue; }
     if (CLOSED.includes(it.state)) { hold(job, "item_closed", "item is closed"); continue; }
+    if (it.data?.takenOver && !it.data?.handedBack) { hold(job, "taken_over", "you took it over"); continue; }
+
+    // 2b. a connector this job's next step needs is down or rate limited (work that doesn't need it keeps running)
+    const cb = snap.down?.size ? blockingConnector(it, job, snap.down) : undefined;
+    if (cb) { hold(job, "blocked", `blocked: ${cb.reason}`); continue; }
+    // 2c. budget used up (only when stopForBudget is on; otherwise budgets are reported, never stop work)
+    const ob = snap.overBudget?.[it.id];
+    if (ob) { hold(job, "budget", `budget: ${ob}`); continue; }
 
     // 3. retry later
     const retryAt = job.data?.retryAt ? new Date(job.data.retryAt).getTime() : 0;
@@ -228,7 +245,27 @@ export function loadSnapshot(now: Date = new Date()): SchedulerSnapshot {
     const rows = d.prepare(`SELECT * FROM tasks WHERE id IN (${list.map(() => "?").join(",")})`).all(...list) as any[];
     for (const r of rows) items[r.id] = rowToItem(r);
   }
-  return { queued, active, items, edges, paused: pausedNow(now), now };
+  let down: SchedulerSnapshot["down"];
+  try { down = unavailableConnectors(); } catch { down = undefined; }       // connector_health missing: nothing is down
+  return { queued, active, items, edges, paused: pausedNow(now), now, down, overBudget: overBudgetOf(queued, items) };
+}
+
+/** Items whose queued job may not start because a budget is used up (stopForBudget on). One cheap check per item. */
+function overBudgetOf(queued: Job[], items: Record<string, SchedItem>): Record<string, string> | undefined {
+  let stops = false;
+  try { stops = !!loadSettings().workflow?.stopForBudget; } catch { stops = false; }
+  if (!stops || !queued.length) return undefined;
+  const out: Record<string, string> = {};
+  for (const id of new Set(queued.map((j) => j.item_id))) {
+    const it = items[id] as any;
+    const project = it && getProject(it.project_id);
+    if (!project) continue;
+    try {
+      const c = checkScopeBudget(project, { id: it.id, size: it.size ?? null, tokens_used: it.tokens_used ?? 0, data: it.data ?? {} });
+      if (!c.ok) out[id] = c.over?.text ?? c.text ?? "used up";
+    } catch { /* a budget that can't be read never holds work */ }
+  }
+  return Object.keys(out).length ? out : undefined;
 }
 
 /**

@@ -1,115 +1,67 @@
-import { getMeta, setMeta, delMeta, audit } from "../core/db.js";
-import { loadSettings, loadProjects } from "../core/config.js";
-import { logger } from "../core/log.js";
+import { audit } from "../core/db.js";
+import { loadSettings } from "../core/config.js";
 import { truncate } from "../core/util.js";
-import { normaliseQuestions, formatChoices, optionNumber, plainNumbers } from "../core/questions.js";
-import { getRunner, untrusted } from "../agents/runner.js";
-import { AGENTS } from "../agents/catalog.js";
-import { listTasks, getTask, recordUsage, type Task } from "../engine/tasks.js";
-import { latestApproval, type Approval } from "../approvals/approvals.js";
-import { decideAndApply, answerTask, cancelTask, startAwaiting, resumeTask, tick } from "../engine/engine.js";
+import { formatChoices, optionNumber, plainNumbers } from "../core/questions.js";
+import { listTasks, getTask, type Task } from "../engine/tasks.js";
+import { decideAndApply, answerTask, cancelTask, resumeTask, tick, isPaused, resumeAll } from "../engine/engine.js";
 import { createRequest, resolveProduct } from "../engine/requests.js";
 import { statusText, taskNow, inboxSummaryLine } from "../api/ops.js";
-import { runTicket } from "./intake.js";
 import { answerQuestion, answerWithSuggestion } from "../chat/assistant.js";
-import { chatHistoryText, getFocus, setFocus } from "../notify/chatLog.js";
+import { getFocus, setFocus, catchUpText } from "../notify/chatLog.js";
 import { parsePrRef, reviewCommand, startReviewFromText, REVIEW_EDIT } from "../engine/prReview.js";
 import { personIn } from "../engine/targets.js";
 import { qaCommand, QA_EDIT } from "../engine/qa.js";
-import { ticketsForPrompt } from "./ticketIndex.js";
+import { keysIn, branchesIn } from "../conductor/find.js";
+import { pendingItems, approvalWhat, questionWhat, tasksOfTicket, toolStart, type Pending } from "../conductor/tools.js";
+import { getAwaiting, setAwaiting, clearAwaiting, type Awaiting } from "../conductor/state.js";
+import { conductorEnabled, conductorTurn, runConfirmed, type TurnContext } from "../conductor/conductor.js";
+import { legacyAiIntent, legacyValidate, legacyConfirmText, type Intent, type IntentName } from "../conductor/legacyIntent.js";
 
 /**
- * Plain-language Teams chat: "plan for KAN-42", "yes", "2", "no – use the existing validator", "add a CSV export".
- *
- * Order: a pending follow-up ("what should I change?") -> exact words and numbers (no AI) -> the small "intent" model
- * -> the read-only assistant. Approving, rejecting and cancelling only ever happen when it is unambiguous which item
- * the message is about; otherwise the bot asks. Every action is confirmed in one line.
+ * Teams messages, the FAST PATH (IMPLEMENTATION-PLAN W1 step 1, 5.16): plain rules, no model call, under a second.
+ *  - a pending follow-up ("what should I change?", "Cancel KAN-45?", a Conductor question) is answered first;
+ *  - yes / no / 1..n / approve / status / details X / exact commands with a key, when the target is known (a quoted
+ *    bot message – which sets the focus – a single waiting item, or the focus item);
+ *  - thanks / ok / hi: a short reply, no action (J11).
+ * Everything else goes to the Conductor (conductor/conductor.ts). While the Conductor switch is off, the older intent
+ * model (conductor/legacyIntent.ts) and the read-only assistant handle it as before.
+ * Approving, rejecting and cancelling only ever happen when it is unambiguous which item the message is about.
  */
-export type IntentName = "start_ticket" | "start_request" | "approve" | "reject" | "answer" | "cancel" | "status" | "resume" | "review_pr" | "resolve_comments" | "fix_ci" | "fix_qa" | "qa_pr" | "send_report" | "question" | "unclear";
-/** refs: several tickets in one message ("work on KAN-60, KAN-61 and KAN-62"). more: further actions in the same message. */
-export interface Intent { intent: IntentName; ref?: string; refs?: string[]; text?: string; project?: string; delegated?: boolean; more?: Intent[] }
-
-interface Pending { approvals: { task: Task; approval: Approval }[]; questions: Task[]; starts: Task[] }
-
-export function pendingItems(): Pending {
-  const mine = (t: Task) => t.kind !== "part";          // a repository part never waits for the user – its lead does
-  const approvals = listTasks({ states: ["AWAITING_APPROVAL"] }).filter(mine)
-    .map((task) => ({ task, approval: latestApproval(task.id)! }))
-    .filter((x) => x.approval?.state === "pending");
-  return { approvals, questions: listTasks({ states: ["NEEDS_INFO"] }).filter(mine), starts: listTasks({ states: ["AWAITING_START"] }).filter(mine) };
-}
+export type { Intent, IntentName, Pending };
+export { pendingItems };
 
 const refOf = (t: Task) => t.source_ref ?? t.id;
 const KEY = /\b([A-Z][A-Z0-9]+-\d+(?:@[\w-]+)?)\b/;
 const YES = /^(y|ya|yes|yeah|yep|yup|ok|okay|k|sure|approve|approved|go|go ahead|go for it|looks good|looks great|lgtm|ship it|proceed|do it|confirm|confirmed|correct|perfect|fine|raise it|raise the pr|create the pr|start|start it)[\s.!👍✅]*$/i;
-const NO = /^(no|nope|nah|reject|don'?t|do not|change|instead|not quite|wrong|not like that)\b[\s,:.\-–]*([\s\S]*)$/i;
+// "no need to ask", "no problem", "no rush" are not a "no" (the old rules read "no need to ask for approval" as a rejection)
+const NO = /^(no|nope|nah|reject|don'?t|do not|change|instead|not quite|wrong|not like that)\b(?!\s+(?:need|problem|worries|rush|hurry|pressure|issues?)\b)[\s,:.\-–]*([\s\S]*)$/i;
 const CANCEL = /^(cancel|stop|abort|drop|kill)\b/i;
 const NUMBERS = /^\d+(\s*[,;/ ]\s*\d+)*\.?$/;
 const STATUS = /\b(status|progress|how('?s| is| are)? .*(going|doing)|update on|what('?s| is) happening|where are we|done yet|any news|how long|how many (minutes|hours)|when will)\b/i;
-/** "status?", "any updates?", "how is it going?" – about AI Workforce's own work. Wider questions go to the assistant. */
+/** "status?", "any updates?", "how is it going?" – about AI Workforce's own work. Wider questions go further. */
 const STATUS_GENERAL = /^(what('?s| is) the )?(status|progress|updates?)\s*\??$|^(how('?s| is) it going|any (news|updates?)|where are we|what are you (doing|working on))\s*\??$/i;
 const START = /\b(plan|work on|work|pick up|pick|start|do|implement|fix|take|handle|begin|run|build|develop|look at|look into|resolve|finish|complete|go ahead|proceed)\b/i;
 const IMPERATIVE = /^(please\s+)?((can|could|would) you\s+)?(please\s+)?(add|build|create|implement|make|change|update|remove|delete|fix|refactor|rename|introduce|support|allow)\b/i;
 const NEVER_MIND = /^(never ?mind|nothing|forget it|skip)\b/i;
 const RESUME = /^(please\s+)?(\/?aiw\s+)?(resume|retry|try again|continue it|unpause)\b/i;
-
-/** A ticket key in any case ("kan-52", "KAN-52@nue-backend"), normalised – only for configured Jira keys or TASK-n. */
-function ticketKeyIn(text: string): string | undefined {
-  const m = /\b([A-Za-z][A-Za-z0-9]+-\d+)(@[\w-]+)?\b/.exec(text);
-  if (!m) return undefined;
-  const prefix = m[1].split("-")[0].toUpperCase();
-  const known = new Set(["TASK", ...loadProjects().flatMap((p) => p.jira?.keys ?? []).map((k) => k.toUpperCase())]);
-  if (!known.has(prefix) && !KEY.test(m[0])) return undefined;
-  return `${m[1].toUpperCase()}${(m[2] ?? "").toLowerCase()}`;
-}
+/** J11: small talk – a short reply, never an action, never a model call. */
+const THANKS = /^(thanks|thank you|thank u|thx|ty|cheers|many thanks|thanks a lot|thank you so much|ok(ay)?,? thanks?( you)?|great,? thanks?|perfect,? thanks?)[\s.!🙂😊👍🙏]*$/i;
+const PRAISE = /^(great|nice|cool|awesome|good job|well done|brilliant|excellent|super|wow)[\s.!🙂😊👍🙏🎉]*$/i;
+const HELLO = /^(hi|hello|hey|hiya|good (morning|afternoon|evening)|morning)[\s.!🙂😊👋]*$/i;
+const OK_ONLY = /^(ok|okay|k|fine|perfect|alright|got it|noted|👍|🙏)[\s.!]*$/i;
+const TAKEOVER = /\b(take (it |this |that )?over|taking over|myself|i'?ll (do|finish|handle|take) (it|this|that)|hand(ing)? (it |this )?back|give (it )?back)\b/i;
+/** J10: back after being away – one catch-up summary from the chat history. */
+const BACK = /^(i'?m back|back( now)?|what did i miss\??|catch me up|anything new( while i was away)?\??)[\s.!]*$/i;
 
 /** Every ticket key in a message, in order, without repeats ("KAN-60, kan-61 and KAN-62"). */
-export function ticketKeysIn(text: string): string[] {
-  const out: string[] = [];
-  const re = /\b([A-Za-z][A-Za-z0-9]+-\d+)(@[\w-]+)?\b/g;
-  for (const m of text.matchAll(re)) {
-    const k = ticketKeyIn(m[0]);
-    if (k && !out.includes(k)) out.push(k);
-  }
-  return out;
-}
+export function ticketKeysIn(text: string): string[] { return keysIn(text); }
+function ticketKeyIn(text: string): string | undefined { return keysIn(text)[0]; }
 
 const REPORT = /\b(pdf|pdfs|report|reports|document|summary document)\b/i;
-
-/** Every open task of one ticket (the lead, or the per-repository halves of older tickets). */
-function tasksOfTicket(ref: string): Task[] {
-  const key = ref.toUpperCase().split("@")[0];
-  return listTasks({ states: ["DETECTED", "TRIAGED", "NEEDS_INFO", "AWAITING_START", "QUEUED", "RUNNING", "PAUSED", "AWAITING_APPROVAL", "PUBLISHING", "STALE", "REJECTED", "FAILED_PUBLISH", "WAITING_PARTS", "FAILED"] })
-    .filter((t) => t.kind !== "part" && (t.data.ticket?.key ?? String(t.source_ref).split("@")[0]).toUpperCase() === key && (!ref.includes("@") || refOf(t) === ref));
-}
 /** "I don't know, you check the code and decide" – the user leaves the decision to the agent. */
 const DELEGATE = /\b(you decide|you can decide|decide (it )?yourself|your call|up to you|i (really )?(do ?n'?t|dont) know|no idea|you choose|choose (the )?best|pick (the )?best|(you )?check the codes?|figure (it )?out|whatever you think|as you see fit|(your|a|the) better (plan|implementation|option|approach)|go with your (plan|recommendation|choice)|your recommendation|recommended (one|option))\b/i;
 
-// --------------------------------------------------------------- follow-up state ("what should I change?")
-
-type Awaiting =
-  | { type: "reject_reason"; ref: string; at: number }
-  | { type: "confirm_cancel"; ref: string; at: number }
-  | { type: "pick_project"; text: string; choices: string[]; at: number }
-  | { type: "confirm_answer"; ref: string; text: string; at: number }
-  | { type: "confirm_actions"; actions: Intent[]; at: number };
-
-const AWAIT_KEY = "teams.awaiting";
-const AWAIT_MS = 60 * 60_000;
-function getAwaiting(): Awaiting | undefined {
-  try {
-    const a = JSON.parse(getMeta(AWAIT_KEY) ?? "null") as Awaiting | null;
-    if (!a || Date.now() - a.at > AWAIT_MS) return undefined;
-    return a;
-  } catch { return undefined; }
-}
-const setAwaiting = (a: Awaiting) => setMeta(AWAIT_KEY, JSON.stringify(a));
-const clearAwaiting = () => delMeta(AWAIT_KEY);
-
 // --------------------------------------------------------------- rules (no AI)
-
-const approvalWhat = (a: Approval) => a.action === "implement_plan" ? "plan approval" : a.action === "confirm_requirements" ? "confirm requirements" : a.action === "create_pr" ? "raise the PR?" : "approval";
-const questionWhat = (t: Task) => `question: ${truncate(normaliseQuestions(t.data.questions, 1)[0]?.question ?? "", 70)}`;
 
 /** What is waiting, one line per ticket (the conversation's current item first), at most `max` lines. */
 function describePending(p: Pending, max = 5): string {
@@ -119,7 +71,6 @@ function describePending(p: Pending, max = 5): string {
     ...p.questions.map((t) => ({ ref: refOf(t), what: questionWhat(t) })),
   ];
   const decisions = items.sort((a, b) => (a.ref === focus ? -1 : b.ref === focus ? 1 : 0)).map((x) => `• ${x.ref} – ${x.what}`);
-  // tickets waiting to be started: one line per ticket, not per repository
   const starts = [...new Set(p.starts.map((t) => refOf(t).split("@")[0]))];
   const lines = decisions.slice(0, max);
   const room = Math.max(0, max - lines.length);
@@ -130,14 +81,14 @@ function describePending(p: Pending, max = 5): string {
 
 const ambiguous = (p: Pending) => ({ reply: `🤔 **Several things are waiting** – start your reply with the ticket, e.g. "${refOf(p.approvals[0]?.task ?? p.questions[0] ?? p.starts[0])} 1"\n\n${describePending(p)}` });
 
-/** The waiting item the conversation is about right now (the last thing we asked, or the ticket the user last named). */
+/** The waiting item the conversation is about right now (a quoted message, the last thing we asked, or the ticket last named). */
 function focusItem(p: Pending): ReturnType<typeof itemFor> {
   const f = getFocus();
   return f ? itemFor(p, f) : undefined;
 }
 
 /** Find the pending item a ref points to ("KAN-42", "KAN-42@nue-backend", "TASK-7"). */
-function itemFor(p: Pending, ref: string): { kind: "approval"; task: Task; approval: Approval } | { kind: "question" | "start"; task: Task } | undefined {
+function itemFor(p: Pending, ref: string): { kind: "approval"; task: Task; approval: Pending["approvals"][number]["approval"] } | { kind: "question" | "start"; task: Task } | undefined {
   const t = getTask(ref);
   if (!t) return undefined;
   const a = p.approvals.find((x) => x.task.id === t.id);
@@ -149,21 +100,34 @@ function itemFor(p: Pending, ref: string): { kind: "approval"; task: Task; appro
 
 type RuleResult = { intent: Intent } | { reply: string } | { option: { ref: string; action: string; n: number } } | undefined;
 
-/** Deterministic understanding of common replies. Exported for tests. */
+/** Deterministic understanding of common replies (the fast path). Exported for tests. */
 export function ruleIntent(text: string, p: Pending = pendingItems(), aiAvailable = true): RuleResult {
   const t = text.trim();
   if (!t) return undefined;
 
-  // Word-matching only decides SHORT, typical replies. Anything longer or unusual is read by Claude with the whole
+  // J11 small talk and J10 "I'm back": short replies, no action
+  if (THANKS.test(t) || PRAISE.test(t)) return { reply: "You're welcome 👍" };
+  if (HELLO.test(t)) return { reply: `Hi 👋 ${inboxSummaryLine()}` };
+  if (BACK.test(t)) return { reply: catchUpText() };
+
+  // Word-matching only decides SHORT, typical replies. Anything longer or unusual is read by the model with the whole
   // conversation – except edits of a waiting review ("change 2: <a long new comment>"), which are exact commands.
   if (aiAvailable) {
     const reviewWaiting = p.approvals.some((x) => x.approval.action === "post_review");
     const reviewEdit = reviewWaiting && (REVIEW_EDIT.test(t) || /^PR-\d+@[\w-]+\s+(post|drop|remove|delete|skip|change|edit|reword)\b/i.test(t));
     const long = t.length > 90 || t.split(/\s+/).length > 12;
     if (long && !reviewEdit) return undefined;
-    // several tickets AND an action ("approve KAN-60 and answer KAN-61: …", "KAN-60 1 and KAN-61 2") – Claude splits it
+    // several tickets AND an action ("approve KAN-60 and answer KAN-61: …", "KAN-60 1 and KAN-61 2") – the model splits it
     if (ticketKeysIn(t).length >= 2 && /\b(approve|approved|reject|cancel|answer|change|yes|no|post|decide)\b|(^|\s)[123](\s|$|[,.])/i.test(t)) return undefined;
   }
+
+  // a branch name ("finish my branch feat/KAN-106-coupons") is not a ticket to start, and "take over" / "I'll finish it
+  // myself" may mean either direction – the Conductor reads those with the conversation
+  if (aiAvailable && (branchesIn(t).length || TAKEOVER.test(t))) return undefined;
+
+  // "details KAN-45" – the full text behind a short message (messenger/details.ts), no model call
+  const details = /^\s*(?:show\s+)?(?:full\s+)?details?\s+(?:for\s+|of\s+|on\s+)?([A-Za-z][A-Za-z0-9]*-\d+(?:@[\w.-]+)?)\s*[.!?]?\s*$/i.exec(t);
+  if (details) return { intent: { intent: "status", ref: details[1].toUpperCase(), text: "details" } };
 
   // "KAN-42 1", "KAN-42: yes", "TASK-7 only admins" – a reply aimed at one waiting item
   const pre = /^((?:[A-Z][A-Z0-9]+|TASK)-\d+(?:@[\w-]+)?)\s*[:,\-–]?\s+([\s\S]+)$/i.exec(t);
@@ -206,6 +170,7 @@ export function ruleIntent(text: string, p: Pending = pendingItems(), aiAvailabl
   // "resume", "retry", "try again", "resume KAN-52" – continue a paused / failed task
   if (RESUME.test(t)) {
     if (key) return { intent: { intent: "resume", ref: key } };
+    if (isPaused()) return { intent: { intent: "resume" } };      // "pause everything" earlier: lift it
     const stopped = listTasks({ states: ["PAUSED", "FAILED", "STALE"] }).filter((x) => x.kind !== "part");
     const f = getFocus();
     const target = stopped.find((x) => refOf(x) === f) ?? (stopped.length === 1 ? stopped[0] : undefined);
@@ -250,13 +215,18 @@ export function ruleIntent(text: string, p: Pending = pendingItems(), aiAvailabl
     if (focus?.kind === "start") return { intent: { intent: "approve", ref: refOf(focus.task) } };
     if (total === 0 && p.starts.length === 1) return { intent: { intent: "approve", ref: refOf(p.starts[0]) } };
     if (total > 1) return ambiguous(p);
+    if (OK_ONLY.test(t)) return { reply: "👍" };                // J11: "ok" with nothing waiting is just an acknowledgement
     return { reply: "Nothing is waiting for your approval right now." };
   }
-  if (CANCEL.test(t) && !key) {
+  if (OK_ONLY.test(t)) return { reply: "👍" };
+  // "cancel", "stop it", "cancel KAN-48": short exact words only. "stop working on KAN-97, I'll do it" (a takeover) or
+  // "drop the CSV export work" (a name) are read by the Conductor.
+  const shortCancel = CANCEL.test(t) && (!aiAvailable || t.split(/\s+/).length <= 4);
+  if (shortCancel && !key) {
     if (only) return { intent: { intent: "cancel", ref: refOf(only.task) } };
     if (total > 1) return ambiguous(p);
   }
-  if (CANCEL.test(t) && key) return { intent: { intent: "cancel", ref: key } };
+  if (shortCancel && key) return { intent: { intent: "cancel", ref: key } };
   if (NO.test(t) && only) return replyTo(only, t);
 
   // Without the AI model (offline/mock mode) a few more cases are decided by rules.
@@ -272,7 +242,7 @@ function replyTo(item: NonNullable<ReturnType<typeof itemFor>>, reply: string): 
   if (STATUS.test(reply) && reply.length < 60) return { intent: { intent: "status", ref } };
   if (item.kind === "question") return { intent: { intent: "answer", ref, text: reply, ...(DELEGATE.test(reply) && reply.length < 300 && !NUMBERS.test(reply) ? { delegated: true } : {}) } };
   if (item.kind !== "approval") {
-    if (/\?\s*$/.test(reply)) return undefined;                // "KAN-42 what is this about?" – a question for the assistant
+    if (/\?\s*$/.test(reply)) return undefined;                // "KAN-42 what is this about?" – a question, not a start
     return YES.test(reply) || reply === "1" || START.test(reply) ? { intent: { intent: "approve", ref } } : { reply: `Reply "yes" to start ${ref}.` };
   }
   // a QA result waiting: "create 1, 3", "create all", "report only"
@@ -301,86 +271,15 @@ function replyTo(item: NonNullable<ReturnType<typeof itemFor>>, reply: string): 
   return { intent: { intent: "reject", ref, text: reply } };   // "KAN-42 use the existing validator" = change request
 }
 
-// --------------------------------------------------------------- the small intent model
-
-async function aiIntent(text: string, p: Pending): Promise<Intent | undefined> {
-  const def = AGENTS.intent;
-  const focus = getFocus();
-  const context = [
-    `FOCUS (the item the conversation is about right now): ${focus ?? "none"}`,
-    `Waiting for approval:\n${p.approvals.map((x) => `- ${refOf(x.task)} (${x.approval.action}): ${x.task.title ?? ""}`).join("\n") || "none"}`,
-    `Waiting for an answer:\n${p.questions.map((t) => `- ${refOf(t)}: ${normaliseQuestions(t.data.questions, 4).map((q) => `${q.question}${q.options.length ? ` [options: ${q.options.join(" / ")}]` : ""}`).join(" / ")}`).join("\n") || "none"}`,
-    `Waiting to start:\n${[...new Set(p.starts.map((t) => refOf(t)))].slice(0, 30).join(", ") || "none"}`,
-    `Open Jira tickets that may be meant (map a ticket NAME or description to its key – "the invite email task" → its key):\n${ticketsForPrompt(text) || "none indexed"}`,
-    `Recent tasks:\n${listTasks({ limit: 500 }).filter((t) => t.kind !== "part").slice(-8).map((t) => `- ${refOf(t)} [${t.state}] ${t.title ?? ""}`).join("\n") || "none"}`,
-    `Recent conversation (oldest first; the last USER line is the message to classify):\n${untrusted("teams-history", chatHistoryText(20, 300)) || "none"}`,
-  ].join("\n\n");
-  try {
-    const r = await getRunner().run({ agent: "intent", tier: def.tier, system: def.system, schema: def.schema, maxTurns: 2,
-      prompt: `${context}\n\nThe message:\n${untrusted("teams-message", truncate(text, 2000))}` });
-    recordUsage("teams:intent", r, { agent: "intent" });
-    if (!r.ok || !r.data?.intent) return undefined;
-    const one = (x: any): Intent => {
-      const refs = Array.isArray(x.refs) ? x.refs.map((k: string) => ticketKeyIn(String(k))).filter((k: string | undefined): k is string => !!k) : [];
-      return { intent: x.intent, ref: x.ref || refs[0] || undefined, refs: refs.length > 1 ? refs : undefined, text: x.text || undefined, project: x.project || undefined, delegated: !!x.delegated };
-    };
-    const more = (Array.isArray(r.data.more) ? r.data.more : []).filter((x: any) => x?.intent).slice(0, 5).map(one);
-    return { ...one(r.data), more: more.length ? more : undefined };
-  } catch (e: any) {
-    logger.warn("intent model failed", { error: e.message });
-    return undefined;
-  }
-}
-
-/** Only act on an AI-detected approval/answer when the target is certain. */
-function validate(i: Intent, p: Pending): Intent | { reply: string } {
-  const focus = getFocus();
-  const byRef = (list: Task[], ref: string) => list.find((t) => t.id === getTask(ref)?.id);
-  const pick = (list: Task[]) => (i.ref ? byRef(list, i.ref) : list.length === 1 ? list[0] : focus ? byRef(list, focus) : undefined);
-  switch (i.intent) {
-    case "approve": case "reject": {
-      const t = pick(p.approvals.map((x) => x.task)) ?? (i.intent === "approve" ? pick(p.starts) : undefined);
-      if (!t) return p.approvals.length > 1 ? ambiguous(p) : { reply: "Nothing is waiting for your approval right now." };
-      if (i.intent === "reject" && !i.text?.trim()) return { reply: `What should I change for ${refOf(t)}?` };
-      return { ...i, ref: refOf(t) };
-    }
-    case "answer": {
-      const t = pick(p.questions);
-      if (!t) return p.questions.length > 1 ? ambiguous(p) : { reply: "No task is waiting for an answer right now." };
-      return { ...i, ref: refOf(t), text: i.text?.trim() || undefined };
-    }
-    default: return i;
-  }
-}
-
-// --------------------------------------------------------------- execution
+// --------------------------------------------------------------- execution of rule results
 
 async function execute(i: Intent, who: string, original: string): Promise<string> {
   switch (i.intent) {
     case "start_ticket": {
-      const keys = [...new Set((i.refs?.length ? i.refs : [i.ref ?? ""]).map((k) => k.toUpperCase().split("@")[0]).filter(Boolean))];
-      if (!keys.length) return "Which ticket? For example: plan for KAN-42";
-      if (keys.length === 1) {
-        const r = await startOneTicket(keys[0]);
-        await tick();
-        return r.kind === "busy" ? `${keys[0]} is already in progress:\n\n${r.detail}`
-          : r.kind === "error" ? `I couldn't start ${keys[0]}: ${r.detail}`
-          : r.kind === "started" ? `👍 Starting ${r.ref}. The plan comes here for your approval.`
-          : `👍 On it – **${r.ref}**: ${r.title}\n\nI'll read the ticket, the PRD and the code, and send you the plan here for approval before writing any code.`;
-      }
-      // several tickets: each becomes its own task with its own plan, questions and PR – worked on side by side
-      const lines: string[] = [];
-      let started = 0;
-      for (const key of keys) {
-        const r = await startOneTicket(key);
-        if (r.kind === "new" || r.kind === "started") started++;
-        lines.push(r.kind === "new" ? `- **${r.ref}** – ${r.title} (new)`
-          : r.kind === "started" ? `- **${r.ref}** – started (it was waiting to start)`
-          : r.kind === "busy" ? `- **${key}** – already in progress: ${r.short}`
-          : `- **${key}** – could not start: ${"detail" in r ? r.detail : "unknown error"}`);
-      }
-      await tick();
-      return `👍 **Starting ${started} of ${keys.length} tickets**\n\n${lines.join("\n")}\n\nThey are worked on side by side. Each plan comes here separately for your approval, then each PR. When several things wait, start your reply with the ticket, e.g. "${keys[0]} 1".`;
+      // one place decides how a ticket starts (B5 someone else's, B6 already has a PR, B17 project not set up, M6 not cloned)
+      const r = await toolStart({ ref: i.ref, refs: i.refs }, { who, original });
+      if (r.ask) { storeQuestion(r.ask); return [r.reply, r.ask.question].filter(Boolean).join("\n\n"); }
+      return r.reply;
     }
     case "send_report": {
       const { requestTicketReport } = await import("../report/ticketReport.js");
@@ -402,7 +301,10 @@ async function execute(i: Intent, who: string, original: string): Promise<string
     }
     case "approve": {
       const t = getTask(i.ref ?? "");
-      if (t?.state === "AWAITING_START") { startAwaiting(refOf(t)); await tick(); return `👍 Starting ${refOf(t)}.`; }
+      if (t?.state === "AWAITING_START") {
+        const { startAwaiting } = await import("../engine/engine.js");
+        startAwaiting(refOf(t)); await tick(); return `👍 Starting ${refOf(t)}.`;
+      }
       return (await decideAndApply(i.ref ?? "", "approved", who, "teams-personal")).message;
     }
     case "reject": return (await decideAndApply(i.ref ?? "", "rejected", who, "teams-personal", i.text)).message;
@@ -414,6 +316,13 @@ async function execute(i: Intent, who: string, original: string): Promise<string
       return `Cancel ${refOf(t)} (${t.title ?? ""})? Reply "yes" to cancel, anything else keeps it.`;
     }
     case "status": {
+      if (i.ref && i.text === "details") {
+        try {
+          const { detailsReply } = await import("../messenger/details.js");
+          const d = detailsReply(`details ${i.ref}`);
+          if (d && !/^I have no details/.test(d)) return truncate(d, 6000);
+        } catch { /* messenger not available: plain status */ }
+      }
       if (i.ref) {
         const direct = getTask(i.ref) ? statusText(i.ref) : undefined;
         if (direct) return direct;
@@ -421,11 +330,12 @@ async function execute(i: Intent, who: string, original: string): Promise<string
         if (all.length) return all.map((t) => statusText(refOf(t))).join("\n\n");
         return `I don't have a task for ${i.ref}. Say "plan for ${i.ref}" to start it.`;
       }
-      const active = listTasks({ states: ["NEEDS_INFO", "AWAITING_START", "QUEUED", "RUNNING", "PAUSED", "AWAITING_APPROVAL", "PUBLISHING", "STALE", "WAITING_PARTS"] }).filter((t) => t.kind !== "part");
+      const active = listTasks({ states: ["NEEDS_INFO", "AWAITING_START", "QUEUED", "RUNNING", "PAUSED", "AWAITING_APPROVAL", "PUBLISHING", "STALE", "WAITING_PARTS", "PR_OPEN", "BLOCKED"] }).filter((t) => t.kind !== "part");
       if (!active.length) return "Nothing is in progress right now.";
       return `📋 **${inboxSummaryLine()}**\n\n${active.slice(0, 10).map((t) => { const n = taskNow(t); return `- **${refOf(t)}** – ${n.now}`; }).join("\n")}`;
     }
     case "resume": {
+      if (!i.ref && isPaused()) { resumeAll(); await tick(); return "▶️ Resumed – new work starts again."; }
       const list = getTask(i.ref ?? "") ? [getTask(i.ref ?? "")!] : tasksOfTicket(i.ref ?? "");
       const stopped = list.filter((t) => ["PAUSED", "FAILED", "STALE", "FAILED_PUBLISH"].includes(t.state));
       if (!stopped.length) return list.length ? `${i.ref} isn't paused – ${list.map((t) => `${refOf(t)}: ${taskNow(t).now}`).join("; ")}` : `I can't find ${i.ref}.`;
@@ -459,21 +369,8 @@ async function execute(i: Intent, who: string, original: string): Promise<string
   }
 }
 
-type StartResult = { kind: "new" | "started"; ref: string; title: string } | { kind: "busy"; detail: string; short: string } | { kind: "error"; detail: string };
-
-/** Start one ticket: a new task, or start one that waits to start; an active one is left alone. */
-async function startOneTicket(key: string): Promise<StartResult> {
-  const active = listTasks({ states: ["DETECTED", "TRIAGED", "NEEDS_INFO", "AWAITING_START", "QUEUED", "RUNNING", "PAUSED", "AWAITING_APPROVAL", "PUBLISHING", "STALE", "REJECTED", "FAILED_PUBLISH", "WAITING_PARTS"] }).filter((t) => t.kind !== "part")
-    .filter((t) => (t.data.ticket?.key ?? String(t.source_ref).split("@")[0]).toUpperCase() === key);
-  if (active.length) {
-    const waiting = active.find((t) => t.state === "AWAITING_START");
-    if (waiting) { startAwaiting(refOf(waiting)); return { kind: "started", ref: refOf(waiting), title: waiting.title ?? "" }; }
-    return { kind: "busy", detail: active.map((t) => statusText(refOf(t))).join("\n\n"), short: active.map((t) => taskNow(t).now).join("; ") };
-  }
-  try {
-    const t = await runTicket(key);
-    return { kind: "new", ref: refOf(t), title: t.title ?? "" };
-  } catch (e: any) { return { kind: "error", detail: e.message }; }
+function storeQuestion(ask: { question: string; calls?: any[]; options?: any[] }): void {
+  if (ask.calls?.length || ask.options?.length) setAwaiting({ type: "conductor", question: ask.question, calls: ask.calls, options: ask.options, at: Date.now() });
 }
 
 /** One short question instead of a long list: "Do you mean KAN-52 (question: …) or KAN-35 (…)?" */
@@ -527,10 +424,24 @@ async function handleAwaiting(a: Awaiting, text: string, who: string): Promise<s
     return c ? `🛑 Cancelled ${a.ref}. Nothing was published.` : `I can't find ${a.ref}.`;
   }
   if (a.type === "confirm_actions") {
-    if (YES.test(t) || /^(do it all|all|both|go)\b/i.test(t)) { clearAwaiting(); return runActions(a.actions, who, t); }
+    if (YES.test(t) || /^(do it all|all|both|go)\b/i.test(t)) { clearAwaiting(); return runActions(a.actions as Intent[], who, t); }
     if (NEVER_MIND.test(t) || /^(no|nope|nah|cancel|stop|don'?t)\b[\s.!]*$/i.test(t)) { clearAwaiting(); return "OK – nothing was done."; }
     clearAwaiting();
     return undefined;                                // a correction or a new message – read it again normally
+  }
+  if (a.type === "conductor") {
+    // the Conductor's one short question: a number or a named option picks; "yes" runs it; "no" drops it
+    if (a.options?.length) {
+      const n = Number(t.replace(/[.!\s]+$/, ""));
+      const byKey = a.options.find((o) => o.key && t.toUpperCase().replace(/[.!\s]+$/, "") === o.key.toUpperCase());
+      const pick = Number.isInteger(n) && n >= 1 && n <= a.options.length ? a.options[n - 1] : byKey;
+      if (pick) { clearAwaiting(); return runConfirmed(pick.calls as any, who, t); }
+      // "yes" to a choice is not a choice – never guess, and never let it approve something else
+      if (YES.test(t)) return `Which one? Reply with the number (1–${a.options.length}).`;
+    } else if (a.calls?.length && YES.test(t)) { clearAwaiting(); return runConfirmed(a.calls as any, who, t); }
+    if (NEVER_MIND.test(t) || /^(no|nope|nah|cancel|don'?t|keep it)\b[\s.!]*$/i.test(t)) { clearAwaiting(); return "OK – nothing was done."; }
+    clearAwaiting();
+    return undefined;                                // something else – read it normally
   }
   if (a.type === "confirm_answer") {
     clearAwaiting();
@@ -548,17 +459,23 @@ async function handleAwaiting(a: Awaiting, text: string, who: string): Promise<s
   return undefined;
 }
 
+/** What the poller knows about a message beyond its text (W1a): the quoted bot message's item, a quoted teammate's text. */
+export type MessageContext = TurnContext;
+
 /** Understand and act on one message from the owner in the Teams chat. Returns the reply to post. */
-export async function handleChatMessage(text: string, who: string): Promise<string> {
+export async function handleChatMessage(text: string, who: string, ctx: MessageContext = {}): Promise<string> {
   text = plainNumbers(text);                       // "1️⃣" copied back from our message means "1"
   const awaiting = getAwaiting();
   if (awaiting) {
     const r = await handleAwaiting(awaiting, text, who);
     if (r) { audit(`user:${who}`, "teams.followup", undefined, { type: awaiting.type }); return r; }
   }
+  // a quoted bot message sets the item exactly (W1a) – it beats the focus for this message and the next short replies
+  if (ctx.quotedItem) setFocus(ctx.quotedItem);
   const p = pendingItems();
   const aiAvailable = loadSettings().models.provider !== "mock";
-  const rule = ruleIntent(text, p, aiAvailable);
+  // a quote of someone's message carries context: the Conductor reads it with the words ("fix this in KAN-52")
+  const rule = ctx.quotedContext && aiAvailable && conductorEnabled() ? undefined : ruleIntent(text, p, aiAvailable);
   if (rule && "reply" in rule) return rule.reply;
   if (rule && "option" in rule) {
     const { ref, n } = rule.option;
@@ -567,12 +484,24 @@ export async function handleChatMessage(text: string, who: string): Promise<stri
     if (n === 2) { setAwaiting({ type: "reject_reason", ref, at: Date.now() }); return `✏️ What should I change for ${ref}?`; }
     return execute({ intent: "cancel", ref }, who, text);
   }
-  let intent: Intent | { reply: string } | undefined = rule && "intent" in rule ? rule.intent : undefined;
-  if (!intent && aiAvailable) {
-    const ai = await aiIntent(text, p);
+  if (rule && "intent" in rule) {
+    const intent = rule.intent;
+    audit(`user:${who}`, "teams.intent", intent.ref, { intent: intent.intent, delegated: intent.delegated || undefined, path: "fast" });
+    if (intent.ref && intent.intent !== "unclear") setFocus(intent.ref);
+    return execute(intent, who, text);
+  }
+  // Everything else: the Conductor (one model call with tools)
+  if (aiAvailable && conductorEnabled()) return (await conductorTurn(text, who, ctx)).reply;
+  return legacyPath(text, who, p, aiAvailable);
+}
+
+/** The older path while the Conductor is off: the intent model reads it; decisions are read back first. */
+async function legacyPath(text: string, who: string, p: Pending, aiAvailable: boolean): Promise<string> {
+  let intent: Intent | { reply: string } | undefined;
+  if (aiAvailable) {
+    const ai = await legacyAiIntent(text, p);
     if (ai) {
-      // Claude read the message: several actions are done in order; approving or rejecting is repeated back first
-      const all = [ai, ...(ai.more ?? [])].map((x) => validate({ ...x, more: undefined }, p));
+      const all = [ai, ...(ai.more ?? [])].map((x) => legacyValidate({ ...x, more: undefined }, p, ambiguous));
       const ok = all.filter((x): x is Intent => !("reply" in x) && x.intent !== "unclear" && x.intent !== "question");
       if (all.length > 1 || ok.some((x) => DECISIONS.has(x.intent))) {
         if (!ok.length) return "reply" in all[0] ? all[0].reply : unclearReply(p);
@@ -580,7 +509,7 @@ export async function handleChatMessage(text: string, who: string): Promise<stri
         if (ok.some((x) => DECISIONS.has(x.intent)) || ok.length > 1) {
           setAwaiting({ type: "confirm_actions", actions: ok, at: Date.now() });
           if (ok[0].ref) setFocus(ok[0].ref);
-          return confirmText(ok, problems);
+          return legacyConfirmText(ok, problems);
         }
         intent = ok[0];
       } else intent = all[0];
@@ -589,46 +518,14 @@ export async function handleChatMessage(text: string, who: string): Promise<stri
   if (intent && "reply" in intent) return intent.reply;
   if (!intent) return questionReply(text, who);
   audit(`user:${who}`, "teams.intent", intent.ref, { intent: intent.intent, delegated: intent.delegated || undefined });
-  if (intent.ref && intent.intent !== "unclear") setFocus(intent.ref);     // the conversation is now about this item
+  if (intent.ref && intent.intent !== "unclear") setFocus(intent.ref);
   return execute(intent, who, text);
 }
 
-/** Decisions that change a task – repeated back for a "yes" when Claude (not an exact rule) understood them. */
+/** Decisions that change a task – repeated back for a "yes" when the model (not an exact rule) understood them. */
 const DECISIONS = new Set<IntentName>(["approve", "reject", "cancel"]);
 /** A pull request's CI: "failed", "red", "checks", "pipeline", "build", "tests failing", "lint". */
 const CI_WORDS = /\b(ci|checks?|pipelines?|builds?|workflows?|actions|failed|failing|fails|broken|red|green|lint|tests?)\b/i;
-
-function describeAction(i: Intent): string {
-  const t = i.ref ? getTask(i.ref) : undefined;
-  const a = t ? latestApproval(t.id) : undefined;
-  const what = a?.state === "pending" ? approvalWhat(a).replace("raise the PR?", "raise the PR") : t?.state === "AWAITING_START" ? "start" : "it";
-  switch (i.intent) {
-    case "approve": return t?.state === "AWAITING_START" ? `Start **${i.ref}**` : `Approve **${i.ref}** – ${what}`;
-    case "reject": return `Ask for changes on **${i.ref}**: "${truncate(i.text ?? "", 200)}"`;
-    case "answer": return `Answer **${i.ref}**${i.delegated ? " – leave the decision to the agent" : `: "${truncate(i.text ?? "", 200)}"`}`;
-    case "cancel": return `Cancel **${i.ref}**`;
-    case "start_ticket": return `Start ${(i.refs ?? [i.ref]).map((r) => `**${r}**`).join(", ")}`;
-    case "status": return `Show the status${i.ref ? ` of **${i.ref}**` : ""}`;
-    case "resume": return `Resume **${i.ref}**`;
-    case "review_pr": return `Review ${i.ref ? `the PR of **${i.ref}**` : "the PR"} and show you the comments first`;
-    case "resolve_comments": return `Fix the review comments on ${i.ref ? `**${i.ref}**` : "the PR"} and show you the fixes first`;
-    case "fix_ci": return `Fix the failing CI checks on ${i.ref ? `**${i.ref}**` : "the PR"}, show you the fixes first, then watch CI until it passes`;
-    case "fix_qa": return `Fix the QA issues on ${i.ref ? `**${i.ref}**` : "the PR"} and show you the fixes first`;
-    case "qa_pr": return `Run QA on ${i.ref ? `**${i.ref}**` : "the PR"}`;
-    case "send_report": return `Send the PDF of ${(i.refs ?? [i.ref]).map((r) => `**${r}**`).join(", ")}`;
-    case "start_request": return `Start new work: "${truncate(i.text ?? "", 160)}"`;
-    default: return i.intent;
-  }
-}
-
-function confirmText(actions: Intent[], problems: string[]): string {
-  return [
-    `🤔 **Here's what I understood${actions.length > 1 ? ` – ${actions.length} things` : ""}**`,
-    actions.map((a, n) => `${actions.length > 1 ? `${n + 1}. ` : "- "}${describeAction(a)}`).join("\n"),
-    problems.length ? `Not done: ${problems.join(" · ")}` : "",
-    `↩️ Reply **yes** to do ${actions.length > 1 ? "all of it" : "it"}, or tell me what I got wrong.`,
-  ].filter(Boolean).join("\n\n");
-}
 
 /** Run confirmed actions in order (a confirmed cancel is not asked again). */
 async function runActions(actions: Intent[], who: string, original: string): Promise<string> {

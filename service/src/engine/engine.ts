@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import { loadSettings, getProject, requiredDecisionChannel, engineVersion, type ProjectConfig } from "../core/config.js";
 import { normaliseQuestions, questionTexts, resolveReply, type Question } from "../core/questions.js";
-import { getMeta, setMeta, delMeta, audit } from "../core/db.js";
+import { db, getMeta, setMeta, delMeta, audit } from "../core/db.js";
 import { logger } from "../core/log.js";
 import { truncate } from "../core/util.js";
 import { getRunner, untrusted } from "../agents/runner.js";
@@ -10,7 +10,7 @@ import { playbookFor } from "../core/roles.js";
 import { groupMembers, describeMembers } from "./routing.js";
 import { getPlaybook, stepIndex } from "./playbooks.js";
 import { STEPS, BudgetPause, ticketText, type StepResult } from "./steps.js";
-import { buildStepCtx, flushUsage, keepWorkspace, applyTicketChange, pause, fail, retryOrFail, finish, askUser, answerHint, liveStep } from "./stepRun.js";
+import { buildStepCtx, flushUsage, keepWorkspace, applyTicketChange, pause, fail, retryOrFail, finish, askUser, answerHint, liveStep, noteConnectorError } from "./stepRun.js";
 
 export { askUser, answerHint };
 import {
@@ -22,6 +22,9 @@ import { removeWorktree } from "../git/git.js";
 import { clients } from "../connectors/registry.js";
 import { clearActivity } from "../live/activity.js";
 import { kernelTick, recoverJobs, itemRunning, stopItemJobs, jobForApproval, resumeJob } from "../kernel/runner.js";
+import { needsApproval } from "../policy/gate.js";
+import { describeInForce } from "../policy/directives.js";
+import { isBlockedByConnector, unavailableConnectors } from "../intake/healthGate.js";
 import { getRecipe } from "../kernel/recipes.js";
 
 /**
@@ -130,14 +133,15 @@ async function afterTriage(t: Task, project: ProjectConfig, size: string, clear:
     t = transition(t.id, "RUNNING", "observe");
     return transition(t.id, "DONE", "observe mode – notify only");
   }
-  if (t.data.burst || (!t.data.manual && settings.limits.askBeforeStart.includes(size as any))) {
+  if (t.data.burst || (!t.data.manual && needsApproval("start", { id: t.id, project_id: t.project_id, size, owner: "me" }, { settings, project }).ask)) {
     t = transition(t.id, "AWAITING_START", t.data.burst ? "burst" : `ask before starting size ${size}`);
     if (!t.data.burst) await notify({ kind: "burst", taskId: t.id, taskRef: ref, title: `${ref}: start this size-${size} task?`, body: `${t.title}\nReply "start ${ref}" (or just "yes") to begin. Ignore it to skip.`, url: t.data.ticket?.url });
     return t;
   }
   t = transition(t.id, "QUEUED", "ready");
-  const planNote = getPlaybook(pb).steps.some((s) => s.name === "plan_gate") && (settings.workflow.planApproval === "always" || project.autonomy === "plan") ? " I'll send you the plan here for approval before writing any code." : "";
-  await notify({ kind: "picked_up", taskId: t.id, taskRef: ref, title: `👍 ${ref} picked up`, body: `${t.title}\nSize ${size}, playbook: ${getPlaybook(pb).title}${others}.${planNote}`, url: t.data.ticket?.url });
+  const planNote = getPlaybook(pb).steps.some((s) => s.name === "plan_gate") && needsApproval("plan", { id: t.id, project_id: t.project_id, size, owner: "me" }, { settings, project }).ask ? " I'll send you the plan here for approval before writing any code." : "";
+  const rules = describeInForce(t);
+  await notify({ kind: "picked_up", taskId: t.id, taskRef: ref, title: `👍 ${ref} picked up`, body: `${t.title}\nSize ${size}, playbook: ${getPlaybook(pb).title}${others}.${planNote}${rules ? `\nRules in force: ${rules}` : ""}`, url: t.data.ticket?.url });
   return t;
 }
 
@@ -176,6 +180,7 @@ export async function tick(): Promise<void> {
     // Paused = no AI work at all: new tickets are only recorded (DETECTED) and triaged after resume.
     if (isPaused()) return;
     for (const t of listTasks({ states: ["DETECTED"], limit: 10 })) {
+      if (t.data.takenOver && !t.data.handedBack) continue;             // you took it over
       try { await triageTask(t); } catch (e: any) { logger.error("triage failed", { task: t.id, error: e.message }); }
     }
     wakeLeads();
@@ -186,7 +191,11 @@ export async function tick(): Promise<void> {
         onRunEnd: () => setImmediate(() => { tick().catch(() => {}); }) });
       return;
     }
-    const queued = listTasks({ states: ["QUEUED"] }).filter((t) => (!t.data.retryAt || new Date(t.data.retryAt).getTime() <= Date.now()) && !blockedBySibling(t) && !blockedByLead(t));
+    // connectors that are down (intake/health.ts): work that needs one waits; everything else runs (v1 never sets BLOCKED)
+    let down: ReturnType<typeof unavailableConnectors> | undefined;
+    try { down = unavailableConnectors(); } catch { down = undefined; }
+    const queued = listTasks({ states: ["QUEUED"] }).filter((t) => (!t.data.retryAt || new Date(t.data.retryAt).getTime() <= Date.now()) && !blockedBySibling(t) && !blockedByLead(t)
+      && !(t.data.takenOver && !t.data.handedBack) && !(down?.size && isBlockedByConnector(t, undefined, down)));
     for (const t of queued) {
       if (running.size >= s.limits.maxParallel) break;
       if (running.has(t.id)) continue;
@@ -280,6 +289,7 @@ export async function runTask(taskId: string): Promise<Task> {
     } catch (e: any) {
       flushUsage(ctx, sid, e instanceof BudgetPause ? "paused" : "error", e.message);
       keepWorkspace(task, ctx);
+      noteConnectorError(e);
       if (e instanceof BudgetPause) return pause(getTask(task.id)!, `Budget: ${e.message}. Reply \`/aiw resume ${task.source_ref ?? task.id}\` to continue or \`/aiw cancel\` to stop.`);
       return retryOrFail(getTask(task.id)!, `${spec.name}: ${e.message}`);
     }
@@ -347,11 +357,24 @@ export async function answerTask(ref: string | undefined, answer: string, by: st
   const refused = decisionRefused(channel);
   if (refused) return { ok: false, message: refused };
   const waiting = listTasks({ states: ["NEEDS_INFO"] });
-  const t = ref ? getTask(ref) : waiting.length === 1 ? waiting[0] : undefined;
+  // engine v2: a job beside an item (a comment fix on a ticket's open PR…) asks without moving the item to NEEDS_INFO
+  const jobAsking = waitingJobQuestions();
+  let t = ref ? getTask(ref) : waiting.length === 1 && !jobAsking.length ? waiting[0] : undefined;
+  if (!ref && !t && !waiting.length && jobAsking.length === 1) t = getTask(jobAsking[0]);
   if (!t) {
-    return { ok: false, message: ref ? `No task ${ref}.` : waiting.length ? `Several tasks need information: ${waiting.map((x) => x.source_ref).join(", ")}. Say which one: answer <task> "…"` : "No task is waiting for information." };
+    const all = [...waiting.map((x) => x.source_ref ?? x.id), ...jobAsking.map((id) => getTask(id)?.source_ref ?? id)];
+    return { ok: false, message: ref ? `No task ${ref}.` : all.length ? `Several tasks need information: ${all.join(", ")}. Say which one: answer <task> "…"` : "No task is waiting for information." };
   }
-  if (t.state !== "NEEDS_INFO") return { ok: false, message: `${t.source_ref} is not waiting for information (state: ${t.state}).` };
+  if (!answer.trim() && !opts.delegated) return { ok: false, message: "Please include your answer." };
+  if (t.state !== "NEEDS_INFO") {
+    const { answerJob } = await import("./prFix.js");
+    const r = await answerJob(t.id, answer, by, opts.delegated ? { delegated: DELEGATED_ANSWER } : {});
+    if (r) {
+      if (r.ok) { markInboxRead(t.id, "needs_info"); await tick(); }
+      return r.ok && opts.delegated ? { ok: true, message: `👍 OK – I'll check the code and decide for ${t.source_ref ?? t.id}.` } : r;
+    }
+    return { ok: false, message: `${t.source_ref} is not waiting for information (state: ${t.state}).` };
+  }
   if (!answer.trim()) return { ok: false, message: "Please include your answer." };
   const asked = normaliseQuestions(t.data.questions, 10);
   const resolved = opts.delegated ? { ok: true as const, answer: DELEGATED_ANSWER } : resolveReply(asked, answer);
@@ -366,6 +389,14 @@ export async function answerTask(ref: string | undefined, answer: string, by: st
   return { ok: true, message: opts.delegated
     ? `👍 OK – I'll check the code and decide for ${t.source_ref}. You'll see my choice in the plan before anything is built.`
     : `👍 Thanks – ${t.source_ref} continues with your answer.` };
+}
+
+/** Items with a waiting job that asked a question (engine v2; none on v1). */
+function waitingJobQuestions(): string[] {
+  try {
+    const rows = db().prepare("SELECT DISTINCT j.item_id FROM jobs j JOIN tasks t ON t.id=j.item_id WHERE j.state='waiting' AND json_extract(j.data,'$.questions') IS NOT NULL AND t.state<>'NEEDS_INFO'").all() as any[];
+    return rows.map((r) => r.item_id);
+  } catch { return []; }
 }
 
 /** Apply a human decision coming from Claude Code, the dashboard or Slack. */
@@ -385,6 +416,8 @@ export async function decideAndApply(ref: string, decision: "approved" | "reject
     post_review: `✅ Posting the review on ${t.data.review ? `${t.data.review.repo}#${t.data.review.num}` : r}${t.data.reviewSelection?.length ? ` (comments ${t.data.reviewSelection.join(", ")} only)` : ""} – as comments only, not an approval.`,
     push_fixes: `✅ Pushing the fixes to ${t.data.fix ? `${t.data.fix.repo}#${t.data.fix.num}` : r} and replying to the comments – QA starts after that.`,
     create_issues: `✅ Posting the QA results on ${t.data.qa ? `${t.data.qa.repo}#${t.data.qa.num}` : r}${Array.isArray(t.data.qaSelection) ? (t.data.qaSelection.length ? ` with issues for ${t.data.qaSelection.join(", ")}` : " (report only, no issues)") : ""}.`,
+    push_rebase: `✅ Pushing the updated branch for ${r} (a normal push, nothing forced) – I'll tell you when CI has run.`,
+    post_jira_comment: `✅ Posting it to Jira for ${r}.`,
   };
   const rejectedText: Record<string, string> = {
     implement_plan: `✏️ Got it – re-planning ${r} with your feedback. The new plan comes here.`,
@@ -393,6 +426,7 @@ export async function decideAndApply(ref: string, decision: "approved" | "reject
     post_review: `✏️ Got it – redoing the review of ${r} with your feedback. The new comments come here first.`,
     push_fixes: `✏️ Got it – reworking the fixes for ${r} with your feedback. They come here again before anything is pushed.`,
     create_issues: `✏️ Got it – redoing the QA of ${r} with your feedback.`,
+    push_rebase: `✏️ Got it – nothing pushed for ${r}. I'll redo the conflict fix with your feedback and show you again.`,
   };
   const action = d.approval.action;
   return { ok: true, message: decision === "approved" ? approvedText[action] ?? `Approved ${r} – publishing now.` : rejectedText[action] ?? `Rejected ${r} – will re-run with your feedback.` };
@@ -468,8 +502,14 @@ export function resumeTask(ref: string): Task | undefined {
   const t = getTask(ref);
   if (!t) return undefined;
   if (t.state === "STALE" || t.state === "FAILED_PUBLISH") return refreshTask(ref);
+  if (t.state === "PR_OPEN") {
+    // engine v2: a paused job on an open PR (its own build's tail, a fix, a rebase) leaves the item in PR_OPEN;
+    // the kernel tick puts those jobs back in the queue (kernel/runner.ts requeuePausedJobs)
+    mergeData(t.id, { resumeJobs: new Date().toISOString(), stuck: null, pushRefused: null, takenOver: null });
+    return getTask(t.id);
+  }
   if (!["PAUSED", "FAILED", "NEEDS_INFO"].includes(t.state)) return t;
-  const patch: Record<string, any> = { retryAt: null, errorCount: 0 };
+  const patch: Record<string, any> = { retryAt: null, errorCount: 0, stuck: null, pushRefused: null };
   if (/budget/i.test(t.error ?? "")) patch.budgetExtensions = (t.data.budgetExtensions ?? 1) + 1;
   mergeData(t.id, patch);
   // resuming a lead resumes the part that stopped it

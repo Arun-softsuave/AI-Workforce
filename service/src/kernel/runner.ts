@@ -19,7 +19,7 @@ import { getRunner, type Runner, type AgentRequest, type AgentResult } from "../
 import { STEPS, BudgetPause, type StepResult, type StepCtx } from "../engine/steps.js";
 import { getTask, transition, mergeData, updateTask, startStep, canTransition, type Task, type State } from "../engine/tasks.js";
 import {
-  buildStepCtx, flushUsage, keepWorkspace, applyTicketChange, pause, fail, retryOrFail, finish, askUser, liveStep,
+  buildStepCtx, flushUsage, keepWorkspace, applyTicketChange, pause, fail, retryOrFail, finish, askUser, liveStep, noteConnectorError,
 } from "../engine/stepRun.js";
 import { notify, markInboxRead } from "../notify/router.js";
 import { clearActivity, progressFrom } from "../live/activity.js";
@@ -37,26 +37,20 @@ export function missingSteps(recipeName: string): string[] {
   try { return [...new Set(getRecipe(recipeName).steps.map((s) => s.name).filter((n) => !STEPS[n]))]; } catch { return [recipeName]; }
 }
 
-/** What an event would start but cannot run yet (its recipe needs steps not built): tell the developer instead. */
-const NOT_BUILT: Record<string, string> = {
-  replan: "the ticket changed after the PR was raised – please check whether the PR still matches it",
-  rebase: "the PR needs a rebase (conflicts or new commits on its branch) – please rebase it",
-  close: "the PR was merged",
-};
-
-/** mailbox.enqueue, but an event whose recipe cannot run yet becomes a short message (and the event is "ignored"). */
+/**
+ * mailbox.enqueue, guarded: a recipe that names a step STEPS does not have (a newer recipe file on an older build)
+ * becomes one short message instead of a job that would fail at once. Wave 3 built every after-PR recipe, so this
+ * only fires for a broken install.
+ */
 function enqueueRunnable(itemId: string, reaction: Parameters<typeof enqueue>[1], ev?: Parameters<typeof enqueue>[2]) {
-  if (reaction.job !== "none" && missingSteps(reaction.recipe).length) {
-    const item = getItem(itemId);
-    const ref = item?.source_ref ?? itemId;
-    if (item && reaction.setState && item.state !== reaction.setState) { try { setItemState(item.id, reaction.setState, reaction.note ?? ev?.type); } catch { /* not legal from here */ } }
-    if (item && reaction.recipe === "close") {
-      // no close-out steps yet: a merged PR simply finishes the item (worktree removed after 7 days, as v1)
-      try { if (getItem(item.id)?.state === "MERGED") { setItemState(item.id, "DONE", "PR merged"); mergeData(item.id, { cleanupAfter: new Date(Date.now() + 7 * 86_400_000).toISOString() }); markInboxRead(item.id); } } catch { /* ignore */ }
+  if (reaction.job !== "none") {
+    const missing = missingSteps(reaction.recipe);
+    if (missing.length) {
+      const ref = getItem(itemId)?.source_ref ?? itemId;
+      notify({ kind: "failed", taskId: itemId, taskRef: ref, dedupeKey: `ev:${ev?.id ?? reaction.recipe}`, title: `${ref}: can't run ${reaction.recipe.replace(/_/g, " ")}`,
+        body: `This install is missing steps (${missing.join(", ")}). Update AI Workforce, then try again.` }).catch(() => {});
+      return undefined;
     }
-    notify({ kind: "info", taskId: itemId, taskRef: ref, dedupeKey: `ev:${ev?.id ?? reaction.recipe}`, title: `${ref}: ${NOT_BUILT[reaction.recipe] ?? reaction.note ?? reaction.recipe}`,
-      body: `${ref}: ${NOT_BUILT[reaction.recipe] ?? reaction.note ?? reaction.recipe}.` }).catch(() => {});
-    return undefined;
   }
   return enqueue(itemId, reaction, ev);
 }
@@ -318,6 +312,7 @@ async function runLoop(start: Job): Promise<Job> {
     } catch (e: any) {
       flushUsage(ctx, sid, e instanceof BudgetPause ? "paused" : "error", e.message);
       keepJobWorkspace(job, owned, viewTask, ctx);
+      noteConnectorError(e);
       const now = getItem(item.id)!;
       return onStepError(getJob(job.id)!, now, owned && now.state !== "PR_OPEN", spec.name, e);
     }
@@ -486,6 +481,7 @@ export function ensureJobs(eligible: (t: Task) => boolean = () => true): number 
   for (const r of rows) {
     const item = getItem(r.id);
     if (!item || !item.playbook || !eligible(item)) continue;
+    if (item.data.takenOver && !item.data.handedBack) continue;          // you took it over: nothing runs until "continue"
     const retryAt = item.data.retryAt ?? null;
     const active = activeJob(item.id);
     if (active) {
@@ -534,16 +530,55 @@ export async function kernelTick(opts: KernelTickOpts = {}): Promise<void> {
   linkParts();
   try { routeEvents(settings); } catch (e: any) { logger.error("event routing failed", { error: e.message }); }
   sweepJobs();
+  requeuePausedJobs();
   ensureJobs(opts.eligible);
   const d = pickRunnable(limitsFrom(settings), []);
   for (const j of d.start) {
     if (live.has(j.id)) continue;
     const claimed = startJob(j.id);
     if (!claimed) continue;
+    budgetWarnings(claimed.item_id);
     runJob(claimed.id)
       .catch((e) => logger.error("runJob crashed", { job: j.id, error: e.message }))
       .finally(() => { try { opts.onRunEnd?.(); } catch { /* ignore */ } });
   }
+}
+
+/**
+ * A job that owns a PR_OPEN item and paused (budget, repeated errors after the PR, a step's own pause) leaves the item
+ * in PR_OPEN, so "resume" has no item state to move. resumeTask() sets data.resumeJobs on the item; this puts those
+ * waiting jobs back in the queue at the same step (wave-2 gap: paused owned jobs on PR_OPEN items were never requeued).
+ */
+export function requeuePausedJobs(): number {
+  const rows = db().prepare(`SELECT j.* FROM jobs j JOIN tasks t ON t.id = j.item_id
+    WHERE j.state='waiting' AND t.state='PR_OPEN' AND json_extract(t.data,'$.resumeJobs') IS NOT NULL
+      AND json_extract(j.data,'$.approvalId') IS NULL AND json_extract(j.data,'$.questions') IS NULL AND j.type<>'ci_watch'`).all() as any[];
+  let n = 0;
+  for (const r of rows) {
+    const j = rowToJob(r);
+    if (live.has(j.id)) continue;
+    resumeJob(j.id, { retryAt: null, paused: null });
+    n++;
+  }
+  for (const id of new Set(rows.map((r) => r.item_id))) mergeData(id, { resumeJobs: null });
+  return n;
+}
+
+/** Budget warnings at 80 % (item / batch / epic / sprint / day): each sent once, when the item's next job starts. */
+function budgetWarnings(itemId: string): void {
+  void (async () => {
+    try {
+      const item = getItem(itemId);
+      const project = item && getProject(item.project_id);
+      if (!item || !project) return;
+      const { checkScopeBudget, markBudgetWarned } = await import("../engine/budget.js");
+      const c = checkScopeBudget(project, item);
+      if (!c.warnings.length) return;
+      markBudgetWarned(item.id, c.warnings);
+      await notify({ kind: "info", taskId: item.id, taskRef: item.source_ref ?? undefined, dedupeKey: `budget:${c.warnings.map((w) => w.id + w.scope).join(",")}`,
+        title: `${item.source_ref ?? item.id}: budget at 80%`, body: c.warnings.map((w) => w.text).join("\n") });
+    } catch (e: any) { logger.warn("budget warning failed", { error: e.message }); }
+  })();
 }
 
 /** Is this item busy in the kernel (a job of it running in this process)? Used by isRunning() in v2. */

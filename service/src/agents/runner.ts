@@ -312,6 +312,12 @@ export class MockRunner implements Runner {
       case "reporter": return { title: "AI Workforce change", body: "## Summary\nMock implementation report.\n\n## Testing\nAll checks passed." };
       case "memory-keeper": return { facts: [], lessons: [] };
       case "intent": return { intent: "question", ref: "", text: "", project: "", delegated: false };
+      // the Teams Conductor: offline it treats the message as a question for the read-only assistant (like intent above)
+      case "conductor": {
+        const msg = /OWNER MESSAGE:\n([\s\S]*)$/.exec(p)?.[1]?.trim() ?? "";
+        return { calls: msg ? [{ tool: "lookup", args: { query: msg } }] : [], reply: "", needResults: false };
+      }
+      case "chat-summary": return { summary: "" };
       // ----- multi-repository lead (offline): routes by repository names + ticket keywords, builds the producer first
       case "explorer": {
         const ids = (/Repository ids: (.+)/.exec(p)?.[1] ?? "").split(",").map((x) => x.trim()).filter(Boolean);

@@ -2,6 +2,7 @@ import { httpJson, truncate } from "../core/util.js";
 import { getSecret } from "../core/secrets.js";
 import { hasMcpLogin, callMcp, listMcpTools, type McpService } from "./mcpOAuth.js";
 import { figmaDesktopSummary } from "./figmaDesktop.js";
+import { preferredFigmaMode } from "./registry.js";
 import type { ConnectionTest } from "./types.js";
 
 // ------------------------------------------------------------------ Notion
@@ -73,7 +74,8 @@ export async function testNotion(token: string): Promise<ConnectionTest> {
  */
 export async function figmaFileSummary(fileKey: string, nodeId?: string): Promise<string> {
   const token = getSecret("figma.token");
-  if (!token) return figmaDesktopSummary(nodeId);
+  // token first; the desktop app's MCP server when there is no token or you chose it (`aiw connect figma --desktop`)
+  if (!token || preferredFigmaMode() === "desktop") return figmaDesktopSummary(nodeId);
   if (nodeId) return figmaNodeSummary(fileKey, nodeId, token);
   const f = await httpJson(`https://api.figma.com/v1/files/${fileKey}?depth=3`, { headers: { "X-Figma-Token": token } });
   const out: string[] = [`# Figma file: ${f.name} (last modified ${f.lastModified})`];

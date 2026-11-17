@@ -276,7 +276,7 @@ export async function tempDatabase(project: ProjectConfig, tag: string): Promise
     if (!candidates.length) errors.push(`no local database login (run \`aiw qa database ${project.id}\` once)`);
   }
   // the profile says which extensions the schema needs (e.g. pgvector) – use an image that has them
-  const image = engine === "postgres" && /pgvector|vector extension/i.test(`${prof.notes} ${JSON.stringify(prof.database)}`) ? "pgvector/pgvector:pg16" : undefined;
+  const image = engine === "postgres" && /pgvector|\bvector extension/i.test(`${prof.notes} ${JSON.stringify(prof.database)}`) ? "pgvector/pgvector:pg16" : undefined;
   const d = await dockerServer(engine as "postgres" | "mysql" | "mongo", name, image);
   if (d) {
     const sync = dbUrl(d.url);

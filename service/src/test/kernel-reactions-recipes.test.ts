@@ -61,7 +61,8 @@ test("reactions: each event type maps to the planned job", () => {
     assert.equal(r!.job, j, type);
     assert.equal(r!.recipe, recipe, type);
   }
-  assert.equal(reactionFor(ev("pr_merged"), mine, s)!.setState, "MERGED");
+  // close-out moves PR_OPEN → MERGED → DONE itself (close_item, the recipe's last step), so the reaction sets no state
+  assert.equal(reactionFor(ev("pr_merged"), mine, s)!.setState, undefined);
   assert.equal(reactionFor(ev("pr_closed"), mine, s)!.setState, "CLOSED");
   // no item needed
   assert.equal(reactionFor(ev("connector_down", { connector: "jira" }, null), undefined, s)!.recipe, "block");
@@ -170,7 +171,7 @@ test("routeEvents: enqueue → markHandled; none rows and ignored events; setSta
   assert.equal(handled[events[3].id], "ignored");
   assert.equal(handled[events[4].id], "job2");
   assert.equal(handled[events[5].id], "j1");
-  assert.deepEqual(states, [["i2", "MERGED"]]);
+  assert.deepEqual(states, []);
   // a mailbox drop is marked ignored; an illegal state change does not stop routing
   const h2: Record<string, string> = {};
   const n2 = routeEvents(settings(), { ...deps, pendingEvents: () => [ev("pr_merged", {}, "i1"), ev("pr_closed", {}, "i1")], markHandled: (id, by) => { h2[id] = by; },
@@ -272,11 +273,12 @@ test("recipes: when skips steps on item size/data/state and job data; goto loops
 test("validate: real recipes – only the new steps that STEPS does not have yet are reported", async () => {
   const problems = await validate(loadRecipes(true));
   const unknown = problems.filter((p) => p.problem.startsWith("unknown step")).map((p) => `${p.recipe}:${p.step}`).sort();
-  assert.deepEqual(unknown, [
-    "close:clean_worktree", "close:close_item", "close:retarget_stacked", "close:unblock_dependents",
-    "rebase:rebase_apply", "rebase:rebase_prepare", "rebase:rebase_publish",
-    "replan:ask_adapt", "replan:summarise_change",
-  ]);
+  // wave 3 built every after-PR step (rebase, re-plan, close-out), so no recipe names a missing step
+  assert.deepEqual(unknown, []);
+  const names = (r: string) => loadRecipes().get(r)!.steps.map((x) => x.name);
+  for (const n of ["close_item", "clean_worktree", "retarget_stacked", "unblock_dependents"]) assert.ok(names("close").includes(n), `close has ${n}`);
+  for (const n of ["rebase_prepare", "rebase_apply", "rebase_publish"]) assert.ok(names("rebase").includes(n), `rebase has ${n}`);
+  for (const n of ["summarise_change", "ask_adapt"]) assert.ok(names("replan").includes(n), `replan has ${n}`);
   assert.deepEqual(problems.filter((p) => !p.problem.startsWith("unknown step")), []);
   // every playbook recipe is clean against the real STEPS
   const pbNames = new Set(loadPlaybooks().keys());

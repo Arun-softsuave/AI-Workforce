@@ -10,7 +10,8 @@ import { failingSection } from "../connectors/github.js";
 import * as G from "../git/git.js";
 import { buildContextPack } from "../brain/brain.js";
 import { stripAttribution, attributionHits } from "../core/attribution.js";
-import { requestApproval, latestApproval } from "../approvals/approvals.js";
+import { requestApproval } from "../approvals/approvals.js";
+import { ownApproval } from "./steps/common.js";
 import { notify } from "../notify/router.js";
 import { createTask, getTask, listTasks, mergeData, transition, updateTask, type Task } from "./tasks.js";
 import { ticketBlock, environmentFailure, costText, type StepCtx, type StepResult } from "./steps.js";
@@ -230,9 +231,16 @@ export const QA_STEPS: Record<string, (ctx: StepCtx) => Promise<StepResult>> = {
   },
 
   async qa_gate(ctx) {
-    const a = latestApproval(ctx.task.id);
+    const a = await ownApproval(ctx.task, "qaApprovalId", "create_issues");
     if (a?.action === "create_issues" && a.state === "approved" && a.requested_at >= (ctx.task.data.qaResult?.at ?? "")) return { status: "ok", note: "approved" };
     const ap = requestApproval(ctx.task.id, "create_issues", {});
+    ctx.save({ qaApprovalId: ap.id });
+    // the policy gate: "create GitHub issues without asking" (settings.pr.autoQaIssues or your rule)
+    const { canCreateIssue } = await import("../policy/gate.js");
+    const { approveByPolicy } = await import("../approvals/approvals.js");
+    const g = canCreateIssue(ctx.task.id);
+    if (g.verdict === "deny") return { status: "fail", reason: g.reason };
+    if (g.verdict === "allow") { approveByPolicy(ap.id, g.rule ?? "create_issues"); return { status: "ok", note: "issues created without asking (your preference)" }; }
     const pr: PrReviewInfo = ctx.task.data.prInfo;
     await notify({ kind: "approval_needed", taskId: ctx.task.id, taskRef: ctx.task.source_ref ?? undefined, approvalId: ap.id, approvalAction: "create_issues", dedupeKey: ap.id,
       title: `🧪 QA of PR #${pr.number} – ${VERDICT[ctx.task.data.qaResult?.verdict] ?? "done"}`, body: qaPreview(getTask(ctx.task.id)!), url: pr.url });
@@ -241,7 +249,7 @@ export const QA_STEPS: Record<string, (ctx: StepCtx) => Promise<StepResult>> = {
 
   /** The approved issues and one QA report comment on the PR. */
   async qa_publish(ctx) {
-    const a = latestApproval(ctx.task.id);
+    const a = await ownApproval(ctx.task, "qaApprovalId", "create_issues");
     if (!a || a.state !== "approved" || a.action !== "create_issues") return { status: "fail", reason: "No approval to post the QA results" };
     const gh = clients.github();
     if (!gh?.createIssue || !gh.commentOnPr) return { status: "fail", reason: "GitHub is not connected" };

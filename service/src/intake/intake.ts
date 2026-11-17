@@ -178,7 +178,8 @@ export async function pollJira(): Promise<{ items: number; tasks: Task[] }> {
   } catch (e: any) {
     if (/\b401\b|\b403\b/.test(e.message)) {
       markConnection("jira", "expired", e.message);
-      await notify({ kind: "connector_problem", dedupeKey: new Date().toISOString().slice(0, 10), title: "Jira login expired", body: "Run `/aiw connect jira` to reconnect. Polling is paused until then." });
+      // the health loop marks Jira down at once: one reconnect message, work that needs Jira waits (no second notice here)
+      try { const { reportConnectorError } = await import("./health.js"); await reportConnectorError("jira", e); } catch { /* best effort */ }
     }
     throw e;
   }
@@ -309,6 +310,9 @@ export async function pollAll(): Promise<{ items: number; tasks: number; errors:
       try { await pollPrActivity(); } catch (e: any) { logger.warn("PR activity poll failed", { error: e.message }); }
       try { await pollReviewedPrs(); } catch (e: any) { logger.warn("reviewed PR poll failed", { error: e.message }); }
     }).catch(() => {});
+    // engine v2: GitHub producers (conditional requests) -> kernel events -> reactions; a no-op on v1, which keeps the polls above
+    try { const { runGitHubProducers } = await import("./github.js"); const r = await runGitHubProducers(); if (r?.errors?.length) errors.push(...r.errors.map((x) => `github: ${x}`)); }
+    catch (e: any) { logger.warn("GitHub events failed", { error: e.message }); }
     try { const { pollCiWatches } = await import("../engine/prFix.js"); await runTimed("CI watch", () => pollCiWatches()); } catch (e: any) { logger.warn("CI watch failed", { error: e.message }); }
   }
   if (isConnected("jira")) {

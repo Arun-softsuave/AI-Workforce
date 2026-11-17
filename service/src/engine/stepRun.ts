@@ -70,7 +70,11 @@ export function applyTicketChange(task: Task, pb: { steps: { name: string }[] })
 export async function pause(task: Task, reason: string): Promise<Task> {
   const t = transition(task.id, "PAUSED", reason, { error: reason });
   if (t.kind === "part") return t;              // the lead reports it (one message per ticket)
-  await notify({ kind: "paused", taskId: t.id, taskRef: t.source_ref ?? undefined, dedupeKey: `${t.run_no}:${t.step_index}:${reason.slice(0, 40)}`, title: `${t.source_ref ?? t.id} paused`, body: reason, url: t.data.ticket?.url });
+  // E13 "Stuck: …" and F9 "Can't push to …" say what happened in the title; everything else is "paused"
+  const ref = t.source_ref ?? t.id;
+  const title = /^Stuck:/.test(reason) ? `🛑 ${ref} is stuck` : /^Can't push to /.test(reason) ? `⚠️ ${ref}: can't push` : `${ref} paused`;
+  const body = /^Stuck:/.test(reason) ? reason.replace(/^Stuck:\s*/, "Failed: ") : reason;
+  await notify({ kind: "paused", taskId: t.id, taskRef: t.source_ref ?? undefined, dedupeKey: `${t.run_no}:${t.step_index}:${reason.slice(0, 40)}`, title, body, url: t.data.ticket?.url });
   return t;
 }
 
@@ -81,6 +85,19 @@ export async function fail(task: Task, reason: string): Promise<Task> {
   return t;
 }
 
+/**
+ * A step hit a sign-in error (401) from Jira, GitHub or Figma mid-task: mark that connector down at once (one reconnect
+ * message; work that needs it waits) instead of waiting up to 5 minutes for the health loop. Best effort, never throws.
+ */
+export function noteConnectorError(e: any): void {
+  const status = typeof e?.status === "number" ? e.status : /\b401\b/.test(String(e?.message ?? "")) ? 401 : undefined;
+  if (status !== 401) return;
+  const m = String(e?.message ?? "");
+  const p = /api\.github\.com|github\.com/i.test(m) ? "github" : /atlassian|\/rest\/api\/|jira/i.test(m) ? "jira" : /figma\.com/i.test(m) ? "figma" : undefined;
+  if (!p) return;
+  void import("../intake/health.js").then((H) => H.reportConnectorError(p, e)).catch(() => {});
+}
+
 /** Transient errors (API outage, network) retry with back-off; after 3 attempts the task pauses for a human. */
 export async function retryOrFail(task: Task, reason: string): Promise<Task> {
   const n = (task.data.errorCount ?? 0) + 1;
@@ -89,7 +106,7 @@ export async function retryOrFail(task: Task, reason: string): Promise<Task> {
     mergeData(task.id, { errorCount: n, retryAt: new Date(Date.now() + backoff(n + 4)).toISOString(), lastError: reason });
     return transition(task.id, "QUEUED", `retry ${n} after error`);
   }
-  mergeData(task.id, { errorCount: 0 });
+  mergeData(task.id, { errorCount: 0, stuck: { step: reason.split(":")[0], failed: truncate(reason, 200), tried: "3 attempts with back-off", at: new Date().toISOString() } });
   return pause(task, `Stopped after repeated errors: ${truncate(reason, 500)}. Run \`/aiw resume ${task.source_ref ?? task.id}\` to retry.`);
 }
 

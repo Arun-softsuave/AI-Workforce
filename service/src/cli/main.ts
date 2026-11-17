@@ -152,6 +152,14 @@ Daily use
   aiw dashboard [--no-open]         Open the live dashboard in your browser (works only on this computer)
   aiw bench [report]                Token and cost baseline: costly steps, agents and tickets
   aiw bench runs | plan <tickets…> | compare <runA> <runB> | mark <runId> <ticket> yes|no
+  aiw items [--all] [<ticket>]      Work items as a tree (epic → ticket → parts), with the job each one runs
+  aiw explain <ticket>              Why it is where it is: plan, decisions, your answers, last steps, rules in force
+  aiw rules                         Standing rules in force ("no plan approval for KAN-45", "only backend"…)
+  aiw rules add <rule> <value> [--ref KAN-45 | --scope global|item|batch|epic|sprint] [--until ISO]
+                                    rules: plan_approval|pr_approval|start_approval|create_issues|create_tickets (skip|ask),
+                                    auto_fix_ci|auto_resolve|post_review|no_questions (yes|no), only|dont_touch (area), budget_tokens (N)
+  aiw rules remove <id>             Back to normal for that rule
+  aiw config engine v1|v2           Which engine runs the work (v2: the kernel – items, events, jobs, recipes)
   aiw ask "question"                Ask the project assistant (same one that answers in Teams)
   aiw chat [--daily-tokens N] [--new]   Chat assistant budget / start a fresh conversation
 Add --json to any command for machine-readable output.`;
@@ -297,7 +305,9 @@ export async function main(argv: string[]): Promise<number> {
       if (p === "notion" && (a.oauth || !manual)) return connectNotionOAuth(a, json);
       if (p === "github" && !manual) return connectGitHubBrowser(a, json);
       if (p === "figma" && a.desktop) return connectFigmaDesktop(a, json);
-      if (p === "figma" && !manual) return openConnectPage(p, json);       // a Figma token first: reads any file, app open or not
+      // a Figma token first (the docs' default): reads any file, app open or not; the desktop app only behind --desktop
+      if (p === "figma") updateSettings((s) => { s.figma = { ...(s.figma ?? {}), mode: "token" }; });
+      if (p === "figma" && !manual) return openConnectPage(p, json);
       if (a.browser) return openConnectPage(p, json);
       const secretFromStdin = a["token-stdin"] || a["webhook-stdin"] || a["bot-token-stdin"] ? await readStdin() : undefined;
       const res = await connect(p, {
@@ -658,6 +668,54 @@ export async function main(argv: string[]): Promise<number> {
       out(`Dashboard: ${url}\n(This link only works on this computer.)`, json); return 0;
     }
     case "statusline": console.log(inboxSummaryLine()); return 0;
+    case "items": {
+      const { itemsTree, itemsTreeText } = await import("../api/ops.js");
+      const lines = itemsTree({ all: !!a.all, root: sub });
+      if (sub && !lines.length) { out(`No item ${sub}.`, json); return 1; }
+      out(json ? lines : itemsTreeText(lines), json);
+      return 0;
+    }
+    case "explain": {
+      if (!sub) { out("Usage: aiw explain <ticket>", json); return 1; }
+      const { explainItem } = await import("../api/ops.js");
+      const r = await explainItem(sub);
+      out(json ? r : r.text, json);
+      return r.ok ? 0 : 1;
+    }
+    case "rules": {
+      const ops = await import("../api/ops.js");
+      if (!sub || sub === "list") {
+        const rules = await ops.rulesView();
+        out(json ? rules : rules.length ? rules.map((r) => `${r.id}  ${r.text}${r.until ? ` (until ${r.until.slice(0, 10)})` : ""}`).join("\n") : "No rules in force – your settings apply.", json);
+        return 0;
+      }
+      if (sub === "add") {
+        const rule = third, value = a._?.[3] ?? a.value;
+        if (!rule || value === undefined) { out("Usage: aiw rules add <rule> <value> [--ref KAN-45 | --scope global] [--until ISO]", json); return 1; }
+        const v = value === "yes" ? true : value === "no" ? false : value;
+        const r = await ops.addRule({ rule, value: v, ref: str(a.ref), scope: str(a.scope), until: str(a.until) }, "cli");
+        out(r.message, json);
+        return r.ok ? 0 : 1;
+      }
+      if (sub === "remove" || sub === "rm" || sub === "clear") {
+        if (!third) { out("Usage: aiw rules remove <id>   (ids are listed by `aiw rules`)", json); return 1; }
+        const r = await ops.removeRule(third, "cli");
+        out(r.message, json);
+        return r.ok ? 0 : 1;
+      }
+      out("Usage: aiw rules [list] | add <rule> <value> [--ref KAN-45] | remove <id>", json);
+      return 1;
+    }
+    case "config": {
+      if (sub !== "engine") { out("Usage: aiw config engine v1|v2", json); return 1; }
+      if (!third) { const { engineVersion } = await import("../core/config.js"); out(`engine ${engineVersion()}`, json); return 0; }
+      if (third !== "v1" && third !== "v2") { out("The engine is v1 or v2.", json); return 1; }
+      updateSettings((s) => { s.engine = { ...(s.engine ?? {}), version: third as "v1" | "v2" }; });
+      audit("user", "settings.engine", undefined, { version: third });
+      await kick();
+      out(`Engine set to ${third}.${third === "v2" ? " Running work moves over at its next step; `aiw config engine v1` switches back." : ""}`, json);
+      return 0;
+    }
     case "ask": {
       const q = a._.slice(1).join(" ").trim();
       if (!q) { out('Usage: aiw ask "which KAN tickets are in progress?"', json); return 1; }
@@ -806,6 +864,7 @@ async function connectFigmaDesktop(_a: Args, json: boolean): Promise<number> {
     return 1;
   }
   recordFigmaDesktop(s.tools);
+  updateSettings((st) => { st.figma = { ...(st.figma ?? {}), mode: "desktop" }; });      // you chose the app: use it first
   connectorsDone();
   out(`Connected Figma through the desktop app (${s.tools.length} tools, no token needed). Keep the app open with the design file when a task needs it.`, json);
   return 0;

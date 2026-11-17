@@ -124,7 +124,13 @@ test("Jira assignment -> triage -> feature playbook -> approval -> draft PR -> m
   assert.deepEqual(reviewRequests.map((r) => r.users), [["eric"]], "the project's reviewers are asked – never the author");
   const { getMeta } = await import("../core/db.js");
   await new Promise((r) => setTimeout(r, 50));
-  assert.ok(JSON.parse(getMeta("fix.ciwatch") ?? "[]").some((w: any) => w.repo === "acme/pay" && w.num === prs[0].number), "CI is watched from the first commit of the PR");
+  if (prEndState() === "PR_OPEN") {
+    // engine v2: the watch is a ci_watch job on the PR's item (waiting until CI finishes)
+    const w = db().prepare("SELECT state, data FROM jobs WHERE item_id=? AND type='ci_watch'").all(getTask("PAY-142")!.id) as any[];
+    assert.ok(w.some((j) => j.state === "waiting" && JSON.parse(j.data).repo === "acme/pay" && JSON.parse(j.data).num === prs[0].number), "CI is watched from the first commit of the PR");
+  } else {
+    assert.ok(JSON.parse(getMeta("fix.ciwatch") ?? "[]").some((w: any) => w.repo === "acme/pay" && w.num === prs[0].number), "CI is watched from the first commit of the PR");
+  }
   // HARD RULE: nothing that leaves the machine mentions Claude / AI authorship
   const { attributionHits } = await import("../core/attribution.js");
   assert.deepEqual(attributionHits(`${prs[0].title}\n${prs[0].body}`), [], "PR title/body carry no AI attribution");

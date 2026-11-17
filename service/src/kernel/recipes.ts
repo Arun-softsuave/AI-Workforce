@@ -1,10 +1,11 @@
 /**
- * Kernel recipes (engine v2): ordered step lists run by kernel/runner.ts with the unchanged STEPS functions.
+ * Kernel recipes (engine v2): ordered step lists run by kernel/runner.ts with the unchanged STEPS functions (the after-PR
+ * steps – ci_watch, rebase, replan, close – live in engine/steps/ and reach STEPS through engine/prFix.ts FIX_STEPS).
  * Two sources, one map (name → Recipe):
  *  - every v1 playbook (engine/playbooks.ts), as a recipe of the SAME name with the SAME steps and params, so v2 runs
  *    today's flows unchanged;
  *  - service/recipes/*.yaml (AIW_RECIPES overrides the folder): the new after-PR recipes (ci_fix, comment_fix, rebase,
- *    close, replan). A yaml recipe never replaces a playbook of the same name (validate() reports the clash).
+ *    close, replan, ci_watch). A yaml recipe never replaces a playbook of the same name (validate() reports the clash).
  * Branching is plain code: `when` (a guard name or a simple condition on the item/job), `goto` (bounded by `max`),
  * `spawn_children` (the runner creates one child per entry of job.data[key]). No model calls here.
  */

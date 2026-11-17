@@ -34,8 +34,8 @@ test("a fresh database migrates to the latest schema with the kernel tables and 
 test("an existing database one version behind upgrades without losing rows, and is backed up first", () => {
   const file = tmpFile("old.db");
   const old = new DatabaseSync(file);
-  migrate(old, undefined, SCHEMA_VERSION - 1);
-  assert.equal(version(old), SCHEMA_VERSION - 1);
+  migrate(old, undefined, 4);                      // the pre-kernel schema (5 = kernel, 6 = notification columns)
+  assert.equal(version(old), 4);
   assert.ok(!tables(old).includes("jobs"));
   old.prepare("INSERT INTO tasks (id, project_id, source, source_ref, kind, state, priority, data, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)")
     .run("t-lead", "nue-backend", "jira", "KAN-40", "lead", "WAITING_PARTS", 2, JSON.stringify({ targets: ["nue-backend"] }), "2026-11-01", "2026-11-01");
@@ -71,12 +71,29 @@ test("an existing database one version behind upgrades without losing rows, and 
   again.close();
 
   // the backup holds the old schema and the old rows
-  const bakFile = `${file}.bak-schema${SCHEMA_VERSION - 1}`;
+  const bakFile = `${file}.bak-schema4`;
   assert.ok(fs.existsSync(bakFile), "backup written before migrating");
   const bak = new DatabaseSync(bakFile, { readOnly: true });
-  assert.equal(version(bak), SCHEMA_VERSION - 1);
+  assert.equal(version(bak), 4);
   assert.equal((bak.prepare("SELECT COUNT(*) n FROM tasks").get() as any).n, 2);
   bak.close();
+});
+
+test("a kernel-schema database (one version behind) gets the notification columns, backed up first", () => {
+  const file = tmpFile("v5.db");
+  const old = new DatabaseSync(file);
+  migrate(old, undefined, SCHEMA_VERSION - 1);
+  assert.equal(version(old), SCHEMA_VERSION - 1);
+  assert.ok(tables(old).includes("jobs"));
+  old.prepare("INSERT INTO notifications (id, kind, idem_key, title, body, channel, status, created_at) VALUES ('n1','info','k1','t','b','desktop','sent','2026-11-01')").run();
+  old.close();
+  const d = openDb(file);
+  assert.equal(version(d), SCHEMA_VERSION);
+  const cols = (d.prepare("PRAGMA table_info(notifications)").all() as any[]).map((c) => c.name);
+  for (const c of ["item_id", "merge_key", "details_ref"]) assert.ok(cols.includes(c), c);
+  assert.equal((d.prepare("SELECT COUNT(*) n FROM notifications").get() as any).n, 1);
+  d.close();
+  assert.ok(fs.existsSync(`${file}.bak-schema${SCHEMA_VERSION - 1}`));
 });
 
 test("kernel states exist with legal transitions; every v1 transition is kept", () => {

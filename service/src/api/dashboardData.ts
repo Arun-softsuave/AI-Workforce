@@ -120,6 +120,7 @@ const currentStep = (t: Task) => steps(t)[t.step_index];
 
 export function stateLabel(t: Pick<Task, "state" | "data">): string {
   if (t.state === "DONE" && hasOpenPr(t)) return STATE_LABEL.PR_OPEN;
+  if (t.state === "PAUSED" && t.data?.stuck) return "Stuck";                // E13: an agent hit its round limit
   return STATE_LABEL[t.state] ?? t.state.toLowerCase().replace(/_/g, " ");
 }
 export const stateTone = (t: Pick<Task, "state">): Tone => TONE[t.state] ?? "wait";
@@ -428,6 +429,8 @@ const FORM_PROVIDERS = new Set(["jira", "github", "slack", "teams", "notion", "f
 /** Every tool: state in plain words, account, last check, and the Connect / Reconnect link. */
 export function connections(): ConnectionCard[] {
   const rows = new Map((db().prepare("SELECT * FROM connections").all() as any[]).map((r) => [r.provider, r]));
+  let health = new Map<string, any>();
+  try { health = new Map((db().prepare("SELECT * FROM connector_health").all() as any[]).map((r) => [r.provider, r])); } catch { /* older database */ }
   const out: ConnectionCard[] = [];
   for (const [p, name, usedFor, required] of CONN) {
     let row = rows.get(p);
@@ -443,8 +446,15 @@ export function connections(): ConnectionCard[] {
       : { label: "Reconnect", hint: `Run "aiw connect ${provider}" in a terminal` };
     const detail = provider === "teams-personal" ? (meta.mode === "bot" ? "Two-way chat" : "Your private chat")
       : meta.auth === "figma-desktop" ? "Figma desktop app" : meta.auth ? "Browser sign-in" : meta.source === "gh-cli" ? "GitHub CLI sign-in" : row ? "Access token" : undefined;
-    out.push({ provider, name, tone, label, account: row?.account ?? "", checked: row?.updated_at ?? null, usedFor, action,
-      detail: st !== "connected" && meta.lastError ? short(meta.lastError, 120) : detail });
+    const card: ConnectionCard = { provider, name, tone, label, account: row?.account ?? "", checked: row?.updated_at ?? null, usedFor, action,
+      detail: st !== "connected" && meta.lastError ? short(meta.lastError, 120) : detail };
+    // the health loop's last check (intake/health.ts): down / rate limited beats the stored connection status
+    const h = row ? health.get(provider === "teams-personal" ? "teams" : provider) : undefined;
+    if (h?.state === "down") Object.assign(card, { tone: "bad" as Tone, label: "Disconnected", checked: h.since, detail: h.detail ? short(h.detail, 120) : card.detail,
+      action: card.action ?? { label: "Reconnect", hint: `Run "aiw connect ${provider === "teams-personal" ? "teams-personal" : provider}" in a terminal` } });
+    else if (h?.state === "limited") Object.assign(card, { tone: "wait" as Tone, label: "Rate limited", checked: h.since, detail: h.detail ? short(h.detail, 120) : card.detail });
+    else if (h?.state === "up" && h.last_ok) card.checked = h.last_ok;
+    out.push(card);
   }
   const s = loadSettings();
   const mock = s.models.provider === "mock";
