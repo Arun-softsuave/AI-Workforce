@@ -57,6 +57,29 @@ const MIGRATIONS: string[] = [
     task_ref TEXT, refs TEXT);
   CREATE INDEX chat_log_ts ON chat_log(ts);
   `,
+  // 0.8 foundation: token split, Teams quotes/inputs, environment doctor, benchmark, timers, live activity, design docs
+  `
+  ALTER TABLE steps ADD COLUMN fresh_in INTEGER DEFAULT 0;
+  ALTER TABLE steps ADD COLUMN cache_read INTEGER DEFAULT 0;
+  ALTER TABLE steps ADD COLUMN cache_write INTEGER DEFAULT 0;
+  ALTER TABLE steps ADD COLUMN effort TEXT;
+  ALTER TABLE chat_log ADD COLUMN msg_id TEXT;
+  ALTER TABLE chat_log ADD COLUMN reply_to TEXT;
+  ALTER TABLE chat_log ADD COLUMN item_id TEXT;
+  ALTER TABLE chat_log ADD COLUMN question_key TEXT;
+  CREATE INDEX chat_log_msg ON chat_log(msg_id);
+  CREATE TABLE inputs (id TEXT PRIMARY KEY, item_id TEXT, msg_id TEXT, kind TEXT NOT NULL, name TEXT, path TEXT NOT NULL,
+    sha TEXT NOT NULL, summary TEXT, created_at TEXT NOT NULL);
+  CREATE INDEX inputs_item ON inputs(item_id);
+  CREATE TABLE env_checks (repo TEXT PRIMARY KEY, ok INTEGER NOT NULL, report TEXT NOT NULL, checked_at TEXT NOT NULL);
+  CREATE TABLE benchmarks (run_id TEXT NOT NULL, ticket TEXT NOT NULL, version TEXT NOT NULL, fresh_in INTEGER, cache_read INTEGER,
+    tokens_out INTEGER, cost_usd REAL, questions INTEGER, review_rounds INTEGER, ci_first_green INTEGER, pr_accepted_unchanged INTEGER,
+    notes TEXT, created_at TEXT NOT NULL, PRIMARY KEY (run_id, ticket));
+  CREATE TABLE timers (name TEXT PRIMARY KEY, every TEXT NOT NULL, last_run TEXT, last_ok INTEGER, next_run TEXT, detail TEXT);
+  CREATE TABLE activity (task_id TEXT PRIMARY KEY, agent TEXT, step TEXT, line TEXT, progress INTEGER, tokens INTEGER, started_at TEXT, at TEXT NOT NULL);
+  CREATE TABLE docs (item_id TEXT NOT NULL, version INTEGER NOT NULL, path TEXT NOT NULL, sha TEXT NOT NULL,
+    reason TEXT, open_questions INTEGER NOT NULL DEFAULT 0, readiness TEXT, created_at TEXT NOT NULL, PRIMARY KEY (item_id, version));
+  `,
 ];
 
 let _db: DatabaseSync | null = null;
