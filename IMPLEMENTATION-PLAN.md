@@ -1110,6 +1110,53 @@ Rules:
 | Safety against hidden instructions (M) | §11a | 1, 3 | `situations/m-injection.test.ts` |
 | Cost and accuracy proof | Phase 0.5 | 0.5 → 8 | `aiw bench` reports |
 
+### 12a. Requirements checklist (checked 17 Nov 2026)
+
+| Your requirement | Where in this plan |
+|---|---|
+| Understand Teams like Claude; tickets by name | W1, Conductor (Phase 3), ticket index (0.7.0) |
+| Dynamic, not a one-way pipeline; "recheck and resolve" any time | kernel + events (Phase 1, 4), replay suite |
+| CI and lint fixed after the PR **without asking** | W9 (0.7.0 + Phase 4) |
+| Many tickets at once; ask only when in doubt | W7, ask-desk W11 |
+| One short plan message; short messages (questions may be longer) | messenger (Phase 2), W5a summary |
+| Teammate told of every PR; comments to both people; resolve flow; QA → GitHub issues (after your OK) | W10 (Phase 4) |
+| Agents in parallel with status of every ticket | scheduler (Phase 1), dashboard W19 (Phase 2) |
+| Follow orders like "no need to ask for approval" | directives + gate (Phase 3) |
+| Knowledge agent answers before asking you | W11 (Phase 5) |
+| Screenshots in frontend PRs | W5 step 13 (KAN-43's screenshot question is still yours to decide) |
+| Normal PR after approval, never a draft; PRs to dev; never merge | 0.7.0, W5 step 15, rules |
+| Your teammate also uses the plugin | W10, two-plugin test (Phase 4) |
+| Finish my branch | W16 (Phase 7) |
+| Docstrings, coding standards, no stray test files | W5 step 11 |
+| Ticket / many tickets / epic / sprint / whole feature; sprint preview always | W7, W8 (Phase 6) |
+| Merge order always | Phase 1 edges, Phase 6 |
+| Jira, GitHub, Figma always connected, with reconnect alerts; Figma token first | W3 (Phase 2), W2 |
+| `.env` database allowed | Phase 2 |
+| Review old work | W15 (Phase 7) |
+| Low cost, low latency, accurate | §9, §9.1, Phase 0.5 bench, quality gate |
+| Dashboard | W19 |
+| Elephant–goldfish design documents | W5a (Phase 5) |
+| Figma again, design changes, design check | W12, W13, W5 (Phases 4–5) |
+| Quoted replies, images, files | W1a (Phase 3) |
+| Safe against hidden instructions; local only; no AI mention; secrets in vault; decisions from your Teams | §2, §11a |
+
+**Gap found and added (§12b):** the Claude Code side of the plugin (slash commands, skills, helper agents) was not in the plan. One command even contradicts a requirement: `commands/aiw-fix.md` says fixes are "shown in Teams before anything is pushed", but CI fixes are now pushed without asking.
+
+### 12b. Claude Code commands, skills and agents (updated with each phase)
+
+| Item | Change | Phase |
+|---|---|---|
+| `commands/aiw-fix.md`, `aiw-pr-review.md` | Wording matches the rules: CI and lint fixes are pushed without asking; review comments and QA issues are still shown first | 0 |
+| `commands/aiw-status.md`, `aiw-tasks.md` | Show the item tree (sprint → ticket → parts → PRs), merge order and blocked reasons | 1, 6 |
+| `commands/aiw-dashboard.md` | Opens the new dashboard | 2 |
+| New `aiw-explain` | "Why is KAN-52 waiting / what did it decide?" from the design document and the decision log | 3 |
+| New `aiw-rules` | List, add and remove your standing orders (directives) | 3 |
+| New `aiw-bench` | Run and compare the benchmark | 0.5 |
+| New `aiw-adopt` | "Finish my branch" from Claude Code | 7 |
+| `skills/aiw-onboarding` | Team, preferences, ready, environment doctor, Figma token first | 0, 2 |
+| `agents/aiw-planner`, `aiw-reviewer`, `aiw-memory-keeper` | Read and write the item's design document when used interactively, so work done in Claude Code and work done by the service share one source of truth | 5 |
+| MCP tools (`mcp/tools.ts`) | `aiw_explain`, `aiw_rules`, `aiw_items`, `aiw_bench`; `aiw_status` by tree | 1–7 |
+
 ---
 
 ## 13. Decisions needed before starting
