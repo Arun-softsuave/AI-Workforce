@@ -58,6 +58,26 @@ function prOf(data: Record<string, any>): { repo: string; num: number } | undefi
 
 export interface KernelMigration { parts: number; prItems: number; jobs: number; watches: number; events: number; backup?: string }
 
+export const REPAIR_OPEN_PR_KEY = "kernel.repair.openPrEvents";
+
+/**
+ * One-time repair (1.0.1): before tickets finished by the old engine could be reopened for their open PR, events on
+ * those PRs (a conflict, a failing check, a change request) were marked "ignored". Put the recent ones back in the
+ * queue so routing looks at them again – it now reopens the ticket (DONE → PR_OPEN) and starts the right job.
+ * Returns how many events were put back.
+ */
+export function repairIgnoredPrEvents(days = 14): number {
+  if (getMeta(REPAIR_OPEN_PR_KEY)) return 0;
+  const since = new Date(Date.now() - days * 86_400_000).toISOString();
+  const r = db().prepare(`UPDATE events SET handled_by = NULL, processed_at = NULL
+    WHERE handled_by = 'ignored' AND type IN ('pr_conflict','ci_failed','changes_requested') AND received_at >= ?
+      AND item_id IN (SELECT id FROM tasks WHERE state = 'DONE' AND (json_extract(data,'$.pr') IS NOT NULL OR json_extract(data,'$.prs') IS NOT NULL))`).run(since);
+  setMeta(REPAIR_OPEN_PR_KEY, nowIso());
+  const n = Number(r.changes);
+  if (n) { audit("service", "kernel.repaired_pr_events", undefined, { events: n }); logger.info("engine v2: ignored PR events queued again", { events: n }); }
+  return n;
+}
+
 /** Run the v2 data migration once. Returns undefined when it already ran. */
 export function migrateToKernel(): KernelMigration | undefined {
   if (getMeta(MIGRATED_KEY)) return undefined;

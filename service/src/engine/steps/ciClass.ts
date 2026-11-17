@@ -21,6 +21,8 @@ export interface CiDecision {
   fixCommand?: string;
   /** human: what a person must do ("re-record the baseline"). */
   needs?: string;
+  /** auto: the vulnerable packages whose lock entries the fix command updates. */
+  dependency?: string[];
   job?: CiJob;
 }
 
@@ -62,6 +64,38 @@ export function fixCommandFor(cmd: string | undefined, scripts: Record<string, s
   return undefined;
 }
 
+/**
+ * A dependency scan (pip-audit, npm audit, …) that names a package with a fixed version: the lock file is updated
+ * with the project's own package manager – no AI. `lockfiles` = the lock files in the repository root.
+ * Returns the packages and the command, or undefined when the log names no fix or no known lock file is present.
+ */
+export function dependencyFix(log: string, lockfiles: string[] = []): { packages: string[]; command: string } | undefined {
+  const pkgs = new Set<string>();
+  // pip-audit table: "Name  Version ID  Fix Versions" then rows "dnspython 2.9.0 CVE-2026-1 2.9.2"
+  const table = /Name\s+Version\s+ID\s+Fix Versions[\s\S]*?\n-[- ]+\n([\s\S]*?)(\n\s*\n|$)/i.exec(log);
+  if (table) for (const row of table[1].split("\n")) {
+    const m = /^([A-Za-z0-9_.-]+)\s+\S+\s+\S+\s+(\S+)/.exec(row.trim());
+    if (m && m[2] && !/^-+$/.test(m[2])) pkgs.add(m[1]);
+  }
+  // npm audit: "fix available via `npm audit fix`"
+  const npmFix = /fix available via `npm audit fix`/i.test(log);
+  const has = (f: string) => lockfiles.some((x) => x.toLowerCase() === f);
+  if (pkgs.size) {
+    const list = [...pkgs];
+    if (has("uv.lock")) return { packages: list, command: `uv lock ${list.map((p) => `--upgrade-package ${p}`).join(" ")}` };
+    if (has("poetry.lock")) return { packages: list, command: `poetry update ${list.join(" ")}` };
+    if (has("pdm.lock")) return { packages: list, command: `pdm update ${list.join(" ")}` };
+    return undefined;   // requirements.txt pins: the fix agent edits the pin
+  }
+  if (npmFix && has("package-lock.json")) return { packages: [], command: "npm audit fix" };
+  return undefined;
+}
+
+/** The program a fix command needs ("uv", "poetry", "npm", "ruff" behind "uv run"). */
+export function toolOf(command: string): string {
+  return command.trim().split(/\s+/)[0] ?? "";
+}
+
 /** What a person must do for a check the plugin must not fake. */
 export function humanNeeds(job: CiJob | undefined, log = ""): string {
   const kinds = job?.kinds ?? [];
@@ -78,7 +112,7 @@ export function humanNeeds(job: CiJob | undefined, log = ""): string {
  * once; red again → real).
  */
 export function classifyCheck(o: { check: Pick<CiCheck, "name" | "conclusion">; log?: string; failsOnBase?: boolean; baseRef?: string;
-  ci?: CiPipeline; reruns?: number; scripts?: Record<string, string> }): CiDecision {
+  ci?: CiPipeline; reruns?: number; scripts?: Record<string, string>; lockfiles?: string[] }): CiDecision {
   const log = o.log ?? "";
   const job = jobForCheck(o.ci, o.check.name);
   if (o.failsOnBase) return { cls: "base", reason: `also fails on ${o.baseRef ?? "the base branch"} – not caused by this PR`, job };
@@ -86,6 +120,9 @@ export function classifyCheck(o: { check: Pick<CiCheck, "name" | "conclusion">; 
   if (looksFlaky(o.check, log) && (o.reruns ?? 0) < 1) return { cls: "flaky", reason: "runner or network problem – re-running it once", job };
   const fix = job && job.fixable === "auto" && job.kinds.some((k) => k === "lint" || k === "format") ? fixCommandFor(job.localCommand, o.scripts) : undefined;
   if (fix) return { cls: "auto", reason: `${job!.kinds.filter((k) => k === "lint" || k === "format").join("/")} – fixed with \`${fix}\``, fixCommand: fix, job };
+  // a vulnerable dependency with a fixed version: the lock file is updated by the package manager (no AI)
+  const dep = (!job || job.kinds.includes("security")) ? dependencyFix(log, o.lockfiles) : undefined;
+  if (dep) return { cls: "auto", reason: `vulnerable dependency${dep.packages.length ? ` (${dep.packages.join(", ")})` : ""} – lock file updated with \`${dep.command}\``, fixCommand: dep.command, dependency: dep.packages, job };
   return { cls: "agent", reason: job ? `${job.kinds.join("/")} – the code is fixed` : "fixed in the code", job };
 }
 

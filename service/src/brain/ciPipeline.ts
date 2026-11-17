@@ -78,8 +78,13 @@ export function parseWorkflow(file: string, text: string): CiJob[] {
     const name = String(j.name ?? id).replace(/\$\{\{[^}]*\}\}/g, "").trim() || id;
     const kinds = kindsOf(`${name} ${id} ${stepNames} ${commands.join(" ")} ${actions.join(" ")}`);
     const usesPaid = secrets.some((s) => PAID_OR_PRIVATE.test(s));
+    // A lint / format / types job is not "needs a person" just because one helper step mentions an eval or a
+    // baseline (e.g. "Check eval scenarios have not leaked into prompts"); only its own name can say so.
+    const humanKind = (k: CiKind) => k === "baseline" || k === "eval" || k === "deploy";
+    const codeQuality = kinds.some((k) => ["lint", "format", "types"].includes(k));
+    const human = codeQuality ? kindsOf(`${name} ${id}`).some(humanKind) : kinds.some(humanKind);
     const fixable: CiFixable =
-      kinds.some((k) => k === "baseline" || k === "eval" || k === "deploy") || (usesPaid && !kinds.some((k) => ["lint", "format", "types"].includes(k))) ? "human"
+      human || (usesPaid && !codeQuality) ? "human"
       : kinds.some((k) => k === "test" || k === "security" || k === "build") ? "careful"
       : kinds.some((k) => k === "lint" || k === "format" || k === "types") ? "auto" : "careful";
     // the first command that does the job's real work is the one to reproduce locally

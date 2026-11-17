@@ -35,7 +35,7 @@ const ARGS_SCHEMA = {
     until: { type: "string" }, priority: { type: "number" }, due: { type: "string" },
     scope: { type: "string", enum: ["global", "item", "batch", "epic", "sprint"] }, rule: { type: "string" }, value: { type: "string" },
     key: { type: "string" }, name: { type: "string" }, github: { type: "string" },
-    mode: { type: "string", enum: ["comments", "ci", "issues"] }, project: { type: "string" }, takeOver: { type: "boolean" }, again: { type: "boolean" },
+    mode: { type: "string", enum: ["comments", "ci", "issues", "rebase"] }, project: { type: "string" }, takeOver: { type: "boolean" }, again: { type: "boolean" },
   },
   additionalProperties: false,
 };
@@ -60,7 +60,7 @@ const TOOL_DOC = [
   "- set_directive [rule, value, scope, ref]: a standing instruction. rules: plan_approval / pr_approval / start_approval / create_issues / create_tickets (value skip | ask), auto_fix_ci / auto_resolve / post_review / no_questions (value true | false), only / dont_touch (value = the area, e.g. \"backend\", \"tests\"), budget_tokens (number). scope item (with ref) for \"this ticket\", global for \"from now on\" / \"always\".",
   "- prefs [key, value | name, github]: settings: pr.draft, pr.autoFixCi, pr.autoReview, pr.autoPostReview, pr.autoQaIssues, workflow.planApproval (always|autonomy|skip), workflow.prApproval (ask|skip), workflow.qaAfterFix, workflow.ticketReport, notifications.quietHours (\"22:00-07:00\" or off), notifications.digestTime, profile.workingHours; team.add / team.remove (name, github).",
   "- control [action, ref, until, priority, due]: pause | resume | cancel | priority (priority 1 = first; due = ISO date) | takeover (\"stop, I'll do it\") | handback (\"continue KAN-45\") | undo (the last action, or an item's last local step when ref is given). No ref = everything.",
-  "- fix_pr [ref | text, mode]: fix your own PR: mode comments (review comments), ci (failing checks), issues (QA issues). text = the message (it holds the PR link or number).",
+  "- fix_pr [ref | text, mode]: fix your own PR: mode comments (review comments), ci (failing checks), issues (QA issues), rebase (conflicts / bring the base branch in). text = the message (it holds the PR link or number).",
   "- review [ref | text]: review a PR (yours or a teammate's); also old or merged work, a branch (\"review branch feat/x\"), a commit range, \"is the X epic complete\" and \"QA the X feature KAN-n\" (an audit: one verdict, then \"issues AUDIT-KAN-n\" files follow-ups). qa [ref | text]: run QA on a PR. adopt [ref | text]: finish your own branch (\"finish my branch feat/x\").",
   "- status [ref]: where an item, or everything, stands. explain [ref, query]: why something was done (plan, decisions, history). lookup [query, ref]: a question about the code, a ticket or the product (read-only assistant).",
 ].join("\n");
@@ -75,7 +75,7 @@ export const CONDUCTOR_SYSTEM = [
   "5. A correction (\"no, I meant KAN-53\") = control undo, then the corrected call.",
   "6. \"no need to ask for approval\", \"only backend\", \"don't touch tests\", \"from now on …\" = set_directive (scope item when it is about one ticket, else global). Settings changes (\"raise draft PRs from now on\", \"quiet hours 22-7\", \"Eric left the team\") = prefs.",
   "7. A priority or deadline (\"KAN-47 first, it's urgent\", \"by Friday\") = control priority (+ start if it isn't started).",
-  "8. \"recheck and resolve\" / \"fix the comments\" on a PR = fix_pr mode comments; failing checks = fix_pr mode ci.",
+  "8. \"recheck and resolve\" / \"fix the comments\" on a PR = fix_pr mode comments; failing checks = fix_pr mode ci; conflicts, \"rebase\", \"update from dev\" = fix_pr mode rebase.",
   "9. Questions about the code or product = lookup. \"why did you …\" = explain. \"what happened with …\" (old work) = find (history) then status.",
   "10. Small talk, thanks, unclear text: no calls, a short friendly reply. If you truly can't tell what they want, no calls and ONE short question in reply.",
   "11. reply: only what the tools won't say – an answer, a small-talk line, or one short question. Empty when the tools say it all. Plain chat style, short.",

@@ -1,6 +1,6 @@
 {
   "name": "ai-workforce",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Local-first AI team member: watches Jira and GitHub, plans each ticket in a design document, builds and tests it, raises the PR, fixes CI and talks with you in Teams – with a live dashboard. Never merges.",
   "author": {
     "name": "AI Workforce Product Team"

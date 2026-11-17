@@ -33,7 +33,7 @@ export interface ToolArgs {
   /** control */ action?: "pause" | "resume" | "cancel" | "priority" | "takeover" | "handback" | "undo" | "revert"; until?: string; priority?: number | string; due?: string;
   /** set_directive */ scope?: "global" | "item" | "batch" | "epic" | "sprint"; rule?: string; value?: string;
   /** prefs */ key?: string; name?: string; github?: string;
-  /** fix_pr */ mode?: "comments" | "ci" | "issues";
+  /** fix_pr */ mode?: "comments" | "ci" | "issues" | "rebase";
   /** start */ project?: string; takeOver?: boolean; again?: boolean; /** several keys on v2: one per ticket instead of one batch */ separately?: boolean;
 }
 export type ToolCall = ConductorCall & { tool: ToolName | "clone_repo"; args: ToolArgs };
@@ -608,18 +608,34 @@ async function toolFixPr(args: ToolArgs, ctx: ToolCtx): Promise<ToolResult> {
   const ref = args.ref && keysIn(args.ref).length ? keysIn(args.ref)[0].split("@")[0] : undefined;
   const text = [args.text ?? ctx.original, args.ref && !ref ? args.ref : ""].filter(Boolean).join(" ");
   // engine v2: a ticket of yours with an open PR gets the fix as a job on its own item (W9/W10, G8 "recheck and resolve")
-  const command = args.mode === "ci" ? "fix_ci" : args.mode === "issues" ? undefined : "resolve";
-  const item = ref && command && engineVersion() === "v2" ? taskFor(ref) : undefined;
+  const command = args.mode === "ci" ? "fix_ci" : args.mode === "rebase" ? "rebase" : args.mode === "issues" ? undefined : "resolve";
+  let item = ref && command && engineVersion() === "v2" ? taskFor(ref) : undefined;
+  // a PR link or number: the ticket item that raised it (a ticket finished by the old engine with its PR still
+  // open is looked after again – state PR_OPEN), so the job runs with the ticket's context, not as a loose fix task
+  if (!item && command && engineVersion() === "v2") {
+    try {
+      const { resolvePrTargets } = await import("../engine/targets.js");
+      const found = await resolvePrTargets(text, ref);
+      if (!("error" in found) && found.targets.length === 1) {
+        const { itemForPr, reopenForOpenPr } = await import("../kernel/prs.js");
+        const hit = itemForPr(found.targets[0].repo, found.targets[0].num);
+        if (hit && hit.owner === "me") item = (reopenForOpenPr(hit.id) ?? hit) as any;
+      }
+    } catch { /* fall back to the fix task below */ }
+  }
   if (item && command && item.state === "PR_OPEN" && ((item as any).owner ?? "me") === "me") {
     const { emit } = await import("../kernel/events.js");
-    emit({ type: "user_command", idemKey: `cmd:${item.id}:${command}:${Date.now()}`, itemId: item.id, payload: { command, by: ctx.who } });
+    emit({ type: "user_command", idemKey: `cmd:${item.id}:${command}:${Date.now()}`, itemId: item.id, payload: { command, by: ctx.who, ours: true } });
     await tick();
     const r = refOf(item);
     return said(command === "fix_ci"
       ? `🛠️ Fixing the failing CI checks on ${r}'s PR. You'll hear from me here when it's done.`
-      : `🛠️ Fixing the review comments (and any failing check) on ${r}'s PR. You'll hear from me here when the fixes are ready.`, true, { ref: r });
+      : command === "rebase"
+        ? `🔀 Bringing the base branch into ${r}'s PR. Simple conflicts are resolved; a real one stops and comes to you. Nothing is force-pushed.`
+        : `🛠️ Fixing the review comments (and any failing check) on ${r}'s PR. You'll hear from me here when the fixes are ready.`, true, { ref: r });
   }
-  const r = await startFixFromText(text, ref, ctx.who, args.mode ?? "comments");
+  if (command === "rebase") return said("❓ Which PR should I update from its base branch? Give me the PR link or the ticket key.");
+  const r = await startFixFromText(text, ref, ctx.who, (args.mode === "rebase" ? undefined : args.mode) ?? "comments");
   await tick();
   return said(r);
 }

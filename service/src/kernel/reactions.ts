@@ -187,7 +187,15 @@ export interface RouteDeps {
   setItemState?(id: string, to: State, note?: string): unknown;
   /** What a "none" row does (a message, the drop-or-reopen question, a design note). Defaults to engine/steps/notices.ts. */
   tell?(ev: KernelEvent, item: Item | undefined, r: Reaction, settings: Settings): unknown;
+  /** A ticket the old engine ended at DONE while its PR is still open: look after it again (kernel/prs.ts reopenForOpenPr). */
+  reopenForOpenPr?(id: string): Item | undefined;
 }
+
+/** Events that only happen on an OPEN pull request (the producers check the PR state before emitting them). */
+export const OPEN_PR_EVENTS: ReadonlySet<string> = new Set(["pr_conflict", "ci_failed", "changes_requested", "review_comment", "comment_added", "new_commits", "new_base"]);
+
+/** Events about our own PR that must never be dropped silently: when no job can start, you get one line. */
+const TELL_IF_IGNORED: ReadonlySet<string> = new Set(["pr_conflict", "ci_failed", "changes_requested"]);
 
 let wired: RouteDeps | undefined;
 /** Wire the real modules once (kernel/runner.ts at start-up): useRouteDeps({ pendingEvents, markHandled, getItem, enqueue, setItemState }). */
@@ -218,9 +226,22 @@ export const routeEvents: RouteEvents & ((settings: Settings, deps?: RouteDeps) 
   const tell = d.tell ?? (deps ? undefined : defaultTell);
   let n = 0;
   for (const ev of d.pendingEvents()) {
-    const item = ev.item_id ? d.getItem(ev.item_id) : undefined;
+    let item = ev.item_id ? d.getItem(ev.item_id) : undefined;
+    // the PR is still open, but the old engine ended the ticket at DONE when the PR was raised: look after it again
+    if (item && item.state === "DONE" && OPEN_PR_EVENTS.has(ev.type) && ev.payload?.ours !== false && d.reopenForOpenPr) {
+      try { item = d.reopenForOpenPr(item.id) ?? item; } catch { /* keep the item as it is */ }
+    }
     const r = reactionFor(ev, item, settings);
-    if (!r) { d.markHandled(ev.id, "ignored"); continue; }
+    if (!r) {
+      // never silent about our own PR: a conflict / failing check / change request no job can take gets one line
+      if (item && TELL_IF_IGNORED.has(ev.type) && ourPr(ev, item, settings) && tell) {
+        d.markHandled(ev.id, "none:notify");
+        try { tell(ev, item, { on: ev.type, job: "none", recipe: "notify", note: `${ev.type} – no job can start (item ${item.state})` }, settings); } catch { /* never stops routing */ }
+        continue;
+      }
+      d.markHandled(ev.id, "ignored");
+      continue;
+    }
     const setState = () => {
       if (!r.setState || !item || item.state === r.setState || !d.setItemState) return;
       try { d.setItemState(item.id, r.setState, r.note ?? ev.type); } catch { /* not a legal move from this state: leave it */ }

@@ -26,10 +26,11 @@ import { clearActivity, progressFrom } from "../live/activity.js";
 import { getItem, setItemState } from "./items.js";
 import { pendingEvents, markHandled } from "./events.js";
 import { useRouteDeps, routeEvents } from "./reactions.js";
+import { reopenForOpenPr } from "./prs.js";
 import { getRecipe, advance, firstStepIndex } from "./recipes.js";
 import { enqueue, getJob, startJob, onJobEnd, activeJob, clearMailbox, createJob, queuedJobs, rowToJob } from "./mailbox.js";
 import { pickRunnable, limitsFrom } from "./scheduler.js";
-import { linkParts, migrateToKernel } from "./migrate.js";
+import { linkParts, migrateToKernel, repairIgnoredPrEvents } from "./migrate.js";
 import type { Item, Job, Recipe, StepOutcome, ApplyStepResult, RecoverJobs, ResumeJob, RunJob } from "./types.js";
 
 /** Steps a recipe names that STEPS does not have yet ([] = it can run). */
@@ -56,7 +57,7 @@ function enqueueRunnable(itemId: string, reaction: Parameters<typeof enqueue>[1]
 }
 
 // the real modules behind routeEvents (wired once, here)
-useRouteDeps({ pendingEvents, markHandled, getItem, enqueue: enqueueRunnable, setItemState });
+useRouteDeps({ pendingEvents, markHandled, getItem, enqueue: enqueueRunnable, setItemState, reopenForOpenPr });
 
 /** Steps that change things outside this computer (or prepare exactly what will be published). */
 export const EFFECTOR_STEPS = new Set(["prepublish", "publish", "publish_parts"]);
@@ -526,7 +527,7 @@ export interface KernelTickOpts {
 /** One kernel pass (engine.ts tick when engine.version is v2): migrate once, route events, keep jobs, start what may run. */
 export async function kernelTick(opts: KernelTickOpts = {}): Promise<void> {
   const settings = opts.settings ?? loadSettings();
-  try { migrateToKernel(); } catch (e: any) { logger.error("v2 data migration failed", { error: e.message }); }
+  try { migrateToKernel(); repairIgnoredPrEvents(); } catch (e: any) { logger.error("v2 data migration failed", { error: e.message }); }
   linkParts();
   try { routeEvents(settings); } catch (e: any) { logger.error("event routing failed", { error: e.message }); }
   sweepJobs();

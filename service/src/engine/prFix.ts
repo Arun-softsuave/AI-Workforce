@@ -16,7 +16,7 @@ import { createTask, getTask, listTasks, transition, updateTask, type Task } fro
 import { STEPS, ticketBlock, contractText, markUntested, clarifyRoundsLeft, costText, type StepCtx, type StepResult } from "./steps.js";
 import { myLogin, resolvePrTargets, findTicketPrs, projectForRepo, type PrTarget } from "./targets.js";
 import { detectCiPipeline } from "../brain/ciPipeline.js";
-import { classifyCheck, checkWord, type CiClass } from "./steps/ciClass.js";
+import { classifyCheck, checkWord, toolOf, type CiClass } from "./steps/ciClass.js";
 import { startCiWatch, runCiWatches } from "./steps/ci_watch.js";
 import { AFTER_PR_STEPS } from "./steps/index.js";
 import { noteForPrompt } from "../knowledge/codeNote.js";
@@ -45,6 +45,10 @@ export interface FixItem {
   autoFixed?: boolean;
   /** "lint", "format", "tests", "types" or the check name – for the one result message. */
   word?: string;
+  /** auto dependency fix: the vulnerable packages the lock file update covers. */
+  dependency?: string[];
+  /** the local fix could not run and the item can't go to the code agent: a person is told instead. */
+  personOnly?: boolean;
 }
 
 /** Keys a job on a ticket's open PR must not inherit from the ticket's own build (job-scoped context, engine v2). */
@@ -137,6 +141,11 @@ export function commentClass(action: string): "fix" | "reply" | "needs-you" {
 /** G19: a comment that asks for something the ticket does not cover (the resolver marks its question so). */
 export const OUTSIDE_TICKET = /^\s*outside the ticket\b/i;
 
+/** A fix plan made before the CI rules existed: it has failing-check items with no class (auto / agent). */
+export function isLegacyCiPlan(items: FixItem[] | undefined): boolean {
+  return (items ?? []).some((i) => i.kind === "check" && !i.ciClass);
+}
+
 /**
  * The fix's PR on a job beside a ticket (engine v2): the seeded context, else the item's PR; requests from the job's
  * events (an "adapt" command or a request from another repository). Undefined when the item has no PR.
@@ -208,7 +217,7 @@ export const FIX_STEPS: Record<string, (ctx: StepCtx) => Promise<StepResult>> = 
 
     // what is still open
     const done = new Set(handled(f.repo, f.num));
-    const items: FixItem[] = [];
+    let items: FixItem[] = [];
     const push = (x: Omit<FixItem, "n">) => { if (!done.has(x.id)) items.push({ ...x, n: items.length + 1 }); };
     const notMe = (a: string) => !!a && (!me || a.toLowerCase() !== me.toLowerCase()) && !/\[bot\]$/i.test(a);
     if (f.mode === "issues") {
@@ -243,11 +252,13 @@ export const FIX_STEPS: Record<string, (ctx: StepCtx) => Promise<StepResult>> = 
       if (failed.length && pr.baseSha) { try { onBase = new Set((await gh.prChecks(f.repo, pr.baseSha)).filter((c) => c.state === "failed").map((c) => c.name)); } catch { /* optional */ } }
       const ci = ctx.project.conventions?.ci ?? (() => { try { return detectCiPipeline(ctx.project.local.path); } catch { return undefined; } })();
       const scripts = scriptsOf(ctx.project.local.path);
+      let lockfiles: string[] = [];
+      try { lockfiles = fs.readdirSync(ctx.project.local.path).filter((n) => /(\.lock|-lock\.json|lock\.yaml)$/i.test(n)); } catch { /* no folder */ }
       for (const c of failed) {
         let log = "";
         try { log = (await gh.checkFailure?.(f.repo, c)) ?? ""; } catch (e: any) { log = `The log could not be read (${truncate(e.message, 120)}) – open ${c.url}`; }
         const key = rerunKey(f.repo, f.num, pr.headSha, c.name);
-        const d = classifyCheck({ check: c, log, failsOnBase: onBase.has(c.name), baseRef: pr.baseRef, ci, reruns: getMeta(key) ? 1 : 0, scripts });
+        const d = classifyCheck({ check: c, log, failsOnBase: onBase.has(c.name), baseRef: pr.baseRef, ci, reruns: getMeta(key) ? 1 : 0, scripts, lockfiles });
         if (d.cls === "base") { ciNotes.base.push(`${c.name} – ${d.reason}`); continue; }
         if (d.cls === "human") { ciNotes.human.push(`${c.name} – ${d.needs}`); continue; }
         if (d.cls === "flaky" && gh.rerunJob && c.jobId) {
@@ -261,11 +272,11 @@ export const FIX_STEPS: Record<string, (ctx: StepCtx) => Promise<StepResult>> = 
           } catch { /* the re-run failed: treat it as a real failure */ }
         }
         push({ kind: "check", id: `c:${c.name}:${pr.headSha.slice(0, 12)}`, check: c.name, author: "CI", url: c.url,
-          ciClass: d.cls === "auto" ? "auto" : "agent", fixCommand: d.fixCommand, word: checkWord(d, c.name),
+          ciClass: d.cls === "auto" ? "auto" : "agent", fixCommand: d.fixCommand, dependency: d.dependency, word: d.dependency ? "dependency" : checkWord(d, c.name),
           body: `CI check "${c.name}" failed (${c.conclusion}) on ${pr.headSha.slice(0, 7)}\n\n${log}` });
       }
     }
-    const told = [
+    let told = [
       ciNotes.human.length ? `**Needs a person (not faked):**\n${ciNotes.human.map((x) => `- ${x}`).join("\n")}` : "",
       ciNotes.base.length ? `**Not caused by this PR (left alone):**\n${ciNotes.base.map((x) => `- ${x}`).join("\n")}` : "",
       ciNotes.reran.length ? `**Re-ran once (runner problem):** ${ciNotes.reran.join(", ")}` : "",
@@ -303,14 +314,35 @@ export const FIX_STEPS: Record<string, (ctx: StepCtx) => Promise<StepResult>> = 
     const wt = G.createWorktree(repo, ctx.project.id, scoped ? jobFolderId(ctx.task.id, "fix", f.num) : ctx.task.id, branch, sha, ctx.project.conventions?.env?.linkedDirs ?? []);
     ctx.task = { ...ctx.task, worktree: wt, branch };
 
-    // W9: lint / format checks with a local fix command are fixed by that command here – no AI
+    // W9: lint / format checks and vulnerable dependencies with a local fix command are fixed by that command here – no AI
+    const personNotes: string[] = [];
     for (const i of items.filter((x) => x.ciClass === "auto" && x.fixCommand)) {
       const before = G.headSha(wt);
       const r = await G.runCommand(i.fixCommand!, wt, 10 * 60_000).catch((e: any) => ({ code: 1, output: String(e?.message ?? e) }));
       const changed = G.git(wt, ["status", "--porcelain"], { allowFail: true }).trim().length > 0;
-      if (changed) G.commitAll(wt, `style: ${i.word ?? "lint"} fixes (${i.check})`);
+      if (changed) G.commitAll(wt, i.dependency ? `fix(deps): update ${i.dependency.join(", ") || "vulnerable packages"} (${i.check})` : `style: ${i.word ?? "lint"} fixes (${i.check})`);
       i.autoFixed = G.headSha(wt) !== before;
-      if (!i.autoFixed) { i.ciClass = "agent"; i.body += `\n\nThe project's fix command \`${i.fixCommand}\` changed nothing (exit ${r.code}).`; }
+      if (i.autoFixed) continue;
+      const missingTool = r.code === 127 || /not (found|recognized)|ENOENT|No such file or directory/i.test(String((r as any).output ?? ""));
+      if (i.dependency) {
+        // a lock file can't be rewritten by hand safely (hashes): never hand it to the code agent, tell a person once
+        personNotes.push(`${i.check} – run \`${i.fixCommand}\` and push${missingTool ? ` (\`${toolOf(i.fixCommand!)}\` is not installed on this computer)` : ` (it changed nothing here, exit ${r.code})`}`);
+        i.personOnly = true;
+        continue;
+      }
+      i.ciClass = "agent";
+      i.body += `\n\nThe project's fix command \`${i.fixCommand}\` ${missingTool ? `could not run here (\`${toolOf(i.fixCommand!)}\` is not installed)` : `changed nothing (exit ${r.code})`}.`;
+    }
+    if (personNotes.length) {
+      items = items.filter((i) => !i.personOnly);
+      const more = `**Needs a person (not faked):**\n${personNotes.map((x) => `- ${x}`).join("\n")}`;
+      if (!items.length) {
+        const all = [told, more].filter(Boolean).join("\n\n");
+        await notify({ kind: "failed", taskId: ctx.task.id, taskRef: ctx.task.source_ref ?? undefined, dedupeKey: `ci-notes:${f.repo}#${f.num}:${pr.headSha}`,
+          title: `⚠️ CI on PR #${f.num} needs a person`, body: all, url: pr.url });
+        return { status: "done", note: personNotes[0] };
+      }
+      told = [told, more].filter(Boolean).join("\n\n");
     }
 
     // the ticket behind the PR (title / branch / description), and the lead's contract when it is a multi-repo ticket
@@ -406,6 +438,16 @@ export const FIX_STEPS: Record<string, (ctx: StepCtx) => Promise<StepResult>> = 
 
   /** Make the code changes (the normal implement + test loop), only when something needs a change. */
   async fix_apply(ctx) {
+    // A fix planned before the CI rules (W9) existed has check items without a class: "needs a person" checks
+    // (baselines, evals) and lock-file updates would be handed to the code agent, which can never make them pass.
+    // Look at the PR again with today's rules (fresh checks, fresh classes, fresh plan) before changing any code.
+    if (isLegacyCiPlan(ctx.task.data.fixItems) && !ctx.task.data.reclassified) {
+      ctx.save({ reclassified: new Date().toISOString(), implementation: null, implementAttempt: 0, stuck: null });
+      const prep = await FIX_STEPS.fix_prepare(ctx);
+      if (prep.status !== "ok") return prep;
+      const plan = await FIX_STEPS.fix_plan(ctx);
+      if (plan.status !== "ok") return plan;
+    }
     if (!(ctx.task.data.fixPlan?.items ?? []).some((x: any) => x.action === "fix")) return { status: "ok", note: "no code change needed" };
     if (G.headSha(ctx.task.worktree!) !== ctx.task.data.baseSha && ctx.task.data.implementation && !(ctx.task.data.feedback ?? []).length) return { status: "ok", note: "already changed" };
     return STEPS.implement_test(ctx);

@@ -3,7 +3,7 @@
  * being watched. The watching itself is still engine/prFix.ts pollCiWatches (meta fix.ciwatch); in v2 a failure
  * becomes a ci_failed event on the item instead of a separate FIX-n task.
  */
-import { db } from "../core/db.js";
+import { db, audit } from "../core/db.js";
 import { getProject } from "../core/config.js";
 import { nowIso } from "../core/util.js";
 import { createItem, toItem, getItem } from "./items.js";
@@ -11,6 +11,28 @@ import { createJob, rowToJob } from "./mailbox.js";
 import type { Item, Job } from "./types.js";
 
 const same = (a?: string | null, b?: string | null) => !!a && !!b && a.toLowerCase() === b.toLowerCase();
+
+/** Does the item's data say its PR(s) were merged or closed? */
+function prEnded(data: Record<string, any>): boolean {
+  const prs = [data.pr, ...(data.prs ?? []), data.prRef].filter(Boolean);
+  return !!(data.merged || data.prMerged || data.closedAt || prs.some((p: any) => p.merged || p.mergedAt || p.state === "merged" || p.state === "closed"));
+}
+
+/**
+ * The old engine (v1) ended a ticket at DONE as soon as its PR was raised. When something shows that PR is still
+ * open (a conflict, a failing check, a review, or you asking for a fix), the item is looked after again: DONE → PR_OPEN.
+ * (DONE → PR_OPEN is not a normal move, so it is written directly, only for items that have a PR and no merge.)
+ * Returns the reopened item, the item unchanged when it is not a DONE item with an open PR, or undefined.
+ */
+export function reopenForOpenPr(itemId: string): Item | undefined {
+  const it = getItem(itemId);
+  if (!it || it.state !== "DONE") return it;
+  const hasPr = !!(it.data.pr || (it.data.prs ?? []).length || it.data.prRef);
+  if (!hasPr || prEnded(it.data)) return it;
+  db().prepare("UPDATE tasks SET state='PR_OPEN', error=NULL, updated_at=? WHERE id=? AND state='DONE'").run(nowIso(), itemId);
+  audit("service", "item.reopened_for_open_pr", itemId, { from: "DONE", to: "PR_OPEN" });
+  return getItem(itemId);
+}
 
 /** Does this task data name PR `num` of `repo` (data.pr, data.prs[], or a light pr item's data.prRef)? */
 function names(t: { project_id: string; data: Record<string, any> }, repo: string, num: number): boolean {
