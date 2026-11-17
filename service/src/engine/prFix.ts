@@ -1,5 +1,5 @@
 import fs from "node:fs";
-import { getProject, loadSettings, type ProjectConfig } from "../core/config.js";
+import { getProject, loadSettings, engineVersion, type ProjectConfig } from "../core/config.js";
 import { truncate } from "../core/util.js";
 import { audit, getMeta, setMeta } from "../core/db.js";
 import { untrusted } from "../agents/runner.js";
@@ -406,6 +406,14 @@ function saveWatches(w: CiWatch[]) { setMeta(WATCH_KEY, JSON.stringify(w.slice(-
 
 export function watchCi(w: CiWatch): void {
   saveWatches([...watches().filter((x) => !(x.repo.toLowerCase() === w.repo.toLowerCase() && x.num === w.num)), { ...w, since: new Date().toISOString() }]);
+  // engine v2: the PR's item shows a passive ci_watch job while CI is watched
+  if (engineVersion() === "v2") void import("../kernel/prs.js").then(({ upsertCiWatchJob }) => upsertCiWatchJob(w)).catch(() => {});
+}
+
+/** engine v2: the watch of this PR ended (green, merged, closed or handed to the developer). */
+function watchEnded(repo: string, num: number, error?: string): void {
+  if (engineVersion() !== "v2") return;
+  void import("../kernel/prs.js").then(({ endCiWatchJob }) => endCiWatchJob(repo, num, error)).catch(() => {});
 }
 
 /**
@@ -420,7 +428,7 @@ export async function pollCiWatches(): Promise<void> {
   for (const w of watches()) {
     try {
       const pr = await gh.prForReview(w.repo, w.num);
-      if (pr.merged || pr.state !== "open") continue;
+      if (pr.merged || pr.state !== "open") { watchEnded(w.repo, w.num); continue; }
       if (pr.headSha !== w.sha) w.sha = pr.headSha;
       const checks = await gh.prChecks(w.repo, w.sha);
       // GitHub needs a moment to register the runs of a fresh push; give up waiting after 3 hours
@@ -434,13 +442,29 @@ export async function pollCiWatches(): Promise<void> {
         await notify({ kind: "info", taskRef: ref, dedupeKey: `ci-green:${w.repo}#${w.num}:${w.sha}`, title: `✅ CI passes on PR #${w.num}`,
           body: `All ${checks.length} checks passed on ${w.sha.slice(0, 7)} (${pr.headRef}).\n\n${checks.map((c) => `- ${c.name} ✅`).join("\n")}\n\nNothing merged – the PR is ready for review.`, url: pr.url });
         audit("service", "fix.ci_green", undefined, { repo: w.repo, num: w.num, sha: w.sha });
+        watchEnded(w.repo, w.num);
         continue;
       }
       const list = failed.map((c) => `- ${c.name} ❌ (${c.state === "pending" ? "still running after 3 hours" : c.conclusion})`).join("\n");
       if (!project || w.round > MAX_CI_ROUNDS || failed.every((c) => c.state === "pending")) {
         await notify({ kind: "failed", taskRef: ref, dedupeKey: `ci-stuck:${w.repo}#${w.num}:${w.sha}`, title: `⚠️ CI still not green on PR #${w.num} – please take a look`,
           body: `${list}\n\n${w.round > MAX_CI_ROUNDS ? `I already tried ${MAX_CI_ROUNDS} rounds of fixes. ` : ""}Say "fix the CI on PR ${w.num}" to try again.`, url: pr.url });
+        watchEnded(w.repo, w.num, "CI still failing");
         continue;
+      }
+      // engine v2: the failure is an event on the PR's item; the reactions start ONE ci_fix job (merged with others)
+      if (engineVersion() === "v2") {
+        const { itemForPr } = await import("../kernel/prs.js");
+        const item = itemForPr(w.repo, w.num);
+        if (item && !["DONE", "CANCELLED", "FAILED", "MERGED"].includes(item.state)) {
+          const { emit } = await import("../kernel/events.js");
+          emit({ type: "ci_failed", idemKey: `ci_failed:${w.repo.toLowerCase()}#${w.num}:${w.sha}`, itemId: item.id,
+            payload: { repo: w.repo, num: w.num, sha: w.sha, round: w.round, by: w.by, via: w.via, ours: true, checks: failed.map((c) => c.name) } });
+          watchEnded(w.repo, w.num);
+          await notify({ kind: "info", taskId: item.id, taskRef: item.source_ref ?? undefined, dedupeKey: `ci-red:${w.repo}#${w.num}:${w.sha}`, title: `❌ CI failed on PR #${w.num} – fixing it (round ${w.round} of ${MAX_CI_ROUNDS})`,
+            body: `${list}\n\n${loadSettings().pr?.autoFixCi !== false ? "I'll read the logs, fix it, push the fix and tell you the result." : "I'll read the logs, fix it and show you the fix before anything is pushed."}`, url: pr.url });
+          continue;
+        }
       }
       const { task, existing } = startFixTask(project, w.repo, w.num, w.by, w.via, { mode: "ci", ciRound: w.round });
       await notify({ kind: "info", taskId: task.id, taskRef: task.source_ref ?? undefined, dedupeKey: `ci-red:${w.repo}#${w.num}:${w.sha}`, title: `❌ CI failed on PR #${w.num} – fixing it (round ${w.round} of ${MAX_CI_ROUNDS})`,

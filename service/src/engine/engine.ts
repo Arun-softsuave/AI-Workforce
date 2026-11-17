@@ -1,31 +1,35 @@
 import fs from "node:fs";
-import { loadSettings, getProject, requiredDecisionChannel, type ProjectConfig } from "../core/config.js";
+import { loadSettings, getProject, requiredDecisionChannel, engineVersion, type ProjectConfig } from "../core/config.js";
 import { normaliseQuestions, questionTexts, resolveReply, type Question } from "../core/questions.js";
 import { getMeta, setMeta, delMeta, audit } from "../core/db.js";
 import { logger } from "../core/log.js";
-import { truncate, backoff } from "../core/util.js";
+import { truncate } from "../core/util.js";
 import { getRunner, untrusted } from "../agents/runner.js";
 import { AGENTS } from "../agents/catalog.js";
 import { playbookFor } from "../core/roles.js";
 import { groupMembers, describeMembers } from "./routing.js";
 import { getPlaybook, stepIndex } from "./playbooks.js";
-import { STEPS, BudgetPause, makeAgentCaller, ticketText, type StepCtx, type StepResult } from "./steps.js";
+import { STEPS, BudgetPause, ticketText, type StepResult } from "./steps.js";
+import { buildStepCtx, flushUsage, keepWorkspace, applyTicketChange, pause, fail, retryOrFail, finish, askUser, answerHint, liveStep } from "./stepRun.js";
+
+export { askUser, answerHint };
 import {
-  getTask, listTasks, transition, mergeData, updateTask, addUsage, startStep, endStep, canTransition, jiraKey, partsOf, type Task,
+  getTask, listTasks, transition, mergeData, updateTask, addUsage, startStep, endStep, usageOf, canTransition, jiraKey, partsOf, type Task,
 } from "./tasks.js";
 import { notify, markInboxRead } from "../notify/router.js";
 import { expireApprovals, decide, latestApproval, type Approval } from "../approvals/approvals.js";
 import { removeWorktree } from "../git/git.js";
 import { clients } from "../connectors/registry.js";
-import { publish } from "../live/bus.js";
-import { recordActivity, clearActivity, progressFrom } from "../live/activity.js";
+import { clearActivity } from "../live/activity.js";
+import { kernelTick, recoverJobs, itemRunning, stopItemJobs, jobForApproval, resumeJob } from "../kernel/runner.js";
+import { getRecipe } from "../kernel/recipes.js";
 
 /**
  * Playbook Engine: a deterministic state machine. Code decides the order of steps; agents work inside them.
  * State is checkpointed after every step, so a crash, reboot or sleep resumes from the last finished step.
  */
 const running = new Set<string>();
-export const isRunning = (id: string) => running.has(id);
+export const isRunning = (id: string) => running.has(id) || itemRunning(id);
 
 /** Only the background service executes work; CLI / MCP processes are clients that ask it to tick. */
 let role: "daemon" | "client" = "client";
@@ -48,6 +52,8 @@ export function recoverInterrupted(): number {
     if (t.state === "PUBLISHING") transition(t.id, "RUNNING", "recovered after restart");
     transition(t.id, "QUEUED", "recovered after restart");
   }
+  // engine v2: jobs left running go back to the queue at the same step (no jobs exist on v1)
+  recoverJobs();
   return stuck.length;
 }
 
@@ -68,7 +74,7 @@ export async function triageTask(t: Task): Promise<Task> {
       prompt: `Work item for role(s) ${project.roles.join(", ")}:\n${untrusted(`ticket:${jiraKey(t)}`, truncate(ticketText(t), 6000))}` });
     addUsage(t.id, r.tokensIn + r.tokensOut, r.costUsd);
     const sid = startStep(t.id, t.run_no, -1, "triage");
-    endStep(sid, r.ok ? "ok" : "failed", { agent: "triage", model: r.model, tokensIn: r.tokensIn, tokensOut: r.tokensOut, cost: r.costUsd, output: r.data, error: r.error });
+    endStep(sid, r.ok ? "ok" : "failed", { ...usageOf(r, "triage"), output: r.data });
     if (!r.ok) { mergeData(t.id, { triageError: r.error }); return t; } // stays DETECTED, retried next tick
     size = r.data.size; clear = r.data.clear; questions = normaliseQuestions(r.data.questions, 3);
     if (t.data.agreedRequirements) { clear = true; questions = []; }   // the requester already answered everything in the interview
@@ -174,6 +180,12 @@ export async function tick(): Promise<void> {
     }
     wakeLeads();
     const s = loadSettings();
+    if (engineVersion(s) === "v2") {
+      // engine v2: events → jobs, one job per item, the kernel scheduler and runner (v1 holds still apply)
+      await kernelTick({ settings: s, eligible: (t) => !blockedBySibling(t) && !blockedByLead(t),
+        onRunEnd: () => setImmediate(() => { tick().catch(() => {}); }) });
+      return;
+    }
     const queued = listTasks({ states: ["QUEUED"] }).filter((t) => (!t.data.retryAt || new Date(t.data.retryAt).getTime() <= Date.now()) && !blockedBySibling(t) && !blockedByLead(t));
     for (const t of queued) {
       if (running.size >= s.limits.maxParallel) break;
@@ -251,7 +263,7 @@ export async function runTask(taskId: string): Promise<Task> {
     task = getTask(task.id)!;
     if (task.state !== "RUNNING") return task;                       // cancelled or changed elsewhere
     if (task.step_index >= pb.steps.length) break;
-    task = applyTicketChange(task, pb, project);
+    task = applyTicketChange(task, pb);
     const spec = pb.steps[task.step_index];
     const fn = STEPS[spec.name];
     if (!fn) return fail(task, `Unknown step ${spec.name}`);
@@ -261,24 +273,19 @@ export async function runTask(taskId: string): Promise<Task> {
     }
     const sid = startStep(task.id, task.run_no, task.step_index, spec.name);
     liveStep(task, spec.name, pb.steps.length, "start");
-    const ctx: StepCtx = {
-      task, project, settings, runner, params: spec.params, usage: { tokensIn: 0, tokensOut: 0, cost: 0, agents: [] },
-      agent: undefined as any,
-      save: (patch) => { const t = mergeData(ctx.task.id, patch); ctx.task = { ...ctx.task, data: t.data }; return ctx.task; },
-    };
-    ctx.agent = makeAgentCaller(() => ctx);
+    const ctx = buildStepCtx({ task, project, settings, runner, params: spec.params });
     let result: StepResult;
     try {
       result = await fn(ctx);
     } catch (e: any) {
       flushUsage(ctx, sid, e instanceof BudgetPause ? "paused" : "error", e.message);
-      if (ctx.task.worktree !== task.worktree || ctx.task.branch !== task.branch) updateTask(task.id, { worktree: ctx.task.worktree, branch: ctx.task.branch });
+      keepWorkspace(task, ctx);
       if (e instanceof BudgetPause) return pause(getTask(task.id)!, `Budget: ${e.message}. Reply \`/aiw resume ${task.source_ref ?? task.id}\` to continue or \`/aiw cancel\` to stop.`);
       return retryOrFail(getTask(task.id)!, `${spec.name}: ${e.message}`);
     }
     flushUsage(ctx, sid, result.status === "ok" || result.status === "done" ? "ok" : result.status, "reason" in result ? result.reason : undefined, (result as any).note);
     liveStep(task, spec.name, pb.steps.length, "end");
-    if (ctx.task.worktree !== task.worktree || ctx.task.branch !== task.branch) updateTask(task.id, { worktree: ctx.task.worktree, branch: ctx.task.branch });
+    keepWorkspace(task, ctx);
     task = getTask(task.id)!;
     switch (result.status) {
       case "ok":
@@ -319,82 +326,7 @@ export async function runTask(taskId: string): Promise<Task> {
   return finish(task);
 }
 
-function flushUsage(ctx: StepCtx, sid: number, status: string, error?: string, note?: string): void {
-  const u = ctx.usage;
-  endStep(sid, status, { agent: u.agents.join(",") || undefined, model: u.model, tokensIn: u.tokensIn, tokensOut: u.tokensOut, cost: u.cost, output: note ? { note } : undefined, error });
-  addUsage(ctx.task.id, u.tokensIn + u.tokensOut, u.cost);
-}
-
-function applyTicketChange(task: Task, pb: ReturnType<typeof getPlaybook>, project: ProjectConfig): Task {
-  const change = task.data.ticketChange;
-  if (!change) return task;
-  const patch: Record<string, any> = { ticket: task.data.pendingTicket ?? task.data.ticket, ticketChange: null, pendingTicket: null };
-  if (change === "major") {
-    const restart = Math.max(0, stepIndex(pb, "context_pack"));
-    if (task.step_index > restart) updateTask(task.id, { step_index: restart });
-    patch.planIssues = null;
-    patch.findings = null;                 // the ticket changed a lot: look at the code again
-    notify({ kind: "info", taskId: task.id, taskRef: task.source_ref ?? undefined, dedupeKey: `change:${Date.now()}`, title: `${task.source_ref}: ticket changed`, body: "The description changed significantly – re-analysing from the updated ticket." }).catch(() => {});
-  }
-  mergeData(task.id, patch);
-  void project;
-  return getTask(task.id)!;
-}
-
-async function pause(task: Task, reason: string): Promise<Task> {
-  const t = transition(task.id, "PAUSED", reason, { error: reason });
-  if (t.kind === "part") return t;              // the lead reports it (one message per ticket)
-  await notify({ kind: "paused", taskId: t.id, taskRef: t.source_ref ?? undefined, dedupeKey: `${t.run_no}:${t.step_index}:${reason.slice(0, 40)}`, title: `${t.source_ref ?? t.id} paused`, body: reason, url: t.data.ticket?.url });
-  return t;
-}
-
-async function fail(task: Task, reason: string): Promise<Task> {
-  const t = transition(task.id, "FAILED", reason, { error: truncate(reason, 4000) });
-  if (t.kind === "part") return t;              // the lead reports it
-  await notify({ kind: "failed", taskId: t.id, taskRef: t.source_ref ?? undefined, dedupeKey: `${t.run_no}:${t.step_index}`, title: `${t.source_ref ?? t.id} failed`, body: truncate(reason, 700), url: t.data.ticket?.url });
-  return t;
-}
-
-/** Transient errors (API outage, network) retry with back-off; after 3 attempts the task pauses for a human. */
-async function retryOrFail(task: Task, reason: string): Promise<Task> {
-  const n = (task.data.errorCount ?? 0) + 1;
-  logger.warn("step error", { task: task.id, attempt: n, reason });
-  if (n < 3) {
-    mergeData(task.id, { errorCount: n, retryAt: new Date(Date.now() + backoff(n + 4)).toISOString(), lastError: reason });
-    return transition(task.id, "QUEUED", `retry ${n} after error`);
-  }
-  mergeData(task.id, { errorCount: 0 });
-  return pause(task, `Stopped after repeated errors: ${truncate(reason, 500)}. Run \`/aiw resume ${task.source_ref ?? task.id}\` to retry.`);
-}
-
-async function finish(task: Task): Promise<Task> {
-  const t = transition(task.id, "DONE", "playbook complete");
-  markInboxRead(t.id);
-  mergeData(t.id, { cleanupAfter: new Date(Date.now() + 7 * 86_400_000).toISOString() });
-  return t;
-}
-
 // ------------------------------------------------------------------ human actions
-
-export function answerHint(ref: string): string {
-  return requiredDecisionChannel()
-    ? `Reply here in this chat. If several tasks are waiting, start your reply with ${ref}.`
-    : `Reply in the Teams bot chat:  answer ${ref} "your answer"   (or in Claude Code: aiw answer ${ref} "your answer"). You can also update the Jira description.`;
-}
-
-/** Ask the user a question (with numbered options) in the notification channel. */
-export async function askUser(t: Task, questions: Question[], context: string, dedupeKey: string): Promise<void> {
-  const ref = t.source_ref ?? t.id;
-  // Teams shows the questions with numbered options under the text; other channels (desktop, inbox) get them as text.
-  const teams = !!requiredDecisionChannel();
-  const plain = teams ? "" : `\n${questions.map((q) => `• ${q.question}${q.options.length ? ` (options: ${q.options.join(" / ")})` : ""}`).join("\n")}\n\n${answerHint(ref)}`;
-  await notify({
-    kind: "needs_info", taskId: t.id, taskRef: ref, dedupeKey, questions: teams ? questions : undefined,
-    title: `🤔 ${ref} · question${questions.length > 1 ? "s" : ""}`,
-    body: `${context}${t.title ? ` – ${t.title}` : ""}.${plain}`,
-    url: t.data.ticket?.url,
-  });
-}
 
 /** Teams-only decisions: refuse approvals and answers that come from anywhere else. */
 export function decisionRefused(channel: string): string | undefined {
@@ -468,7 +400,21 @@ export async function decideAndApply(ref: string, decision: "approved" | "reject
 
 export async function applyDecision(a: Approval): Promise<void> {
   let t = getTask(a.task_id);
-  if (!t || t.state !== "AWAITING_APPROVAL") return;
+  if (t && t.state !== "AWAITING_APPROVAL") {
+    // engine v2: work on an open PR (a fix) asks for approval without changing the item's state
+    const job = jobForApproval(a.id);
+    if (!job) return;
+    if (a.state === "approved") resumeJob(job.id, { approvalId: null });
+    else {
+      let at = 0;
+      try { const r = getRecipe(job.recipe); at = Math.max(0, ["plan", "implement_test", "fix_plan", "qa_plan", "review_pr"].map((n) => r.steps.findIndex((x) => x.name === n)).find((i) => i >= 0) ?? 0); } catch { /* unknown recipe: from the start */ }
+      const ctxData = job.data.ctx ?? {};
+      resumeJob(job.id, { approvalId: null, stepIndex: at, ctx: { ...ctxData, feedback: [...(ctxData.feedback ?? t.data.feedback ?? []), a.reason ?? "Rejected without a reason"] } });
+    }
+    await tick();
+    return;
+  }
+  if (!t) return;
   if (a.state === "approved") {
     transition(t.id, "QUEUED", `approved by ${a.approver} via ${a.channel}`);
     await tick();
@@ -505,11 +451,13 @@ export async function cancelTask(ref: string, reason = "cancelled by user"): Pro
   const t = getTask(ref);
   if (!t || !canTransition(t, "CANCELLED")) return t;
   const c = transition(t.id, "CANCELLED", reason);
+  stopItemJobs(t.id, reason);                          // engine v2: its jobs stop too (none on v1)
   mergeData(t.id, { cleanupAfter: new Date(Date.now() + 7 * 86_400_000).toISOString() });
   markInboxRead(t.id);
   for (const p of partsOf(t.id)) {                   // a lead's parts stop with it
     if (!canTransition(p, "CANCELLED")) continue;
     transition(p.id, "CANCELLED", `lead ${t.source_ref ?? t.id} cancelled`);
+    stopItemJobs(p.id, "lead cancelled");
     mergeData(p.id, { cleanupAfter: new Date(Date.now() + 7 * 86_400_000).toISOString() });
   }
   return c;
@@ -603,15 +551,3 @@ export function housekeeping(): number {
 }
 
 export { latestApproval };
-
-
-/** Live dashboard: which step a job is on (activity line + "job" event). Best effort, never stops the work. */
-function liveStep(task: Task, step: string, total: number, phase: "start" | "end"): void {
-  try {
-    if (phase === "start") {
-      recordActivity(task.id, null, step, step.replace(/_/g, " "), progressFrom(task.step_index, total), task.tokens_used ?? null,
-        { force: true, ref: task.source_ref ?? undefined });
-    }
-    publish("job", { taskId: task.id, ref: task.source_ref, step, phase });
-  } catch { /* live view only */ }
-}

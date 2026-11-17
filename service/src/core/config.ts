@@ -73,7 +73,11 @@ export interface Settings {
   };
   /** The people you work with (both use AI Workforce): matched by GitHub login; used to request reviews and to name who did what. */
   team: { me?: { github?: string }; members: TeamMember[] };
+  /** Which engine runs the work: "v1" (default, the playbook engine) or "v2" (the kernel: items, events, jobs, recipes). */
+  engine: { version: EngineVersion };
 }
+
+export type EngineVersion = "v1" | "v2";
 
 export interface TeamMember { name: string; github: string; email?: string; teams?: string }
 
@@ -112,6 +116,7 @@ export const DEFAULT_SETTINGS: Settings = {
   service: { port: 47821 },
   pr: { draft: false, autoFixCi: true, autoReview: false, autoPostReview: false, autoQaIssues: false },
   team: { members: [] },
+  engine: { version: "v1" },
 };
 
 export const DEFAULT_BUDGET: ProjectConfig["budget"] = {
@@ -138,9 +143,20 @@ export function requiredDecisionChannel(s: Settings = loadSettings()): Channel |
 
 export function loadSettings(): Settings {
   ensureBaseDirs();
-  if (!fs.existsSync(paths.settings())) return structuredClone(DEFAULT_SETTINGS);
-  const raw = YAML.parse(fs.readFileSync(paths.settings(), "utf8")) ?? {};
-  return deepMerge(structuredClone(DEFAULT_SETTINGS), raw);
+  const raw = fs.existsSync(paths.settings()) ? YAML.parse(fs.readFileSync(paths.settings(), "utf8")) ?? {} : {};
+  const s = deepMerge(structuredClone(DEFAULT_SETTINGS), raw);
+  // anything but an explicit "v2" ("engine: v2" or "engine: { version: v2 }") keeps the old engine
+  const e: any = raw.engine;
+  s.engine = { version: e === "v2" || e?.version === "v2" ? "v2" : "v1" };
+  // AIW_ENGINE=v1|v2 overrides the file (running the test suite on either engine)
+  const env = process.env.AIW_ENGINE;
+  if (env === "v1" || env === "v2") s.engine = { version: env };
+  return s;
+}
+
+/** The engine in use ("v1" unless settings say engine.version: v2). */
+export function engineVersion(s: Settings = loadSettings()): EngineVersion {
+  return s.engine?.version === "v2" ? "v2" : "v1";
 }
 
 export function saveSettings(s: Settings): void {

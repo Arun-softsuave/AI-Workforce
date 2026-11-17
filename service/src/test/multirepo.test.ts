@@ -1,4 +1,5 @@
 import { makeRepo, waitFor } from "./helpers.js";
+import { prEndState, settleAfterPr } from "./engineHelpers.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -166,8 +167,8 @@ test("full-stack ticket: one lead, contract, ONE plan approval, backend first, i
   const before = sent.length;
   const ok = await decideAndApply("KAN-42", "approved", "Sneha", "claude-code");
   assert.equal(ok.ok, true, ok.message);
-  const done = await settle("KAN-42", ["DONE", "FAILED", "PAUSED"]);
-  assert.equal(done.state, "DONE", done.error ?? "");
+  const done = await settleAfterPr("KAN-42", ["FAILED", "PAUSED"]);
+  assert.equal(done.state, prEndState(), done.error ?? "");
   const mine = prs.filter((p) => /KAN-42/.test(p.title));
   assert.equal(mine.length, 2);
   assert.ok(mine.every((p) => p.draft === false && p.base === "main"), "ready-for-review PRs by default");

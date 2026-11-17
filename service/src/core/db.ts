@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { paths, ensureBaseDirs } from "./paths.js";
 import { nowIso } from "./util.js";
@@ -80,7 +81,52 @@ const MIGRATIONS: string[] = [
   CREATE TABLE docs (item_id TEXT NOT NULL, version INTEGER NOT NULL, path TEXT NOT NULL, sha TEXT NOT NULL,
     reason TEXT, open_questions INTEGER NOT NULL DEFAULT 0, readiness TEXT, created_at TEXT NOT NULL, PRIMARY KEY (item_id, version));
   `,
+  // kernel (engine v2): work items on tasks, edges, jobs, event routing, step checkpoints, knowledge/policy/health tables.
+  // (IMPLEMENTATION-PLAN §4 "migration 4" + the parts of "migration 5" not already added above; tasks.priority,
+  // steps.cache_read and docs already exist.) v1 ignores every new column and table.
+  `
+  ALTER TABLE tasks ADD COLUMN level TEXT NOT NULL DEFAULT 'ticket';
+  ALTER TABLE tasks ADD COLUMN parent_id TEXT;
+  ALTER TABLE tasks ADD COLUMN root_id TEXT;
+  ALTER TABLE tasks ADD COLUMN areas TEXT;
+  ALTER TABLE tasks ADD COLUMN owner TEXT NOT NULL DEFAULT 'me';
+  ALTER TABLE tasks ADD COLUMN due TEXT;
+  CREATE INDEX tasks_parent ON tasks(parent_id);
+  CREATE INDEX tasks_root ON tasks(root_id);
+  CREATE TABLE edges (from_id TEXT NOT NULL, to_id TEXT NOT NULL, type TEXT NOT NULL, created_at TEXT NOT NULL,
+    PRIMARY KEY (from_id, to_id, type));
+  CREATE INDEX edges_to ON edges(to_id);
+  CREATE TABLE jobs (id TEXT PRIMARY KEY, item_id TEXT NOT NULL, type TEXT NOT NULL, recipe TEXT NOT NULL, state TEXT NOT NULL,
+    step_index INTEGER NOT NULL DEFAULT 0, attempts INTEGER NOT NULL DEFAULT 0, priority INTEGER NOT NULL DEFAULT 3,
+    trigger_event TEXT, data TEXT NOT NULL DEFAULT '{}', error TEXT,
+    agent TEXT, activity TEXT, progress INTEGER, activity_at TEXT,
+    created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+  CREATE INDEX jobs_item ON jobs(item_id, state);
+  CREATE INDEX jobs_state ON jobs(state);
+  ALTER TABLE events ADD COLUMN item_id TEXT;
+  ALTER TABLE events ADD COLUMN handled_by TEXT;
+  CREATE INDEX events_pending ON events(handled_by, received_at);
+  CREATE INDEX events_item ON events(item_id);
+  ALTER TABLE steps ADD COLUMN job_id TEXT;
+  ALTER TABLE steps ADD COLUMN input_hash TEXT;
+  CREATE INDEX steps_job ON steps(job_id);
+  CREATE TABLE agent_cache (key TEXT PRIMARY KEY, agent TEXT NOT NULL, result TEXT NOT NULL, created_at TEXT NOT NULL);
+  CREATE TABLE IF NOT EXISTS decisions (id TEXT PRIMARY KEY, scope TEXT NOT NULL, scope_id TEXT, question_key TEXT NOT NULL,
+    question TEXT NOT NULL, answer TEXT NOT NULL, source TEXT NOT NULL, confidence TEXT, evidence TEXT, created_at TEXT NOT NULL);
+  CREATE INDEX IF NOT EXISTS decisions_key ON decisions(question_key);
+  CREATE TABLE IF NOT EXISTS directives (id TEXT PRIMARY KEY, scope TEXT NOT NULL, scope_id TEXT, rule TEXT NOT NULL, value TEXT,
+    from_msg INTEGER, active INTEGER NOT NULL DEFAULT 1, until_at TEXT, created_at TEXT NOT NULL);
+  CREATE TABLE IF NOT EXISTS contracts (root_id TEXT NOT NULL, version INTEGER NOT NULL, items TEXT NOT NULL, reason TEXT,
+    created_at TEXT NOT NULL, PRIMARY KEY (root_id, version));
+  CREATE TABLE IF NOT EXISTS context_cache (key TEXT PRIMARY KEY, source TEXT NOT NULL, version TEXT NOT NULL, text TEXT NOT NULL,
+    tokens INTEGER, created_at TEXT NOT NULL, last_used TEXT NOT NULL);
+  CREATE TABLE IF NOT EXISTS connector_health (provider TEXT PRIMARY KEY, state TEXT NOT NULL, since TEXT NOT NULL, last_ok TEXT,
+    last_alert TEXT, detail TEXT);
+  `,
 ];
+
+/** The schema version a fully migrated database has (one per MIGRATIONS entry). */
+export const SCHEMA_VERSION = MIGRATIONS.length;
 
 let _db: DatabaseSync | null = null;
 
@@ -94,7 +140,7 @@ export function db(): DatabaseSync {
 export function openDb(file: string): DatabaseSync {
   const d = new DatabaseSync(file);
   d.exec("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON;");
-  migrate(d);
+  migrate(d, file);
   return d;
 }
 
@@ -104,12 +150,19 @@ export function resetDb(): void {
   _db = null;
 }
 
-function migrate(d: DatabaseSync): void {
+/**
+ * Bring the database up to `upTo` (default: the latest schema). Before changing a database that already has data,
+ * a consistent copy is written next to it as `<file>.bak-schema<old version>` (once per version; best effort).
+ * `upTo` exists for tests that need an older schema.
+ */
+export function migrate(d: DatabaseSync, file?: string, upTo: number = MIGRATIONS.length): void {
   d.exec("CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL)");
   const row = d.prepare("SELECT version FROM schema_version").get() as { version: number } | undefined;
   let v = row?.version ?? 0;
   if (!row) d.prepare("INSERT INTO schema_version (version) VALUES (0)").run();
-  while (v < MIGRATIONS.length) {
+  const target = Math.min(upTo, MIGRATIONS.length);
+  if (v > 0 && v < target && file && file !== ":memory:") backupBeforeMigrate(d, file, v);
+  while (v < target) {
     d.exec("BEGIN");
     try {
       d.exec(MIGRATIONS[v]);
@@ -120,6 +173,20 @@ function migrate(d: DatabaseSync): void {
       d.exec("ROLLBACK");
       throw new Error(`Database migration ${v + 1} failed: ${(e as Error).message}`);
     }
+  }
+}
+
+/** The backup taken before migrating from `fromVersion` (the path, or undefined when it could not be written). */
+export function backupBeforeMigrate(d: DatabaseSync, file: string, fromVersion: number): string | undefined {
+  const bak = `${file}.bak-schema${fromVersion}`;
+  try {
+    if (fs.existsSync(bak)) return bak;
+    d.prepare("VACUUM INTO ?").run(bak);
+    return bak;
+  } catch (e) {
+    process.stderr.write(`[aiw] database backup before migration failed: ${(e as Error).message}
+`);
+    return undefined;
   }
 }
 

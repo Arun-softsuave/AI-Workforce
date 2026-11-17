@@ -65,6 +65,11 @@ export function taskNow(t: Task): { now: string; waitingFor?: string } {
     case "ASKING_LEAD": return { now: "asked the lead engineer a question" };
     case "DONE": return { now: t.data.pr?.url ? `done – PR ${t.data.pr.url}` : t.data.prs?.length ? `done – PRs ${t.data.prs.map((x: any) => x.url).join(" ")}` : "done" };
     case "FAILED": return { now: `failed: ${t.error ?? "unknown error"}` };
+    // engine v2 (kernel) states
+    case "PR_OPEN": { const u = t.data.pr?.url ?? t.data.prs?.map((x: any) => x.url).join(" "); return { now: u ? `PR open – ${u}` : "PR open" }; }
+    case "BLOCKED": return { now: `blocked: ${t.error ?? "waiting for a connection or another item"}` };
+    case "MERGED": return { now: "PR merged – closing up" };
+    case "CLOSED": return { now: "PR closed without merge", waitingFor: "you to reopen or drop it" };
     default: return { now: t.state.toLowerCase().replace(/_/g, " ") };
   }
 }

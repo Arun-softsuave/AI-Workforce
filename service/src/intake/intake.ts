@@ -1,5 +1,5 @@
 import { db, getCursor, setCursor, getMeta, setMeta, audit } from "../core/db.js";
-import { loadProjects, loadSettings, type ProjectConfig } from "../core/config.js";
+import { loadProjects, loadSettings, engineVersion, type ProjectConfig } from "../core/config.js";
 import { isDeveloper } from "../core/roles.js";
 import { newId, nowIso, sha256, inTimeWindow, localHourMinute } from "../core/util.js";
 import { logger } from "../core/log.js";
@@ -97,6 +97,8 @@ async function handleEvent(project: ProjectConfig, e: GateEvent, prev: Snapshot 
     case "epic_created": return createTask({ ...base, kind: "epic_created", role: "business-analyst" });
     case "unassigned": case "closed": {
       for (const t of activeTasksForIssue(i.id)) {
+        // engine v2: a raised PR is looked after until it is merged or closed – the ticket moving on does not cancel it
+        if (engineVersion() === "v2" && AFTER_PR.includes(t.state)) continue;
         if (!["AWAITING_APPROVAL"].includes(t.state)) {
           await cancelTask(t.id, e.type === "closed" ? "ticket closed" : "ticket unassigned");
           await notify({ kind: "info", taskId: t.id, taskRef: i.key, title: `${i.key} stopped`, body: e.type === "closed" ? "The ticket was closed, so the work was cancelled." : "The ticket was reassigned, so the work was cancelled. Artefacts are kept for 7 days." });
@@ -106,12 +108,24 @@ async function handleEvent(project: ProjectConfig, e: GateEvent, prev: Snapshot 
     }
     case "description_changed": {
       const major = isMajorChange(prev, i);
-      for (const t of activeTasksForIssue(i.id)) await applyDescriptionChange(t, i, major, e.idemKey);
+      for (const t of activeTasksForIssue(i.id)) {
+        // engine v2: the PR is already raised – the kernel reacts to the change (reactions: ticket_changed)
+        if (engineVersion() === "v2" && AFTER_PR.includes(t.state)) {
+          const { emit } = await import("../kernel/events.js");
+          mergeData(t.id, { pendingTicket: ticketData(i) });
+          emit({ type: "ticket_changed", idemKey: `${e.idemKey}:${t.id}`, itemId: t.id, payload: { key: i.key, major } });
+          continue;
+        }
+        await applyDescriptionChange(t, i, major, e.idemKey);
+      }
       return undefined;
     }
     default: return undefined;
   }
 }
+
+/** Item states after the PR was raised (engine v2 only). */
+const AFTER_PR = ["PR_OPEN", "BLOCKED", "MERGED", "CLOSED"];
 
 async function applyDescriptionChange(t: Task, i: WorkItem, major: boolean, idemKey: string): Promise<void> {
   {

@@ -1,4 +1,5 @@
 import { makeRepo, sh, waitFor } from "./helpers.js";
+import { prEndState, settleAfterPr } from "./engineHelpers.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -116,8 +117,8 @@ test("Jira assignment -> triage -> feature playbook -> approval -> draft PR -> m
 
   const res = await decideAndApply("PAY-142", "approved", "Tester", "claude-code");
   assert.equal(res.ok, true);
-  const done = await settle("PAY-142", ["DONE", "FAILED", "PAUSED"]);
-  assert.equal(done.state, "DONE", done.error ?? "");
+  const done = await settleAfterPr("PAY-142", ["FAILED", "PAUSED"]);
+  assert.equal(done.state, prEndState(), done.error ?? "");
   assert.equal(prs.length, 1);
   assert.equal(prs[0].draft, false, "PRs are ready for review by default (aiw prefs --draft-pr yes for drafts)");
   assert.deepEqual(reviewRequests.map((r) => r.users), [["eric"]], "the project's reviewers are asked – never the author");

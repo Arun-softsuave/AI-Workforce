@@ -1,4 +1,5 @@
 import { makeRepo, waitFor, testHome } from "./helpers.js";
+import { prEndState, settleAfterPr } from "./engineHelpers.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -224,8 +225,8 @@ test("ticket from Teams: plan approval -> question while building -> PR approval
 
   // 7. "go ahead" raises the PR and the link comes to Teams
   assert.match(await say("go ahead"), /Approved PAY-7 – raising the PR now/);
-  const done = await drive("PAY-7", ["DONE", "FAILED", "PAUSED", "FAILED_PUBLISH"]);
-  assert.equal(done.state, "DONE", done.error ?? "");
+  const done = await settleAfterPr("PAY-7", ["FAILED", "PAUSED", "FAILED_PUBLISH"], () => { void tick(); }, 100);
+  assert.equal(done.state, prEndState(), done.error ?? "");
   assert.equal(prs.length, 1);
   assert.equal(prs[0].draft, false);
   assert.match(sent.find((m) => /PR #300 raised/.test(m)) ?? "", /https:\/\/github\.com\/acme\/shop\/pull\/300/);
@@ -265,8 +266,8 @@ test("work without a ticket: requirements interview in Teams -> confirm -> plan 
   assert.equal(pr.state, "AWAITING_APPROVAL", pr.error ?? "");
   assert.equal(latestApproval(pr.id)!.action, "create_pr");
   assert.match(await say("1"), /raising the PR now/);
-  const done = await drive("TASK-1", ["DONE", "FAILED", "PAUSED", "FAILED_PUBLISH"]);
-  assert.equal(done.state, "DONE", done.error ?? "");
+  const done = await settleAfterPr("TASK-1", ["FAILED", "PAUSED", "FAILED_PUBLISH"], () => { void tick(); }, 100);
+  assert.equal(done.state, prEndState(), done.error ?? "");
   const created = prs.at(-1);
   assert.ok(!created.title.startsWith("TASK-1"), "no made-up ticket key in the PR title");
   assert.match(created.body, /Requirements \(agreed before implementation\)/);

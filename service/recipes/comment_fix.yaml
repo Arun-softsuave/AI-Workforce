@@ -1,0 +1,10 @@
+name: comment_fix
+title: Fix the review comments on our PR (W10) – shown to you before anything is pushed
+job: comment_fix
+steps:
+  - fix_prepare           # the PR, its open comments (and failing checks), the ticket; the PR branch in its own folder
+  - fix_plan              # each comment: fix / answer / disagree / other repo / needs your decision
+  - fix_apply             # the code changes (only when something needs a change)
+  - fix_review: { reviewers: [combined] }
+  - fix_gate              # shown to you first: per comment what was done and the reply
+  - fix_publish           # push to the same PR, reply in each thread; QA follows when qaAfterFix is on

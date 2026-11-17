@@ -8,26 +8,37 @@ export const STATES = [
   "AWAITING_APPROVAL", "PUBLISHING", "DONE", "CANCELLED", "FAILED", "REJECTED", "STALE", "FAILED_PUBLISH",
   // multi-repository work: the lead waits for its parts; a part waits for the lead (finished, or asked the lead something)
   "WAITING_PARTS", "PART_READY", "ASKING_LEAD",
+  // kernel (engine v2) only – v1 never enters these: a raised PR is looked after until merged or closed; blocked by a
+  // connector, the environment or a dependency; containers (batch/epic/sprint) plan, then wait for their children
+  "PR_OPEN", "BLOCKED", "MERGED", "CLOSED", "PLANNING", "WAITING_CHILDREN",
 ] as const;
 export type State = (typeof STATES)[number];
 
 const T: Record<State, State[]> = {
-  DETECTED: ["TRIAGED", "QUEUED", "NEEDS_INFO", "CANCELLED", "FAILED"],
-  TRIAGED: ["QUEUED", "AWAITING_START", "NEEDS_INFO", "CANCELLED"],
-  NEEDS_INFO: ["QUEUED", "CANCELLED", "DETECTED"],
-  AWAITING_START: ["QUEUED", "CANCELLED"],
-  QUEUED: ["RUNNING", "CANCELLED", "PAUSED"],
-  RUNNING: ["RUNNING", "QUEUED", "PAUSED", "NEEDS_INFO", "AWAITING_APPROVAL", "DONE", "FAILED", "CANCELLED", "DETECTED", "WAITING_PARTS", "PART_READY", "ASKING_LEAD"],   // DETECTED: a confirmed request is triaged like a ticket
+  DETECTED: ["TRIAGED", "QUEUED", "NEEDS_INFO", "CANCELLED", "FAILED", "PLANNING"],
+  TRIAGED: ["QUEUED", "AWAITING_START", "NEEDS_INFO", "CANCELLED", "PLANNING"],
+  NEEDS_INFO: ["QUEUED", "CANCELLED", "DETECTED", "PLANNING"],
+  AWAITING_START: ["QUEUED", "CANCELLED", "PLANNING"],
+  QUEUED: ["RUNNING", "CANCELLED", "PAUSED", "BLOCKED", "PLANNING"],
+  RUNNING: ["RUNNING", "QUEUED", "PAUSED", "NEEDS_INFO", "AWAITING_APPROVAL", "DONE", "FAILED", "CANCELLED", "DETECTED", "WAITING_PARTS", "PART_READY", "ASKING_LEAD",   // DETECTED: a confirmed request is triaged like a ticket
+    "PR_OPEN", "BLOCKED", "PLANNING", "WAITING_CHILDREN"],
   PAUSED: ["QUEUED", "CANCELLED", "FAILED"],
-  AWAITING_APPROVAL: ["PUBLISHING", "REJECTED", "STALE", "CANCELLED", "QUEUED"],
-  PUBLISHING: ["DONE", "FAILED_PUBLISH", "STALE", "RUNNING"],
+  AWAITING_APPROVAL: ["PUBLISHING", "REJECTED", "STALE", "CANCELLED", "QUEUED", "PLANNING", "WAITING_CHILDREN"],
+  PUBLISHING: ["DONE", "FAILED_PUBLISH", "STALE", "RUNNING", "PR_OPEN"],
   REJECTED: ["QUEUED", "CANCELLED"],
   STALE: ["QUEUED", "CANCELLED", "AWAITING_APPROVAL"],
   FAILED_PUBLISH: ["PUBLISHING", "QUEUED", "CANCELLED", "AWAITING_APPROVAL"],
   FAILED: ["QUEUED", "CANCELLED"],
   WAITING_PARTS: ["QUEUED", "CANCELLED", "PAUSED", "FAILED"],
-  PART_READY: ["QUEUED", "DONE", "CANCELLED"],
+  PART_READY: ["QUEUED", "DONE", "CANCELLED", "PR_OPEN"],
   ASKING_LEAD: ["QUEUED", "CANCELLED", "PAUSED", "FAILED"],
+  // kernel (v2): jobs (ci_fix, comment_fix, rebase, review…) run ON a PR_OPEN item without changing its state
+  PR_OPEN: ["MERGED", "CLOSED", "BLOCKED", "CANCELLED"],
+  BLOCKED: ["QUEUED", "PR_OPEN", "PLANNING", "WAITING_CHILDREN", "PAUSED", "CANCELLED", "FAILED"],   // back to where it was
+  MERGED: ["DONE"],                                                   // close-out finished
+  CLOSED: ["PR_OPEN", "QUEUED", "CANCELLED", "DONE"],                 // closed without merge: reopen, rebuild or drop
+  PLANNING: ["WAITING_CHILDREN", "AWAITING_APPROVAL", "NEEDS_INFO", "QUEUED", "PAUSED", "BLOCKED", "FAILED", "CANCELLED", "DONE"],
+  WAITING_CHILDREN: ["PLANNING", "QUEUED", "DONE", "PAUSED", "BLOCKED", "FAILED", "CANCELLED"],
   DONE: [],
   CANCELLED: [],
 };
