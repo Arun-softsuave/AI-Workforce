@@ -187,7 +187,9 @@ export function ruleIntent(text: string, p: Pending = pendingItems(), aiAvailabl
     if (refs.length) return { intent: { intent: "send_report", ref: refs[0], refs } };
     return { reply: "Which ticket's report do you want? e.g. \"PDF of KAN-52\"." };
   }
-  if (key && START.test(t) && (!/\?\s*$/.test(t) || /^(please\s+)?(can|could|would|will) you\b/i.test(t))) {
+  // N1–N3 / B14: a test plan, user stories, a design review or a bug is not "start building" – the Conductor picks the role
+  const roleWords = /\b(test plan|test cases|qa plan|user stories|stories for|design review|review (the|this) (design|figma)|bug)\b/i.test(t);
+  if (key && START.test(t) && !roleWords && (!/\?\s*$/.test(t) || /^(please\s+)?(can|could|would|will) you\b/i.test(t))) {
     const keys = ticketKeysIn(t);
     return { intent: keys.length > 1 ? { intent: "start_ticket", ref: keys[0], refs: keys } : { intent: "start_ticket", ref: key } };
   }

@@ -14,6 +14,9 @@ export interface WorkItem {
   labels: string[];
   issueType?: string;
   url: string;
+  /** The parent (an epic in team-managed projects) and its type. */
+  parentKey?: string;
+  parentType?: string;
   updated: string;
   created?: string;
   comments?: { author: string; body: string; created: string }[];

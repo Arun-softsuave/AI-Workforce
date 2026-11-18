@@ -99,7 +99,12 @@ export function makeAgentCaller(ctxRef: () => StepCtx) {
     const ctx = ctxRef();
     const b = checkBudget(ctx.project, ctx.task);
     if (!b.ok) throw new BudgetPause(`${b.reason} (${b.used.toLocaleString()} / ${b.limit.toLocaleString()} tokens)`);
-    if (b.warn) { ctx.save({ budgetWarned: true }); throw new BudgetPause(`80% of the task budget used (${b.used.toLocaleString()} / ${b.limit.toLocaleString()} tokens)`); }
+    // E12: at 80 % you are WARNED once and the work goes on; only the full budget stops it (when you chose budget stops)
+    if (b.warn) {
+      ctx.save({ budgetWarned: true });
+      notify({ kind: "info", taskId: ctx.task.id, taskRef: ctx.task.source_ref ?? undefined, dedupeKey: `budget80:${ctx.task.id}:${ctx.task.data.budgetExtensions ?? 1}`,
+        title: `💰 ${ctx.task.source_ref ?? ctx.task.id}: 80% of its token budget used`, body: `${b.used.toLocaleString()} of ${b.limit.toLocaleString()} tokens. I keep going; at 100% I pause and ask you.` }).catch(() => {});
+    }
     const base = name.split(":")[0];
     const def = AGENTS[base];
     if (!def) throw new Error(`Unknown agent ${name}`);
@@ -422,6 +427,55 @@ async function sourceConflictQuestions(ctx: StepCtx, claims: unknown): Promise<{
   return out;
 }
 
+/**
+ * E8 (before the PR, nothing pushed): merge the latest base into the work; a small conflict (few files and hunks, no lock
+ * or binary files) is resolved by the coding agent and committed in the team's message style. Returns true when the
+ * base is in, else a short reason (the merge is undone).
+ */
+async function resolveBaseConflict(ctx: StepCtx, wt: string, baseRef: string, baseBranch: string): Promise<true | string> {
+  const { conflictStats, isSimpleConflict } = await import("./steps/rebase.js");
+  const msg = commitMessageFor(ctx.project.conventions, jiraKey(ctx.task) || "", "chore", `merge ${baseBranch} into ${ctx.task.branch ?? "the branch"}`, []);
+  let error = "";
+  try { G.git(wt, ["merge", "--no-ff", "-m", msg, baseRef]); return true; } catch (e: any) { error = String(e?.message ?? e); }
+  const names = G.git(wt, ["diff", "--name-only", "--diff-filter=U"], { allowFail: true }).split("\n").map((s) => s.trim()).filter(Boolean);
+  const abort = (why: string) => { G.git(wt, ["merge", "--abort"], { allowFail: true }); return why; };
+  if (!names.length) return abort(/hook|Failed/i.test(error) ? "the git hook refused the merge commit" : "git refused the merge");
+  const files = names.map((p) => { let t = ""; try { t = fs.readFileSync(path.join(wt, p), "utf8"); } catch { /* binary */ } return { path: p, ...conflictStats(t) }; });
+  if (!isSimpleConflict(files)) return abort(`${names.length} file${names.length === 1 ? "" : "s"} conflict – too big to resolve without you`);
+  await ctx.agent("implementer", [
+    `Merging the latest ${baseBranch} into this work hit conflicts. Resolve ONLY the conflicts in the files below: keep the intent of both sides (this work AND what landed on ${baseBranch}), remove every conflict marker, change nothing else, do not commit.`,
+    files.map((f) => `### ${f.path}\n${untrusted(`conflict:${f.path}`, truncate(fs.readFileSync(path.join(wt, f.path), "utf8"), 8000))}`).join("\n\n"),
+  ].join("\n\n"), { cwd: wt, tools: ["Read", "Edit", "Grep", "Glob"], maxTurns: 20 });
+  const left = files.filter((f) => { try { return /^(<<<<<<<|>>>>>>>)( |$)/m.test(fs.readFileSync(path.join(wt, f.path), "utf8")); } catch { return true; } });
+  if (left.length) return abort("some conflicts could not be resolved safely");
+  if (attributionInDiff(G.git(wt, ["diff", "HEAD", "--", ...names], { allowFail: true })).length) return abort("the resolution mentioned AI authorship");
+  try { G.git(wt, ["add", "-A"]); G.git(wt, ["commit", "--quiet", "-m", msg]); } catch { return abort("the git hook refused the merge commit"); }
+  audit("service", "prepublish.conflict_resolved", ctx.task.id, { files: names });
+  ctx.save({ baseConflictResolved: names });
+  return true;
+}
+
+/** N2: one Jira story per proposed story (QUESTION lines stay as a comment). Undefined when there is nothing to create. */
+async function createStories(ctx: StepCtx, jira: { createIssue: (p: any) => Promise<{ key: string; url: string }>; addComment: (k: string, t: string) => Promise<void> }): Promise<StepResult | undefined> {
+  if (ctx.task.data.published?.stories) return { status: "ok", note: "stories already created" };
+  const items: string[] = (ctx.task.data.artefact?.markdown ?? "").split("\n").map((l: string) => l.replace(/^-\s*/, "").trim()).filter((l: string) => /^As an? /i.test(l));
+  if (!items.length) return undefined;
+  const projectKey = (jiraKey(ctx.task) || "").split("-")[0] || ctx.project.jira?.keys?.[0];
+  if (!projectKey) return { status: "fail", reason: "No Jira project to create the stories in" };
+  const epic = ctx.task.kind === "epic_created" && jiraKey(ctx.task) ? jiraKey(ctx.task) : undefined;
+  const created: string[] = [];
+  for (const s of items.slice(0, 20)) {
+    const [story, ac] = s.split(/\s*\|\s*AC:\s*/i);
+    const summary = stripAttribution(story.replace(/\s+/g, " ")).slice(0, 240);
+    const r = await jira.createIssue({ projectKey, summary, description: stripAttribution(`${story}${ac ? `\n\nAcceptance criteria:\n${ac.split(/;\s*/).map((x) => `- ${x}`).join("\n")}` : ""}`), issueType: "Story", ...(epic ? { parentKey: epic } : {}) });
+    created.push(r.key);
+  }
+  ctx.save({ published: { stories: created } });
+  audit("service", "publish.stories", ctx.task.id, { created });
+  await notify({ kind: "info", taskId: ctx.task.id, taskRef: ctx.task.source_ref ?? undefined, dedupeKey: `stories:${ctx.task.id}`, title: `📝 Created ${created.length} stor${created.length === 1 ? "y" : "ies"} in Jira${epic ? ` under ${epic}` : ""}`, body: created.join(", ") });
+  return { status: "ok", note: `created ${created.join(", ")}` };
+}
+
 /** Run the project's detected lint / format / type checks on the changed files. */
 async function runChecks(ctx: StepCtx, wt: string): Promise<{ ok: boolean; output: string; ran: string[] }> {
   const files = G.changedFiles(wt, ctx.task.data.baseSha).filter((f) => fs.existsSync(path.join(wt, f)));
@@ -502,6 +556,23 @@ export function planMessage(t: Task): string {
 }
 
 /** The whole plan, readable in a chat: nothing is cut off (long messages are split into parts by the Teams sender). */
+/** A migration file (Alembic, Django, Rails, Prisma, Knex, Flyway, plain SQL migrations …). */
+export const MIGRATION_FILE = /(^|\/)(migrations?|alembic\/versions|db\/migrate|prisma\/migrations|flyway)\/|\.sql$/i;
+
+/** A frontend repository (by its role or its name). */
+export function isFrontendProject(p: Pick<ProjectConfig, "id" | "roles">): boolean {
+  return p.roles.some((r) => /frontend|uiux/.test(r)) || /front|web|ui\b|app\b/i.test(p.id);
+}
+
+/** C6: a frontend change with no Figma link in the ticket – said once in the plan (and the PR shows screenshots). */
+export function noDesignNote(t: Task): string | undefined {
+  const p = getProject(t.project_id);
+  if (!p || !isFrontendProject(p)) return undefined;
+  const text = `${t.data.ticket?.description ?? ""} ${t.data.ticket?.title ?? ""} ${(t.data.ticket?.comments ?? []).map((c: any) => c.body).join(" ")}`;
+  if (/figma\.com\//i.test(text) || t.data.figma || t.data.designFrames?.length) return undefined;
+  return "🎨 No design was given for this – I follow the existing screens' patterns and put desktop and mobile screenshots in the PR.";
+}
+
 export function planDetails(t: Task): string {
   const p = t.data.plan ?? {};
   if (Array.isArray(p.parts)) return leadPlanMessage(t);
@@ -511,7 +582,15 @@ export function planDetails(t: Task): string {
   if (p.steps?.length) sections.push(section("🛠️ Steps", numbered(p.steps)));
   if (p.files?.length) sections.push(section("📄 Files", bullets(p.files, 25)));
   if (p.tests?.length) sections.push(section("🧪 Tests", bullets(p.tests)));
-  if (p.risks?.length) sections.push(section("⚠️ Risks", bullets(p.risks)));
+  const risks = [...(p.risks ?? [])];
+  // C9: a migration in the files is always a flagged risk, whatever the planner wrote
+  if ((p.files ?? []).some((f: string) => MIGRATION_FILE.test(String(f))) && !risks.some((r: string) => /migration/i.test(String(r)))) risks.push("Database migration – I never run it on a shared database; check it before it runs there.");
+  if (risks.length) sections.push(section("⚠️ Risks", bullets(risks)));
+  // C11: what has to happen outside these repositories (listed in the PR too)
+  if ((p.outsideWork ?? []).length) sections.push(section("🧩 Outside these repositories (for a person)", bullets(p.outsideWork)));
+  // C6: a UI change without a design
+  const nd = noDesignNote(t);
+  if (nd) sections.push(nd);
   if (t.data.assumptions?.length) sections.push(section("💭 Assumptions (questions left open)", bullets(t.data.assumptions)));
   const issues = t.data.planReview && !t.data.planReview.pass ? t.data.planReview.issues ?? [] : [];
   if (issues.length) sections.push(section("🔎 Plan reviewer still flags", bullets(issues.map((x: any) => `[${x.severity}] ${x.description}`))));
@@ -1152,7 +1231,12 @@ export const STEPS: Record<string, StepFn> = {
     const baseBranch = (await stackBaseOf(ctx.task)) ?? ctx.project.github?.baseBranch ?? "main";
     const latest = G.resolveBase(ctx.project.local.path, baseBranch);
     if (latest.sha !== ctx.task.data.baseSha) {
-      if (!G.rebaseOnto(wt, latest.ref)) return { status: "pause", reason: `Conflicts while rebasing onto the latest ${baseBranch}. Resolve in ${wt} and run \`aiw resume ${ctx.task.source_ref}\`.` };
+      if (!G.rebaseOnto(wt, latest.ref)) {
+        // E8: nothing is pushed yet – bring the latest base in and let the coding agent resolve a SMALL conflict; the
+        // checks and tests below run again on the result. A bigger one still stops and tells you.
+        const resolved = await resolveBaseConflict(ctx, wt, latest.ref, baseBranch);
+        if (resolved !== true) return { status: "pause", reason: `Conflicts with the latest ${baseBranch}${resolved ? ` (${resolved})` : ""}. Resolve in ${wt} and say "resume ${ctx.task.source_ref}".` };
+      }
       ctx.save({ baseSha: latest.sha });
     }
     // your area rules (B20): a changed file they keep out is put back as it was before this work, and listed
@@ -1203,7 +1287,11 @@ export const STEPS: Record<string, StepFn> = {
     const files = G.changedFiles(wt, ctx.task.data.baseSha);
     const protectedHits = policyProtectedHits(files);
     const warnings: string[] = [];
-    if (stat.added + stat.removed > ctx.settings.limits.maxDiffLines) warnings.push(`Large change: ${stat.added + stat.removed} lines`);
+    // E9: a very large change – suggest splitting it along the plan's parts (one PR each is easier to review)
+    if (stat.added + stat.removed > ctx.settings.limits.maxDiffLines) {
+      const parts = (ctx.task.data.plan?.steps ?? []).filter((s: string) => /^Part \d+/i.test(String(s))).length;
+      warnings.push(`Large change: ${stat.added + stat.removed} lines in ${stat.files} files – consider splitting it${parts > 1 ? ` into the plan's ${parts} parts` : " into smaller PRs"} (say "reject KAN-x split it" and I'll do one part per PR)`.replace("KAN-x", ctx.task.source_ref ?? "it"));
+    }
     if (protectedHits.length) warnings.push(`Touches protected paths: ${protectedHits.join(", ")}`);
     const testCmd = ctx.task.data.testsUnavailable ? undefined : testCommandOf(ctx);
     if (testCmd) {
@@ -1228,6 +1316,13 @@ export const STEPS: Record<string, StepFn> = {
       if (webApp(ctx.project)) for (const m of groupMembers(ctx.project)) await ensureProfile(m, ctx.agent);
       await captureScreenshots(ctx);
     } catch { /* recorded on the task when possible */ }
+    // F5: a frontend change without screenshots says why, in the PR and in Teams – never silently
+    if (isFrontendProject(ctx.project) && !ctx.task.data.screenshots?.taken) {
+      const { webApp } = await import("./screenshots.js");
+      const why = ctx.task.data.screenshots?.reason ?? (webApp(ctx.project) ? "the app could not be started on this computer" : "the repository has no Playwright set-up (set screenshots.startCommand for this project to enable them)");
+      const w = `No screenshots in the PR – ${why}`;
+      if (!(ctx.task.data.prepublishWarnings ?? []).includes(w)) ctx.save({ prepublishWarnings: [...(ctx.task.data.prepublishWarnings ?? []), w] });
+    }
     const d = ctx.task.data;
     const template = prTemplateText(ctx.project);
     const r = await ctx.agent("reporter", [
@@ -1246,6 +1341,7 @@ export const STEPS: Record<string, StepFn> = {
       checksLine,
       d.unresolvedIssues?.length ? `**Unresolved review findings:**\n${d.unresolvedIssues.map((x: any) => `- [${x.reviewer}/${x.severity}] ${x.file}: ${x.description}`).join("\n")}` : "",
       d.prepublishWarnings?.length ? `**Warnings:** ${d.prepublishWarnings.join("; ")}` : "",
+      (d.plan?.outsideWork ?? []).length ? `**Outside this repository (for a person):**\n${d.plan.outsideWork.map((x: string) => `- ${x}`).join("\n")}` : "",
       (d.targets ?? []).length > 1 ? `**Multi-repo change:** ${d.targets.join(" + ")} (Jira ${jiraKey(ctx.task)})` : "",
       dependencyFiles(d.changedFiles ?? []).length ? `**Dependencies:** ${(() => { const added = addedDependencies(reportDiffRaw(ctx)); return added.length ? `added ${added.join(", ")}` : "changed"; })()} (${dependencyFiles(d.changedFiles ?? []).join(", ")})` : "",
       `**Change size:** ${d.diffStat ? `${d.diffStat.files} files, +${d.diffStat.added}/-${d.diffStat.removed}` : "n/a"}`,
@@ -1309,6 +1405,11 @@ export const STEPS: Record<string, StepFn> = {
     if (!a || a.state !== "approved") return { status: "fail", reason: "No valid approval" };
     if (a.action === "post_jira_comment") {
       const jira = clients.jira();
+      // N2: user stories become real Jira stories after your OK (under the epic when there is one), not only a comment
+      if (jira?.createIssue && ctx.task.data.artefact?.kind === "user_stories") {
+        const r = await createStories(ctx, jira as any);
+        if (r) return r;
+      }
       if (!jira || !jiraKey(ctx.task)) return { status: "fail", reason: "Jira is not connected" };
       await jira.addComment(jiraKey(ctx.task), stripAttribution(`${ctx.task.data.artefact?.title ?? "Notes"}\n\n${ctx.task.data.artefact?.markdown ?? ""}`));
       ctx.save({ published: { jiraComment: true } });
@@ -1731,6 +1832,8 @@ export const STEPS: Record<string, StepFn> = {
   async artefact(ctx) {
     const kind = ctx.params.kind as string;
     const d = ctx.task.data;
+    // N2 / B15: a PRD, Notion page or Figma link in the request is read too (stories from a PRD, a review of a linked page)
+    const docs = kind === "user_stories" || kind === "qa_test_plan" ? await linkedDocsText(ctx.task, ctx.project).catch(() => "") : "";
     const briefs: Record<string, string> = {
       qa_test_plan: "Write a QA test plan for this ticket: items = test cases as 'ID | title | steps | expected result | priority', covering every acceptance criterion, boundaries, negative paths and regression risks.",
       ci_root_cause: "Find the root cause of this CI failure from the failing log section. summary = root cause in 2-3 sentences; items = concrete fix steps, file/line hints, and whether it looks flaky or environmental.",
@@ -1742,7 +1845,7 @@ export const STEPS: Record<string, StepFn> = {
       : kind === "pm_digest" ? untrusted("jira-sprint-data", d.pmData ?? "")
       : kind === "design_review" ? `${ticketBlock(ctx.task)}\n\n${untrusted("figma", d.figma ?? "")}`
       : ticketBlock(ctx.task);
-    const r = await ctx.agent("analyser", `${briefs[kind] ?? "Produce the requested artefact."}\n\n${input}\n\n## Project context\n${d.contextPack ?? ""}${d.requirements ? `\n\n## Requirements\n${json(d.requirements)}` : ""}`,
+    const r = await ctx.agent("analyser", `${briefs[kind] ?? "Produce the requested artefact."}\n\n${input}${docs ? `\n\n${docs}` : ""}\n\n## Project context\n${d.contextPack ?? ""}${d.requirements ? `\n\n## Requirements\n${json(d.requirements)}` : ""}`,
       { tier: ctx.params.tier });
     const title = { qa_test_plan: "QA test plan", ci_root_cause: "CI failure analysis", user_stories: "Proposed user stories", pm_digest: "Daily sprint digest", design_review: "Design review" }[kind] ?? "Report";
     const markdown = `${r.data.summary}\n\n${(r.data.items ?? []).map((x: string) => `- ${x}`).join("\n")}`;

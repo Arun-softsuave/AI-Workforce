@@ -11,7 +11,12 @@ import { messengerClock } from "./clock.js";
  */
 export const MERGE_WINDOW_MS = 60_000;
 
-export const mergeKeyOf = (n: Notice): string | undefined => { const r = refOf(n); return r ? `item:${r}` : undefined; };
+/**
+ * L3: "CI green" on several PRs within a minute is ONE message across them (the first goes out at once, the rest come
+ * together); every other routine update merges per item.
+ */
+export const ACROSS_PRS = /^✅ CI green on /;
+export const mergeKeyOf = (n: Notice): string | undefined => { if (ACROSS_PRS.test(n.title ?? "")) return "group:ci-green"; const r = refOf(n); return r ? `item:${r}` : undefined; };
 
 /** True when an update for this key was sent (or is already waiting to merge) on this channel within the window. */
 export function inMergeWindow(key: string, ch: Channel, now = messengerClock()): boolean {

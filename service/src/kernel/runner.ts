@@ -258,6 +258,19 @@ async function runLoop(start: Job): Promise<Job> {
     return endFailed(job, item, owned, `"${recipe.name}" is not available yet (missing steps: ${missing.join(", ")})`);
   }
 
+  // A11: the plugin was upgraded while this work was in progress and its recipe gained or lost steps – the position is
+  // carried over by the step's NAME (the job remembers the step list it started with), never by a bare number
+  {
+    const names = recipe.steps.map((s) => s.name);
+    const was: string[] | undefined = Array.isArray(job.data.recipeSteps) ? job.data.recipeSteps : undefined;
+    if (was && was.join("|") !== names.join("|")) {
+      const remap = (i: number) => { const n = was[i]; const j = n ? names.indexOf(n) : -1; return j >= 0 ? j : Math.min(i, names.length); };
+      if (owned) { const ni = remap(item.step_index); if (ni !== item.step_index) { updateTask(item.id, { step_index: ni }); item = getItem(item.id)!; } }
+      else if (job.data.started) job = patchJob(job.id, { step_index: remap(job.step_index) });
+      audit("service", "kernel.recipe_upgraded", item.id, { job: job.id, recipe: recipe.name });
+    }
+    if (!was || was.join("|") !== names.join("|")) job = mergeJobData(job.id, { recipeSteps: names });
+  }
   if (owned) {
     // workspace lost (cleanup, crash, manual delete): go back to preparing it, like v1
     const prepIdx = recipe.steps.findIndex((s) => s.name === "prepare_workspace");

@@ -26,6 +26,8 @@ export interface JiraClient {
   devLinks?(issueId: string): Promise<DevLink[]>;
   /** Create an issue (only after your OK or a directive – callers pass the gate first). */
   createIssue?(p: NewJiraIssue): Promise<{ key: string; id: string; url: string }>;
+  /** O1: move an issue to the status with this name (through the workflow transition that leads there). */
+  moveTo?(key: string, status: string): Promise<{ moved: boolean; status?: string; options?: string[] }>;
 }
 
 export interface JiraBoard { id: number; name: string; type: string }
@@ -40,7 +42,7 @@ export function jiraConfig(): { site: string; email: string } | undefined {
   return m.site && m.email ? { site: m.site, email: m.email } : undefined;
 }
 
-export const JIRA_FIELDS = ["summary", "description", "status", "assignee", "priority", "labels", "issuetype", "updated", "created", "project", "comment"];
+export const JIRA_FIELDS = ["summary", "description", "status", "assignee", "priority", "labels", "issuetype", "updated", "created", "project", "comment", "parent"];
 
 /** Map a Jira REST issue (also what Atlassian's MCP tools return) to a WorkItem. */
 export function mapJiraIssue(base: string, i: any): WorkItem {
@@ -58,6 +60,7 @@ export function mapJiraIssue(base: string, i: any): WorkItem {
     priority: i.fields?.priority?.name,
     labels: i.fields?.labels ?? [],
     issueType: i.fields?.issuetype?.name,
+    ...(i.fields?.parent?.key ? { parentKey: String(i.fields.parent.key), parentType: i.fields.parent.fields?.issuetype?.name } : {}),
     url: `${base}/browse/${i.key}`,
     updated: i.fields?.updated,
     created: i.fields?.created,
@@ -170,6 +173,15 @@ export function createJiraClient(site?: string, email?: string, token?: string):
       };
       const r = await httpJson(`${base}/rest/api/3/issue`, { method: "POST", headers, body: JSON.stringify({ fields }) });
       return { key: String(r.key), id: String(r.id), url: `${base}/browse/${r.key}` };
+    },
+    async moveTo(key, status) {
+      const r = await httpJson(`${base}/rest/api/3/issue/${encodeURIComponent(key)}/transitions`, { headers });
+      const list: any[] = r.transitions ?? [];
+      const want = status.trim().toLowerCase();
+      const t = list.find((x) => String(x.to?.name ?? "").toLowerCase() === want) ?? list.find((x) => String(x.name ?? "").toLowerCase() === want);
+      if (!t) return { moved: false, options: list.map((x) => String(x.to?.name ?? x.name)) };
+      await httpJson(`${base}/rest/api/3/issue/${encodeURIComponent(key)}/transitions`, { method: "POST", headers, body: JSON.stringify({ transition: { id: t.id } }) });
+      return { moved: true, status: String(t.to?.name ?? t.name) };
     },
   };
 }

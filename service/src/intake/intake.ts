@@ -64,7 +64,7 @@ function recordEvent(e: GateEvent, projectId: string): boolean {
   return r.changes > 0;
 }
 
-const ticketData = (i: WorkItem) => ({ key: i.key, id: i.id, title: i.title, description: i.description, url: i.url, status: i.status, priority: i.priority, labels: i.labels, comments: i.comments ?? [] });
+const ticketData = (i: WorkItem) => ({ key: i.key, id: i.id, title: i.title, description: i.description, url: i.url, status: i.status, priority: i.priority, labels: i.labels, comments: i.comments ?? [], ...(i.parentKey ? { parentKey: i.parentKey, parentType: i.parentType } : {}) });
 const priorityOf = (i: WorkItem) => PRIORITY_RANK[i.priority ?? "Medium"] ?? 3;
 
 /** Route a project's items into tasks. Returns tasks created in this pass. */
@@ -273,11 +273,19 @@ export async function pollCi(): Promise<Task[]> {
     const cursor = `ci:${p.id}`;
     const since = getCursor(cursor) ?? new Date(Date.now() - 6 * 3_600_000).toISOString();
     // engine v2: failures on the plugin's own PR branches are the kernel's ci_fix job (never a second DevOps task)
-    const own = engineVersion() === "v2" ? [] : ["aiw/*"];
-    const branches = p.roles.includes("devops-engineer") ? [p.github!.baseBranch, ...own] : own;
-    if (!branches.length) continue;
+    const v2 = engineVersion() === "v2";
+    const own = v2 ? [] : ["aiw/*"];
+    const devops = p.roles.includes("devops-engineer");
+    // N5: the DevOps role watches EVERY branch (not only the base); on v2 the plugin's own PR branches stay with the
+    // kernel's CI fix job, and a branch with an open PR is that PR's business (G2–G6), not a DevOps task
+    const branches = devops ? [] : own;
+    if (!devops && !branches.length) continue;
     const started = nowIso();
-    const runs = await gh.failedRuns(p.github!.repo, since, branches);
+    let runs = await gh.failedRuns(p.github!.repo, since, branches);
+    if (devops && v2) {
+      const prBranches = new Set((db().prepare("SELECT json_extract(data,'$.prHeadRef') AS b FROM tasks WHERE project_id=? AND state IN ('PR_OPEN','RUNNING','AWAITING_APPROVAL')").all(p.id) as any[]).map((r) => r.b).filter(Boolean));
+      runs = runs.filter((r) => !/^aiw[/-]/.test(r.branch) && !prBranches.has(r.branch));
+    }
     for (const run of runs) {
       const idem = `ci:${run.id}:failed`;
       const r = db().prepare("INSERT OR IGNORE INTO events (id, idem_key, type, project_id, source_ref, payload, received_at) VALUES (?,?,?,?,?,?,?)")
@@ -309,7 +317,22 @@ export function scheduleDigests(now = new Date()): Task[] {
 }
 
 /** Manual trigger: `/aiw run PAY-142`. */
-export async function runTicket(key: string): Promise<Task> {
+/** N1–N3 from Teams: which task kind a role request becomes. */
+export const ROLE_KINDS: Record<string, string> = { qa_plan: "ready_for_qa", stories: "epic_created", design_review: "design_review" };
+
+/** N2 / N3 without a ticket: "write stories for this PRD <link>", "review this Figma frame <link>" – the link is the input. */
+export function startRoleRequest(role: "stories" | "design_review" | "qa_plan", text: string, projectId?: string): Task {
+  const project = (projectId ? loadProjects().find((p) => p.id === projectId) : undefined) ?? loadProjects().find((p) => isGroupLead(p)) ?? loadProjects()[0];
+  if (!project) throw new Error("No project is set up yet – add one with `aiw project add`.");
+  const kind = ROLE_KINDS[role];
+  const n = Number(getMeta("role.requests") ?? 0) + 1;
+  setMeta("role.requests", String(n));
+  const ref = `${role === "stories" ? "STORIES" : role === "design_review" ? "DESIGN" : "QA"}-${n}`;
+  const title = role === "stories" ? "User stories from the linked document" : role === "design_review" ? "Design review of the linked frame" : "Test plan";
+  return createTask({ projectId: project.id, source: "chat", sourceId: `role:${ref}`, sourceRef: ref, title, kind, data: { ticket: { key: ref, title, description: text }, manual: true } });
+}
+
+export async function runTicket(key: string, opts: { role?: string } = {}): Promise<Task> {
   const jira = clients.jira();
   if (!jira) throw new Error("Jira is not connected");
   const item = await jira.getIssue(key);
@@ -317,8 +340,10 @@ export async function runTicket(key: string): Promise<Task> {
   const project = loadProjects().find((p) => p.jira?.keys.includes(item.projectKey) && isGroupLead(p));
   if (!project) throw new Error(`No project is configured for Jira key ${item.projectKey}. Add one with \`aiw project add\`.`);
   saveSnapshot(project.id, item);
-  const kind = isDeveloper(project.roles) ? "assigned" : project.roles.includes("qa-engineer") ? "ready_for_qa" : project.roles.includes("business-analyst") ? "epic_created" : "assigned";
-  const t = createTask({ projectId: project.id, source: "jira", sourceId: item.id, sourceRef: item.key, title: item.title, kind, priority: priorityOf(item), data: { ticket: ticketData(item), manual: true } });
+  const roleKind = opts.role ? ROLE_KINDS[opts.role] : undefined;
+  const kind = roleKind ?? (isDeveloper(project.roles) ? "assigned" : project.roles.includes("qa-engineer") ? "ready_for_qa" : project.roles.includes("business-analyst") ? "epic_created" : "assigned");
+  // a role task beside the ticket's build (a test plan for a ticket being built) is its own item
+  const t = createTask({ projectId: project.id, source: "jira", sourceId: roleKind ? `${item.id}:${opts.role}` : item.id, sourceRef: roleKind ? `${item.key}-${opts.role === "qa_plan" ? "QA" : opts.role === "stories" ? "STORIES" : "DESIGN"}` : item.key, title: item.title, kind, priority: priorityOf(item), data: { ticket: ticketData(item), manual: true } });
   audit("user", "task.manual_run", t.id, { key });
   return t;
 }
@@ -328,22 +353,43 @@ export function isWorkingHours(now = new Date()): boolean {
   return inTimeWindow(s.profile.workingHours, now, s.profile.timezone);
 }
 
+/**
+ * L4: a tracker said "too many requests" (429, or GitHub's 403 rate limit): its polls wait – the time it asked for
+ * (retry-after), else 15 minutes – and nothing is lost: the next poll reads everything since the last good one.
+ */
+export function backingOff(source: "jira" | "github", now = Date.now()): boolean {
+  const until = Number(getMeta(`backoff.${source}`) ?? 0);
+  return until > now;
+}
+export function noteRateLimited(source: "jira" | "github", e: any, now = Date.now()): boolean {
+  const status = Number(e?.status ?? e?.statusCode ?? 0);
+  const msg = String(e?.message ?? e ?? "");
+  if (!(status === 429 || (status === 403 && /rate limit|secondary rate|abuse/i.test(msg)) || /\b429\b|rate limit exceeded/i.test(msg))) return false;
+  const wait = Math.min(60 * 60_000, Math.max(60_000, Number(e?.retryAfterMs ?? 0) || 15 * 60_000));
+  setMeta(`backoff.${source}`, String(now + wait));
+  logger.warn(`${source} rate limited – polling waits`, { minutes: Math.round(wait / 60_000) });
+  return true;
+}
+
 export async function pollAll(): Promise<{ items: number; tasks: number; errors: string[] }> {
   const errors: string[] = [];
   let items = 0, tasks = 0;
-  if (isConnected("jira")) {
-    try { const r = await pollJira(); items += r.items; tasks += r.tasks.length; } catch (e: any) { errors.push(`jira: ${e.message}`); logger.warn("jira poll failed", { error: e.message }); }
+  if (isConnected("jira") && !backingOff("jira")) {
+    try { const r = await pollJira(); items += r.items; tasks += r.tasks.length; } catch (e: any) { noteRateLimited("jira", e); errors.push(`jira: ${e.message}`); logger.warn("jira poll failed", { error: e.message }); }
   }
-  if (isConnected("github")) {
+  if (isConnected("github") && !backingOff("github")) {
     // one "PR watcher" row on the dashboard for the PR polls; each poll keeps its own error handling
     await runTimed("PR watcher", async () => {
-      try { tasks += (await pollCi()).length; } catch (e: any) { errors.push(`github: ${e.message}`); logger.warn("ci poll failed", { error: e.message }); }
-      try { await pollPrActivity(); } catch (e: any) { logger.warn("PR activity poll failed", { error: e.message }); }
-      try { await pollReviewedPrs(); } catch (e: any) { logger.warn("reviewed PR poll failed", { error: e.message }); }
+      try { tasks += (await pollCi()).length; } catch (e: any) { noteRateLimited("github", e); errors.push(`github: ${e.message}`); logger.warn("ci poll failed", { error: e.message }); }
+      if (backingOff("github")) return;
+      try { await pollPrActivity(); } catch (e: any) { noteRateLimited("github", e); logger.warn("PR activity poll failed", { error: e.message }); }
+      try { await pollReviewedPrs(); } catch (e: any) { noteRateLimited("github", e); logger.warn("reviewed PR poll failed", { error: e.message }); }
     }).catch(() => {});
     // engine v2: GitHub producers (conditional requests) -> kernel events -> reactions; a no-op on v1, which keeps the polls above
-    try { const { runGitHubProducers } = await import("./github.js"); const r = await runGitHubProducers(); if (r?.errors?.length) errors.push(...r.errors.map((x) => `github: ${x}`)); }
-    catch (e: any) { logger.warn("GitHub events failed", { error: e.message }); }
+    if (!backingOff("github")) {
+      try { const { runGitHubProducers } = await import("./github.js"); const r = await runGitHubProducers(); if (r?.errors?.length) { errors.push(...r.errors.map((x) => `github: ${x}`)); if (r.errors.some((x) => /\b429\b|rate limit/i.test(String(x)))) noteRateLimited("github", { status: 429, message: r.errors.join(" ") }); } }
+      catch (e: any) { noteRateLimited("github", e); logger.warn("GitHub events failed", { error: e.message }); }
+    }
     try { const { pollCiWatches } = await import("../engine/prFix.js"); await runTimed("CI watch", () => pollCiWatches()); } catch (e: any) { logger.warn("CI watch failed", { error: e.message }); }
   }
   if (isConnected("jira")) {

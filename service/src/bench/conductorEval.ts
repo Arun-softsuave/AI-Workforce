@@ -28,7 +28,7 @@ const READS = new Set(["status", "find", "explain", "lookup", "reply", "unclear"
 
 /** A Conductor tool call as "tool[:action|mode|decision]" + its ticket ref. */
 export function canonical(tool: string, args: Record<string, any> = {}): Call {
-  const sub = tool === "control" ? args.action : tool === "decide" ? (args.decision ?? "approve") : tool === "fix_pr" ? (args.mode ?? "comments") : undefined;
+  const sub = tool === "control" ? args.action : tool === "decide" ? (args.decision ?? "approve") : tool === "fix_pr" ? (args.mode ?? "comments") : tool === "start" && args.role ? args.role : tool === "prefs" && args.key ? String(args.key) : undefined;
   const ref = typeof args.ref === "string" ? args.ref : Array.isArray(args.refs) && args.refs.length ? String(args.refs[0]) : undefined;
   return { name: sub ? `${tool}:${sub}` : tool, ref: ref ? normRef(ref) : undefined };
 }

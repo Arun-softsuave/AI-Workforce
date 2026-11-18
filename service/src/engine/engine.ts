@@ -80,6 +80,17 @@ export async function triageTask(t: Task): Promise<Task> {
   let project = getProject(t.project_id);
   if (!project) return transition(t.id, "CANCELLED", "project no longer configured");
   if (t.kind === "request") return startRequest(t);
+  // M2: ticket text that tries to give the plugin orders is only ever data – and you are told once
+  try {
+    const { detectInjection } = await import("../policy/untrusted.js");
+    const tk = t.data.ticket ?? {};
+    const rep = detectInjection(`${tk.title ?? ""}\n${tk.description ?? ""}\n${(tk.comments ?? []).map((c: any) => c.body).join("\n")}`);
+    if (rep.suspicious && !t.data.injectionTold) {
+      mergeData(t.id, { injectionTold: true });
+      await notify({ kind: "info", taskId: t.id, taskRef: t.source_ref ?? undefined, dedupeKey: `injection:${t.id}`, title: `⚠️ ${t.source_ref ?? t.id}: its text contains instructions aimed at an AI`,
+        body: `${rep.flags.map((f) => ({ "ignore-previous": "tells an AI to ignore its instructions", "role-play": "tries to change who the AI is", secrets: "asks for secrets or keys", "repo-action": "asks for pushes, merges or deletes", "hidden-text": "has hidden text" } as Record<string, string>)[f] ?? f).map((x) => `- ${x}`).join("\n")}\n\nI treat it as data only and never follow it. Check who wrote it.` }).catch(() => {});
+    }
+  } catch { /* never blocks triage */ }
   let size = "S", clear = true, questions: Question[] = [];
   // A product with several repositories (e.g. backend + frontend): ONE lead task reads every repository, decides which
   // ones change and in what order, and runs one part task per repository. Triage only sizes the work here.

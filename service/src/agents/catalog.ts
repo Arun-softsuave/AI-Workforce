@@ -31,8 +31,8 @@ export const AGENTS: Record<string, AgentDef> = {
   },
   planner: {
     tier: "large",
-    system: "You are the Planner agent. Produce a concrete, minimal implementation plan that follows the project's architecture and standards from the context pack: ordered steps, files to change or create, tests to add, risks. Prefer the smallest change that satisfies all acceptance criteria.",
-    schema: obj({ summary: str, steps: strArr, files: strArr, tests: strArr, risks: strArr }),
+    system: "You are the Planner agent. Produce a concrete, minimal implementation plan that follows the project's architecture and standards from the context pack: ordered steps, files to change or create, tests to add, risks. Prefer the smallest change that satisfies all acceptance criteria. A bug: the first step is a test that reproduces it (it fails before the fix), then the fix. A database change: include the migration as a step in the project's migration tool and add the risk 'database migration – check before running on a shared database'. Work that cannot be done in these repositories (infrastructure, settings in another team's service, a cloud console, a secret someone must create) goes in outsideWork, one line each, never in steps. A large change: split the steps into 2–5 parts that can each be reviewed on its own ('Part 1: …').",
+    schema: obj({ summary: str, steps: strArr, files: strArr, tests: strArr, risks: strArr, outsideWork: strArr }),
     tools: ["Read", "Grep", "Glob"],
   },
   "plan-reviewer": {
@@ -42,7 +42,7 @@ export const AGENTS: Record<string, AgentDef> = {
   },
   implementer: {
     tier: "medium",
-    system: "You are the Implementer – the ONLY agent that writes code. Work strictly inside the current directory (an isolated git worktree). Follow the plan and the project standards, keep the change minimal, add or update tests, and run the project's test command if one is given. Never run git push, never change CI/deploy configuration unless the plan requires it, never read or print secrets. If you reach a decision you cannot make correctly from the ticket, plan, clarifications and code (a missing business rule, conflicting requirements, unclear expected behaviour), do NOT guess: stop, keep what you have done so far, and return up to 3 questions. Otherwise return an empty questions list. Never ask about things the plan or clarifications already decide. " + ASK_RULE,
+    system: "You are the Implementer – the ONLY agent that writes code. Work strictly inside the current directory (an isolated git worktree). Follow the plan and the project standards, keep the change minimal, add or update tests, and run the project's test command if one is given. Never run git push, never change CI/deploy configuration unless the plan requires it, never read or print secrets. Never change, skip or delete a test that is unrelated to your change to make the run pass – if an unrelated test fails, leave it and say which one in your notes. For a bug, first add the test that reproduces it and see it fail, then fix. If you reach a decision you cannot make correctly from the ticket, plan, clarifications and code (a missing business rule, conflicting requirements, unclear expected behaviour), do NOT guess: stop, keep what you have done so far, and return up to 3 questions. Otherwise return an empty questions list. Never ask about things the plan or clarifications already decide. " + ASK_RULE,
     schema: obj({ summary: str, commitSubject: { type: "string", description: "The git commit subject for this change, written like the team's own commits: imperative, specific, at most 60 characters, no ticket key, no trailing period, no 'I'/'we'. E.g. \"apply ruff format and complete the golden test setup\"" }, filesChanged: strArr, testsAdded: strArr, questions }),
     tools: ["Read", "Edit", "Write", "Glob", "Grep", "Bash"],
   },

@@ -32,6 +32,8 @@ async function main(): Promise<void> {
   setSecret("api.sessionToken", token);
   const { server, port } = await startApiServer(settings.service.port, token);
   writeRuntime({ pid: process.pid, port, token, startedAt: nowIso(), version: VERSION });
+  const { lastAlive, heartbeat, catchUp, dailyRefresh } = await import("./upkeep.js");
+  const offSince = lastAlive();
   const recovered = recoverInterrupted();
   try { const merged = migrateToLeadTasks(); if (merged) logger.info("multi-repository tickets merged into lead tasks", { merged }); } catch (e: any) { logger.warn("lead migration failed", { error: e.message }); }
   logger.info("aiw-agentd started", { pid: process.pid, port, recovered });
@@ -61,8 +63,11 @@ async function main(): Promise<void> {
     } catch (e: any) { logger.warn("code graph setup failed", { error: e.message }); }
   })();
   let polling = false;
+  let caughtUp = false;
+  let refreshDay = "";
   const loop = async () => {
     const now = Date.now();
+    heartbeat(now);
     const s = loadSettings();
     const interval = (isWorkingHours() ? s.limits.pollMinutes : s.limits.pollMinutesOffHours) * 60_000;
     const woke = now - lastLoop > 3 * 60_000;            // machine slept / was suspended -> catch up now
@@ -75,7 +80,12 @@ async function main(): Promise<void> {
         if (r.items || r.tasks || r.errors.length) logger.info("poll", r);
       } catch (e: any) { logger.error("poll crashed", { error: e.message }); }
       finally { lastPoll = Date.now(); polling = false; }
+      // A7: after the first catch-up poll, one message when the service had been off for a while
+      if (!caughtUp) { caughtUp = true; void catchUp(offSince, recovered).catch(() => {}); }
     }
+    // A3: each repository's conventions and CI map, re-learned once a day (one line when CI changed)
+    const day = new Date(now).toISOString().slice(0, 10);
+    if (refreshDay !== day && isWorkingHours()) { refreshDay = day; void runTimed("Conventions refresh", () => dailyRefresh()).catch((e) => logger.warn("conventions refresh failed", { error: e?.message })); }
     try { await runTimed("Scheduler", () => tick()); } catch (e: any) { logger.error("tick crashed", { error: e.message }); }
     try { await flushNotifications(); } catch (e: any) { logger.warn("flush failed", { error: e.message }); }
     try {

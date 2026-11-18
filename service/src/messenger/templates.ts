@@ -151,7 +151,8 @@ export function shortNotice(n: Notice, override?: { body?: string; details?: str
 /** Several routine updates for one item, sent as one message. */
 export function mergedNotice(items: Notice[]): Notice {
   const first = items[0], last = items[items.length - 1];
-  const ref = refOf(first) ?? "";
+  const refs = [...new Set(items.map((n) => refOf(n)).filter(Boolean))];
+  const ref = refs.length > 1 ? `${refs.length} tickets` : refOf(first) ?? "";
   const lines = items.map((n) => {
     const extra = (n.body ?? "").split("\n").find((l) => l.trim());
     return `• ${cut(n.title, 110)}${extra ? ` – ${cut(extra.trim(), 80)}` : ""}`;

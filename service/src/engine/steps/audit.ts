@@ -507,10 +507,38 @@ function projectFor(target: AuditTarget, text: string): ProjectConfig | { error:
 }
 
 /** Start an audit. Returns the chat reply. On engine v1 the steps run here (no kernel job). */
+/** H7: finished tickets whose title has the feature's words (Jira text search over the configured projects). */
+async function featureTickets(feature: string): Promise<string[]> {
+  const { clients } = await import("../../connectors/registry.js");
+  const { loadProjects } = await import("../../core/config.js");
+  const jira = clients.jira();
+  const keys = [...new Set(loadProjects().flatMap((p) => p.jira?.keys ?? []))];
+  const words = feature.toLowerCase().replace(/[^\p{L}\p{N}\s-]/gu, " ").split(/\s+/).filter((w) => w.length > 2);
+  if (!jira || !keys.length || !words.length) return [];
+  try {
+    const r = await jira.search(`project in (${keys.join(",")}) AND statusCategory = Done AND text ~ "${words.join(" ").replace(/"/g, "")}" ORDER BY updated DESC`, 20);
+    return r.filter((i) => words.some((w) => i.title.toLowerCase().includes(w))).map((i) => i.key);
+  } catch { return []; }
+}
+
 export async function startAuditFromText(text: string, who: string, via = "teams-personal", opts: { inline?: boolean } = {}): Promise<string> {
   const { keysIn } = await import("../../conductor/find.js");
   const target = parseAuditText(text, keysIn(text));
-  if (!target) return "❓ What should I review? e.g. \"review KAN-12\", \"review branch feat/x\" or \"review commits a1b2c3d..e4f5a6b\".";
+  if (!target) {
+    // H7: "QA the refunds feature" – the feature's finished tickets, found in Jira by its name, each checked and tested
+    const feature = /\b(?:qa|test|check|review)\b\s+(?:the\s+)?(.{3,60}?)\s+feature\b/i.exec(text)?.[1]?.trim();
+    if (feature) {
+      const found = await featureTickets(feature);
+      if (found.length === 1) return startAuditFromText(`${/\bqa|test/i.test(text) ? "qa" : "review"} ${found[0]}`, who, via, opts);
+      if (found.length > 1) {
+        const replies: string[] = [];
+        for (const k of found.slice(0, 5)) replies.push(await startAuditFromText(`${/\bqa|test/i.test(text) ? "qa" : "review"} ${k}`, who, via, opts));
+        return `🔎 The "${feature}" feature is ${found.length} finished ticket${found.length === 1 ? "" : "s"} in Jira: ${found.slice(0, 5).join(", ")}${found.length > 5 ? ` (the first 5 – name the others to add them)` : ""}. Checking each against its criteria and today's code${/\bqa|test/i.test(text) ? ", and running its tests" : ""}. One verdict each comes here.`;
+      }
+      return `❓ I found no finished tickets for "${feature}" in Jira. Name a ticket ("QA KAN-12") or the epic ("is the KAN-40 epic complete?").`;
+    }
+    return "❓ What should I review? e.g. \"review KAN-12\", \"review branch feat/x\" or \"review commits a1b2c3d..e4f5a6b\".";
+  }
   const project = projectFor(target, text);
   if ("error" in project) return `❓ ${project.error}`;
   const id = target.mode === "ticket" ? target.key! : target.mode === "branch" ? target.branch! : `${target.from!.slice(0, 7)}..${target.to!.slice(0, 7)}`;

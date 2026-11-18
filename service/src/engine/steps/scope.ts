@@ -47,7 +47,7 @@ export interface ScopeIssue {
   /** Position in the sprint / epic / message (0 = first). */
   rank: number;
 }
-export interface Preview { count: number; sizes: Record<Size, number>; repos: string[]; overlaps: string[]; tokens: number; minutes: number; parallel: number; lines: string[] }
+export interface Preview { count: number; sizes: Record<Size, number>; repos: string[]; overlaps: string[]; tokens: number; minutes: number; parallel: number; lines: string[]; /** B12: the sprint tickets that fit the days and budget left (rank order) */ fit?: string[] }
 export interface PlannedTicket { key: string; repo: string; areas: string[]; size: Size; contracts: string[] }
 export interface ScopeEdge { from: string; to: string; type: "depends_on" | "stacks_on" | "same_area"; why: string }
 export interface ProposedStory { title: string; why: string; criteria: string[]; key?: string }
@@ -336,8 +336,8 @@ export async function collectScope(t: { kind: ScopeKind; target: string; keys: s
     if (!pk) throw new Error("No project with a Jira key is set up.");
     const r = await sprintIssuesOf(jira, pk, t.target);
     raw = r.issues;
-    sprint = { id: r.sprint?.id, name: r.sprint?.name ?? (/^\d+$/.test(t.target) ? `Sprint ${t.target}` : t.target === "current" ? "the current sprint" : t.target) };
-    title = sprint.name.replace(/^the /, "");
+    sprint = { id: r.sprint?.id, name: r.sprint?.name ?? (/^\d+$/.test(t.target) ? `Sprint ${t.target}` : t.target === "current" ? "the current sprint" : t.target), ...(r.sprint?.endDate ? { endDate: r.sprint.endDate } : {}) } as any;
+    title = sprint!.name.replace(/^the /, "");
     title = title.charAt(0).toUpperCase() + title.slice(1);
     sourceId = r.sprint?.id ? `scope:sprint:${r.sprint.id}` : undefined;
     sourceRef = `SPRINT-${r.sprint?.id ?? (t.target.replace(/\W+/g, "").toUpperCase() || "NOW")}`;
@@ -403,10 +403,30 @@ export function buildPreview(sc: Pick<ScopeData, "title" | "kind" | "issues" | "
     `Repos: ${repos.join(", ") || "unknown"}`,
     `Overlaps: ${overlaps.length ? list(overlaps, 3) : "none found"}`,
     `Rough cost: ~${fmtTokens(tokens)} tokens, about ${hours} h of agent time (${parallel} at a time)`,
-    ...(tokens > daily ? [`⚠️ More than one day's budget (${fmtTokens(daily)}) – it runs over about ${Math.ceil(tokens / daily)} days.`] : []),
+    ...(tokens > daily && sc.kind !== "sprint" ? [`⚠️ More than one day's budget (${fmtTokens(daily)}) – it runs over about ${Math.ceil(tokens / daily)} days.`] : []),
     ...(sc.skipped.length ? [`Skipped: ${list(sc.skipped.map((s) => `${s.key} (${s.why})`), 4)}`] : []),
   ];
-  return { count: sc.issues.length, sizes, repos, overlaps, tokens, minutes, parallel, lines };
+  // B12: a sprint is fitted to what its remaining days and budget allow – in priority / rank order; the rest is named
+  let fit: string[] | undefined;
+  if (sc.kind === "sprint") {
+    const end = (sc as any).sprint?.endDate ? Date.parse((sc as any).sprint.endDate) : NaN;
+    const days = Number.isFinite(end) ? Math.max(1, Math.ceil((end - Date.now()) / 86_400_000)) : 10;
+    const workDays = Math.max(1, Math.round(days * 5 / 7));
+    const capacity = daily * workDays;
+    const hoursCap = workDays * 8 * parallel * 60;
+    let used = PLANNER_TOKENS, mins = 0;
+    fit = [];
+    for (const i of [...sc.issues].sort((a, b) => a.rank - b.rank)) {
+      const s = estimateSize(i);
+      if (used + TOKENS_BY_SIZE[s] > capacity || mins + MINUTES_BY_SIZE[s] > hoursCap) break;
+      used += TOKENS_BY_SIZE[s]; mins += MINUTES_BY_SIZE[s]; fit.push(i.key);
+    }
+    const later = sc.issues.map((i) => i.key).filter((k) => !fit!.includes(k));
+    lines.push(later.length
+      ? `Fits the ${workDays} working day${workDays === 1 ? "" : "s"} left (budget ${fmtTokens(capacity)}): ${fit.length} of ${sc.issues.length} – first ${list(fit, 5)}; after them: ${list(later, 4)}`
+      : `Fits the ${workDays} working day${workDays === 1 ? "" : "s"} left and the budget.`);
+  }
+  return { count: sc.issues.length, sizes, repos, overlaps, tokens, minutes, parallel, lines, ...(fit ? { fit } : {}) };
 }
 
 /** Sprints and "all my tickets" always ask once before starting (even under "no approvals"); the rest only tell you. */
@@ -555,6 +575,29 @@ export function normalisePlan(out: any, sc: Pick<ScopeData, "issues" | "kind">, 
   return { summary: truncate(String(out?.summary ?? ""), 300), tickets, edges, waves: w.waves, order: w.order, contracts, missing, by: opts.by, notes, at: nowIso() };
 }
 
+async function createMissingAtStart(ctx: StepCtx): Promise<void> {
+  const sc = scopeOf(ctx.task);
+  if (!sc?.plan || !sc.epic || !sc.plan.missing.length || (sc as any).missingCreatedAt) return;
+  const jira = clients.jira();
+  if (!jira?.createIssue) return;
+  const created: ScopeIssue[] = [];
+  for (const m of sc.plan.missing) {
+    if ((m as any).key) continue;
+    try {
+      const r = await jira.createIssue({ projectKey: sc.epic.key.split("-")[0], summary: m.title, description: [m.why, "", "Acceptance criteria:", ...m.criteria.map((c) => `- ${c}`)].join("\n"), parentKey: sc.epic.key });
+      (m as any).key = r.key;
+      created.push({ key: r.key, id: r.key, title: m.title, description: [m.why, "", "Acceptance criteria:", ...m.criteria.map((c) => `- ${c}`)].join("\n"), status: "To Do", url: r.url, labels: [], rank: sc.issues.length + created.length });
+    } catch (e: any) { audit("service", "scope.story_failed", ctx.task.id, { title: m.title, error: truncate(e?.message ?? "", 200) }); }
+  }
+  if (!created.length) return;
+  const repo = sc.plan.tickets[0]?.repo ?? ctx.project.id;
+  const plan = { ...sc.plan, tickets: [...sc.plan.tickets, ...created.map((c) => ({ key: c.key, repo, areas: [], size: "M" as Size, contracts: [] }))],
+    waves: [...sc.plan.waves, created.map((c) => c.key)], order: [...sc.plan.order, ...created.map((c) => c.key)] };
+  ctx.save({ scope: { ...sc, issues: [...sc.issues, ...created], plan, ...({ missingCreatedAt: nowIso() } as any), epicCheck: { ...(sc as any).epicCheck, created: created.map((c) => c.key) } } });
+  audit("user", "scope.stories_created", ctx.task.id, { created: created.map((c) => c.key), at: "plan approval" });
+  await notify({ kind: "info", taskId: ctx.task.id, taskRef: refOf(ctx.task), dedupeKey: `missing-created:${ctx.task.id}`, title: `🧩 Created ${created.length} missing stor${created.length === 1 ? "y" : "ies"} under ${sc.epic.key}`, body: `${created.map((c) => `${c.key} ${c.title}`).join("\n")}\nThey are built in the last wave of this run.` }).catch(() => {});
+}
+
 /** The short plan message (about 15 lines): waves, stacked PRs, merge order, contracts, missing stories, cost. */
 export function scopeMessage(sc: ScopeData): string {
   const p = sc.plan;
@@ -572,7 +615,7 @@ export function scopeMessage(sc: ScopeData): string {
     ...(same.length ? [`Same files, one after the other: ${list(same.map((e) => `${e.from} + ${e.to}`), 4)}`] : []),
     `Merge order: ${list(p.order, 8)}`,
     ...(p.contracts.length ? [`Shared contracts: ${list(p.contracts.map((c) => `${c.name}${c.producer ? ` (from ${c.producer})` : ""}`), 3)}`] : []),
-    ...(p.missing.length ? [`Missing stories (proposed, not created): ${list(p.missing.map((m) => m.title), 3)}`] : []),
+    ...(p.missing.length ? [sc.epic ? `Missing stories – created under ${sc.epic.key} and built in this run when you approve: ${list(p.missing.map((m) => m.title), 3)}` : `Missing stories (proposed, not created): ${list(p.missing.map((m) => m.title), 3)}`] : []),
     ...(p.review && !p.review.pass && p.review.issues.length ? [`Review notes: ${list(p.review.issues.map((x) => line(x, 100)), 2)}`] : []),
     ...p.notes.map((n) => `Note: ${n}`),
     ...(sc.preview ? [`Rough cost: ~${fmtTokens(sc.preview.tokens)} tokens`] : []),
@@ -906,6 +949,9 @@ export const SCOPE_STEPS: Record<string, (ctx: StepCtx) => Promise<StepResult>> 
 
   /** One child item per ticket (parent / root = this scope) with the edges. Idempotent: a re-run only fills gaps. */
   async spawn_children(ctx) {
+    // B11: the scope plan you approved named missing stories – they are created in Jira under the epic now (your
+    // approval of the plan is the OK) and built in this same run, in the last wave
+    await createMissingAtStart(ctx);
     const sc = scopeOf(ctx.task);
     if (!sc?.plan) return { status: "fail", reason: "No plan to start." };
     const children: Record<string, string> = { ...(sc.children ?? {}) };
@@ -942,6 +988,10 @@ export const SCOPE_STEPS: Record<string, (ctx: StepCtx) => Promise<StepResult>> 
         body: [`Merge order: ${list(sc.plan.order, 8)}`, ...(skipped.length ? [`Not added: ${list(skipped, 4)}`] : [])].join("\n") });
     }
     audit("service", "scope.spawned", ctx.task.id, { children: Object.keys(children).length, skipped: skipped.length });
+    // B12: sprint tickets beyond what the days and budget left allow go to the back of the queue (they still run when
+    // the earlier ones are done – nothing is dropped; you were told which ones in the preview)
+    const fit = sc.kind === "sprint" ? sc.preview?.fit : undefined;
+    if (fit?.length) for (const [key, id] of Object.entries(children)) if (!fit.includes(key)) db().prepare("UPDATE tasks SET priority=5 WHERE id=?").run(id);
     return { status: "ok", note: `${Object.keys(children).length} children` };
   },
 

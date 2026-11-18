@@ -40,7 +40,7 @@
     { "id": "sit-B7", "text": "do KAN-54 and KAN-76", "expect": ["start KAN-54", "start KAN-76", "start"], "all": ["start"] },
     { "id": "sit-J5", "text": "no, I meant KAN-76", "setup": { "focus": "KAN-54", "history": [["in", "start KAN-54"], ["out", "👍 On it – KAN-54: Export orders"]] }, "expect": ["control:undo", "start KAN-76", "control:cancel KAN-54"], "all": ["start KAN-76"] },
     { "id": "sit-J7", "text": "pause everything until Monday", "expect": ["control:pause"] },
-    { "id": "sit-slots", "text": "use 4 slots", "expect": ["prefs"] },
+    { "id": "sit-slots", "text": "use 4 slots", "expect": ["prefs:limits.maxParallel", "prefs:slots"] },
     { "id": "sit-B20", "text": "only backend for KAN-76", "expect": ["set_directive KAN-76"] },
     { "id": "sit-H1", "text": "review PR 140", "expect": ["review"] },
     { "id": "sit-G2", "text": "fix the CI on PR 131", "expect": ["fix_pr:ci"] },
@@ -51,6 +51,13 @@
     { "id": "sit-C7", "text": "adapt KAN-52", "expect": ["adapt KAN-52"] },
     { "id": "sit-G11", "text": "resolve the comments on PR 90", "expect": ["fix_pr:comments"] },
     { "id": "sit-J1", "text": "how do refunds work in the backend?", "noAction": true },
-    { "id": "sit-A9", "text": "Eric left the team", "expect": ["prefs"] }
+    { "id": "sit-A9", "text": "Eric left the team", "expect": ["prefs:team.remove", "prefs"] },
+    { "id": "sit-N1", "text": "write a test plan for KAN-76", "expect": ["start:qa_plan KAN-76"] },
+    { "id": "sit-B14", "text": "the login page throws a 500 error since this morning, please fix it", "expect": ["start:bug"] },
+    { "id": "sit-J9b", "text": "how much did we spend this week?", "noAction": true },
+    { "id": "sit-A2", "text": "add the admin-panel repo too, github acme/admin-panel", "expect": ["prefs:project.add"] },
+    { "id": "sit-O1", "text": "from now on move the Jira ticket to Done when its PR is merged", "expect": ["prefs:jira.moveOnMerge"] },
+    { "id": "sit-H7", "text": "QA the refunds feature", "expect": ["review", "qa"] },
+    { "id": "sit-N2", "text": "write user stories for this PRD https://www.notion.so/acme/Seller-onboarding-PRD-1234", "expect": ["start:stories"] }
   ]
 }

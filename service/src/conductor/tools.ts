@@ -35,7 +35,7 @@ export interface ToolArgs {
   /** set_directive */ scope?: "global" | "item" | "batch" | "epic" | "sprint"; rule?: string; value?: string;
   /** prefs */ key?: string; name?: string; github?: string;
   /** fix_pr */ mode?: "comments" | "ci" | "issues" | "rebase"; /** rebase: you told it to resolve the conflicts itself */ resolveAll?: boolean;
-  /** start */ project?: string; takeOver?: boolean; again?: boolean; /** several keys on v2: one per ticket instead of one batch */ separately?: boolean;
+  /** start */ project?: string; takeOver?: boolean; again?: boolean; /** N1–N3, B14: a test plan, stories, a design review or a bug fix */ role?: "qa_plan" | "stories" | "design_review" | "bug"; /** several keys on v2: one per ticket instead of one batch */ separately?: boolean;
 }
 export type ToolCall = ConductorCall & { tool: ToolName | "clone_repo"; args: ToolArgs };
 
@@ -218,6 +218,36 @@ async function jiraTextSearch(text: string): Promise<{ key: string; title: strin
 export async function toolStart(args: ToolArgs, ctx: ToolCtx): Promise<ToolResult> {
   let keys = [...new Set([...(args.refs ?? []), ...(args.ref ? [args.ref] : [])].flatMap((r) => keysIn(String(r))))];
   const text = (args.text ?? args.query ?? "").trim();
+  // N1–N3: a test plan, user stories or a design review (for a ticket, or from a linked PRD / Figma frame)
+  if (args.role && args.role !== "bug") {
+    const { runTicket, startRoleRequest } = await import("../intake/intake.js");
+    const what = args.role === "qa_plan" ? "test plan" : args.role === "stories" ? "user stories" : "design review";
+    try {
+      const made = keys.length ? await Promise.all(keys.map((k) => runTicket(k, { role: args.role }))) : [startRoleRequest(args.role, text || ctx.original, args.project)];
+      await tick();
+      return said(`📝 Writing the ${what} for ${made.map(refOf).join(", ")}. It comes here first; it goes to Jira only after your OK.`);
+    } catch (e: any) { return said(`I couldn't start the ${what}: ${truncate(e.message, 200)}`, false); }
+  }
+  // B14: "create a Jira bug for REQ-3" – the bug you described, logged in Jira (only on your word)
+  const jb = /\b(create|log|file|raise|open)\s+(a\s+)?jira\s+bug\b/i.exec(`${text} ${ctx.original}`);
+  if (jb) {
+    const ref = args.ref ?? /\bbug\s+for\s+([A-Za-z][A-Za-z0-9]*-\d+)\b/i.exec(`${text} ${ctx.original}`)?.[1] ?? getFocus() ?? undefined;
+    const t = ref ? taskFor(ref) : undefined;
+    const jira = clients.jira();
+    if (!t) return said("Which request is the bug? e.g. \"create a Jira bug for REQ-3\".", false);
+    if (!jira?.createIssue) return said("Jira isn't connected, so I can't create the bug. Connect it with `aiw connect jira`.", false);
+    if (t.data.jiraBug) return said(`${refOf(t)} is already in Jira as ${t.data.jiraBug}.`);
+    const projectKey = loadProjects().find((p) => p.id === t.project_id)?.jira?.keys?.[0];
+    if (!projectKey) return said(`${t.project_id} has no Jira project.`, false);
+    const req = t.data.agreedRequirements ?? t.data.requirements ?? {};
+    const desc = [t.data.request?.text ?? t.title ?? "", (req.acceptanceCriteria ?? []).length ? `\nExpected:\n${req.acceptanceCriteria.map((x: string) => `- ${x}`).join("\n")}` : "", t.data.pr?.url ? `\nFix: ${t.data.pr.url}` : ""].join("\n").trim();
+    const r = await jira.createIssue({ projectKey, summary: truncate(String(req.title ?? t.title ?? "Bug").replace(/^\[?[A-Z][A-Z0-9]*-\d+\]?\s*/i, ""), 200), description: desc, issueType: "Bug" });
+    mergeData(t.id, { jiraBug: r.key });
+    audit(`user:${ctx.who}`, "jira.bug_created", t.id, { key: r.key });
+    return said(`🐞 Logged ${refOf(t)} in Jira as ${r.key}.`);
+  }
+  // B14: a bug without a ticket – the request flow, building test-first; you are offered a Jira bug at the end
+  if (args.role === "bug" && !keys.length) return startRequest(`${text || ctx.original}\n\n(This is a bug: reproduce it with a failing test first, then fix it.)`, { ...args, bug: true } as any, ctx);
   if (!keys.length && text) {
     // B2: by name or description – confirm only if two match
     const f = find(text);
@@ -291,10 +321,12 @@ async function startRequest(text: string, args: ToolArgs, ctx: ToolCtx): Promise
       { options: choices.map((c) => ({ label: c.group ?? c.id, key: c.id, calls: [{ tool: "start", args: { text, project: c.id } }] })) });
   }
   const t = createRequest(text, ctx.who, project, { via: "teams" });
+  const bug = (args as any).bug === true;
+  if (bug) mergeData(t.id, { triage: { ...(t.data.triage ?? {}), type: "bug" }, bugRequest: true });
   recordUndo({ kind: "start", itemId: t.id, ref: refOf(t), at: Date.now() });
   setFocus(refOf(t));
   await tick();
-  return said(`📝 Got it – ${refOf(t)} (${project.group ?? project.id}). Before planning, I'll ask you a few questions here so the requirements are complete.`);
+  return said(`📝 Got it – ${refOf(t)} (${project.group ?? project.id}). Before planning, I'll ask you a few questions here so the requirements are complete.${bug ? ` I'll reproduce the bug with a failing test first, then fix it. Want it in Jira too? Say "create a Jira bug for ${refOf(t)}".` : ""}`);
 }
 
 function cloneRepo(args: ToolArgs): ToolResult {
@@ -419,6 +451,7 @@ export async function toolSetDirective(args: ToolArgs, ctx: ToolCtx): Promise<To
 }
 
 const PREFS: Record<string, { path: string[]; kind: "bool" | "enum" | "text" | "number"; values?: string[]; min?: number; max?: number; text: (v: any) => string }> = {
+  "jira.moveOnMerge": { path: ["jira", "moveOnMerge"], kind: "text", text: (v) => (v && v !== "off" ? `move the Jira ticket to "${v}" when its PR is merged` : "leave the Jira status alone when a PR is merged") },
   "limits.maxParallel": { path: ["limits", "maxParallel"], kind: "number", min: 1, max: 16, text: (v) => `at most ${v} AI jobs at once (fewer when the budget, a rate limit or this computer needs it)` },
   "pr.draft": { path: ["pr", "draft"], kind: "bool", text: (v) => v ? "raise draft PRs" : "raise normal (ready for review) PRs" },
   "pr.autoFixCi": { path: ["pr", "autoFixCi"], kind: "bool", text: (v) => v ? "fix failing CI without asking" : "show CI fixes before pushing" },
@@ -437,7 +470,7 @@ const PREFS: Record<string, { path: string[]; kind: "bool" | "enum" | "text" | "
 };
 const PREF_ALIASES: Record<string, string> = { draft: "pr.draft", draft_pr: "pr.draft", draft_prs: "pr.draft", quiet_hours: "notifications.quietHours", digest: "notifications.digestTime", working_hours: "profile.workingHours",
   plan_approval: "workflow.planApproval", pr_approval: "workflow.prApproval", auto_fix_ci: "pr.autoFixCi", auto_review: "pr.autoReview", report: "workflow.ticketReport",
-  slots: "limits.maxParallel", max_parallel: "limits.maxParallel", parallel: "limits.maxParallel", agents: "limits.maxParallel" };
+  slots: "limits.maxParallel", jira_status: "jira.moveOnMerge", move_on_merge: "jira.moveOnMerge", jira_move: "jira.moveOnMerge", max_parallel: "limits.maxParallel", parallel: "limits.maxParallel", agents: "limits.maxParallel" };
 
 function boolOf(v: unknown): boolean | undefined {
   const s = String(v ?? "").trim().toLowerCase();
@@ -462,7 +495,8 @@ export function toolPrefs(args: ToolArgs, ctx: ToolCtx): ToolResult {
   }
   if (spec.kind === "text") {
     value = String(value ?? "").trim();
-    if (!/^(off|\d{1,2}:\d{2}(-\d{1,2}:\d{2})?)$/.test(value)) return said(`Please give a time like 09:00 or a range like 22:00-07:00${k === "notifications.quietHours" ? ", or off" : ""}.`, false);
+    if (k === "jira.moveOnMerge") { if (!value || value.length > 40) return said("Which Jira status? e.g. Done, Ready for QA – or off.", false); if (/^off$/i.test(value)) value = undefined; }
+    else if (!/^(off|\d{1,2}:\d{2}(-\d{1,2}:\d{2})?)$/.test(value)) return said(`Please give a time like 09:00 or a range like 22:00-07:00${k === "notifications.quietHours" ? ", or off" : ""}.`, false);
   }
   let old: unknown;
   updateSettings((s: any) => {
@@ -823,7 +857,15 @@ async function toolPreviewScope(args: ToolArgs, ctx: ToolCtx): Promise<ToolResul
   const { previewScope } = await import("../engine/steps/scope.js");
   // the owner's own words decide sprint / epic / batch and "no approvals"; the args only name the target
   const target = [args.ref, ...(args.refs ?? []), args.text].filter(Boolean).join(" ");
-  const r = await previewScope(target && !ctx.original.includes(target) ? `${ctx.original} ${target}` : ctx.original || target, ctx.who);
+  const text = target && !ctx.original.includes(target) ? `${ctx.original} ${target}` : ctx.original || target;
+  // B15 / B18: no sprint, epic or ticket keys – a PRD / Notion / Figma link ("build this <link>") or a big vague request
+  // ("rebuild the dashboard") becomes new work: a short interview first (the linked document is read), then ONE plan
+  // split into parts for your approval – never a blind start
+  const { parseScopeTarget } = await import("../engine/steps/scope.js");
+  if (!parseScopeTarget(text) && (/https?:\/\/\S*(notion\.so|figma\.com|docs\.google|confluence|sharepoint|\.pdf)/i.test(text) || /\b(build|rebuild|redo|redesign|implement|create|make)\b/i.test(text))) {
+    return startRequest(text, args, ctx);
+  }
+  const r = await previewScope(text, ctx.who);
   if (r.itemId) { const t = getTask(r.itemId); if (t) setFocus(refOf(t)); }
   if (r.ask) return { ok: r.ok !== false, reply: r.reply, ask: { question: r.ask.question, calls: r.ask.calls as ToolCall[] }, data: { itemId: r.itemId } };
   if (r.itemId) await tick();
@@ -861,7 +903,29 @@ function conflictSection(): string {
   } catch { return ""; }
 }
 
+/** Cost by day and by project for the last `days` days, short (Teams). */
+export function costSummary(days = 7): string {
+  const since = new Date(Date.now() - days * 86_400_000).toISOString();
+  const byProject = db().prepare(`SELECT t.project_id AS p, ROUND(SUM(s.cost_usd),2) AS usd, SUM(s.tokens_in + s.tokens_out) AS tok FROM steps s JOIN tasks t ON t.id = s.task_id
+    WHERE s.started_at > ? GROUP BY t.project_id ORDER BY usd DESC`).all(since) as any[];
+  const byDay = db().prepare("SELECT substr(started_at,1,10) AS d, ROUND(SUM(cost_usd),2) AS usd FROM steps WHERE started_at > ? GROUP BY d ORDER BY d DESC LIMIT 7").all(since) as any[];
+  const total = byProject.reduce((n, r) => n + Number(r.usd ?? 0), 0);
+  const top = db().prepare(`SELECT t.source_ref AS r, ROUND(SUM(s.cost_usd),2) AS usd FROM steps s JOIN tasks t ON t.id = s.task_id WHERE s.started_at > ? GROUP BY t.id ORDER BY usd DESC LIMIT 3`).all(since) as any[];
+  if (!total) return `💰 Nothing spent in the last ${days === 1 ? "day" : `${days} days`}.`;
+  return [
+    `💰 **$${total.toFixed(2)}** in the last ${days === 1 ? "day" : `${days} days`}`,
+    `By project: ${byProject.map((r) => `${r.p} $${Number(r.usd).toFixed(2)}`).join(" · ")}`,
+    days > 1 ? `By day: ${byDay.map((r) => `${String(r.d).slice(5)} $${Number(r.usd).toFixed(2)}`).join(" · ")}` : "",
+    top.length ? `Most: ${top.map((r) => `${r.r} $${Number(r.usd).toFixed(2)}`).join(" · ")}` : "",
+  ].filter(Boolean).join("\n");
+}
+
 export function toolStatus(args: ToolArgs): ToolResult {
+  // J9: "how much did we spend this week / by project / today?" – the cost view (one ticket's cost is in its status)
+  if (/^cost/i.test(String(args.query ?? "")) && !args.ref) {
+    const days = /today/i.test(String(args.query)) ? 1 : /month|30/i.test(String(args.query)) ? 30 : 7;
+    return said(costSummary(days));
+  }
   const ref = args.ref && !/^(all|everything)$/i.test(args.ref) ? args.ref : undefined;
   if (ref) {
     const t = taskFor(ref);
@@ -928,7 +992,7 @@ async function toolLookup(args: ToolArgs, ctx: ToolCtx): Promise<ToolResult> {
 // ------------------------------------------------------------------ dispatch
 
 export async function runTool(call: ToolCall, ctx: ToolCtx): Promise<ToolResult> {
-  const args = (call.args ?? {}) as ToolArgs;
+  let args = (call.args ?? {}) as ToolArgs;
   try {
     let r: ToolResult;
     switch (call.tool) {
@@ -937,7 +1001,12 @@ export async function runTool(call: ToolCall, ctx: ToolCtx): Promise<ToolResult>
       case "start": r = await toolStart(args, ctx); break;
       case "decide": r = await toolDecide(args, ctx); break;
       case "set_directive": r = await toolSetDirective(args, ctx); break;
-      case "prefs": r = toolPrefs(args, ctx); break;
+      case "prefs":
+        // A2: "add the admin-panel repo, github acme/admin-panel" – a new repository in the product group
+        // a GitHub owner/repo with no setting named: adding that repository ("add the admin-panel repo, github acme/x")
+        if (!args.key && /^[\w.-]+\/[\w.-]+$/.test(String(args.github ?? args.value ?? "").replace(/^https?:\/\/github\.com\//i, "").replace(/\.git$/, ""))) args = { ...args, key: "project.add" };
+        if (/^project\.add$/i.test(String(args.key ?? ""))) { const { addRepo } = await import("./addRepo.js"); const x = await addRepo({ name: args.name, github: args.github ?? args.value, path: (args as any).path, group: args.project }, ctx.who); r = said(x.reply, x.ok); break; }
+        r = toolPrefs(args, ctx); break;
       case "control": r = await toolControl(args, ctx); break;
       case "fix_pr": r = await toolFixPr(args, ctx); break;
       case "review": r = await toolReview(args, ctx); break;

@@ -94,17 +94,20 @@ test("bug 5: 'no, I meant KAN-47' while another ticket waits is a correction for
   db().prepare("UPDATE approvals SET state='expired' WHERE task_id=?").run(waiting.id);
 });
 
-test("bug 6: on engine v2 the old CI poller leaves the plugin's own PR branches to the kernel (no second DevOps task)", async () => {
+test("bug 6 / N5: on v2 the DevOps role watches every branch, but never the plugin's own PR branches (the kernel's CI fix owns them)", async () => {
   const asked: string[][] = [];
   const old = clients.github;
-  clients.github = (() => ({ failedRuns: async (_r: string, _s: string, b?: string[]) => { asked.push(b ?? []); return []; } })) as any;
-  try { await pollCi(); } finally { clients.github = old; }
-  assert.deepEqual(asked, [["dev"]], "only the base branch of the DevOps project; nothing for aiw/*");
+  const runs = ["dev", "aiw/KAN-1-x", "feature/payments"].map((branch, i) => ({ id: `r6-${i}`, repo: "o/front", branch, workflow: "CI", conclusion: "failure", url: "u" }));
+  clients.github = (() => ({ failedRuns: async (_r: string, _s: string, b?: string[]) => { asked.push(b ?? []); return runs; } })) as any;
+  let made: any[] = [];
+  try { made = await pollCi(); } finally { clients.github = old; }
+  assert.deepEqual([...asked], [[]], "only the DevOps project polls, for all branches");
+  assert.deepEqual(made.map((t) => t.data.ciRun.branch).sort(), ["dev", "feature/payments"], "never a second task for aiw/*");
   saveSettings(S((s) => { (s as any).engine = { version: "v1" }; }));
   asked.length = 0;
-  clients.github = (() => ({ failedRuns: async (_r: string, _s: string, b?: string[]) => { asked.push(b ?? []); return []; } })) as any;
+  clients.github = (() => ({ failedRuns: async (_r: string, _s: string, b?: string[]) => { asked.push(b ?? []); return [] as any[]; } })) as any;
   try { await pollCi(); } finally { clients.github = old; saveSettings(S()); }
-  assert.deepEqual(asked, [["aiw/*"], ["dev", "aiw/*"]]);
+  assert.deepEqual(asked, [["aiw/*"], []]);
 });
 
 test("bug 7: a pasted secret is never read, kept or acted on; the reply asks to revoke it and names the safe command", async () => {

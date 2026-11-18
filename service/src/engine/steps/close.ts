@@ -6,7 +6,7 @@
  * dependents, stacked PRs and the worktree are handled first.
  */
 import fs from "node:fs";
-import { audit } from "../../core/db.js";
+import { audit, db } from "../../core/db.js";
 import { getProject, loadSettings } from "../../core/config.js";
 import { clients } from "../../connectors/registry.js";
 import * as G from "../../git/git.js";
@@ -26,6 +26,34 @@ function label(id: string): string {
   if (!it) return id;
   const pr = prOf(it);
   return `${it.source_ref ?? it.id}${pr ? ` (PR #${pr.num})` : ""}`;
+}
+
+/**
+ * O2: an epic worked ticket by ticket (no scope plan) – when the last of its tickets is merged or done, ONE summary: what
+ * shipped (with the PRs), what is still open in it, and what it cost. Sent once per epic.
+ */
+export async function epicSummaryIfDone(it: { id: string; data: Record<string, any>; source_ref: string | null }): Promise<boolean> {
+  const epic = it.data.ticket?.parentType === "Epic" || /epic/i.test(String(it.data.ticket?.parentType ?? "")) ? String(it.data.ticket.parentKey) : undefined;
+  if (!epic) return false;
+  if (db().prepare("SELECT 1 FROM meta WHERE key=?").get(`epic.summary.${epic}`)) return false;
+  // planned as a scope: the scope's own close-out sends the summary
+  if (db().prepare("SELECT 1 FROM tasks WHERE kind='scope' AND source_ref=? LIMIT 1").get(epic)) return false;
+  const jira = clients.jira();
+  if (!jira) return false;
+  const { epicChildrenFor } = await import("../../connectors/jira.js");
+  const kids = await epicChildrenFor(jira, epic, 100);
+  if (!kids.length) return false;
+  const ours = new Map((db().prepare("SELECT source_ref, state, cost_usd, data FROM tasks WHERE source='jira' AND json_extract(data,'$.ticket.parentKey')=?").all(epic) as any[])
+    .map((r) => [String(r.source_ref).split("@")[0], r]));
+  const doneHere = (k: string) => ["DONE", "MERGED"].includes(ours.get(k)?.state ?? "");
+  const open = kids.filter((k) => k.statusCategory !== "done" && !doneHere(k.key));
+  if (open.length) return false;
+  const cost = (db().prepare("SELECT COALESCE(SUM(cost_usd),0) AS c FROM tasks WHERE json_extract(data,'$.ticket.parentKey')=? OR source_ref LIKE ?").get(epic, `${epic}%`) as any).c;
+  const shipped = kids.map((k) => { const r = ours.get(k.key); const pr = r ? JSON.parse(r.data ?? "{}").pr : undefined; return `- ${k.key} ${k.title}${pr?.url ? ` – ${pr.url}` : r ? "" : " (done outside the plugin)"}`; });
+  db().prepare("INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO NOTHING").run(`epic.summary.${epic}`, new Date().toISOString());
+  await notify({ kind: "info", dedupeKey: `epic-done:${epic}`, title: `🎉 Epic ${epic} is complete`, body: `${shipped.slice(0, 12).join("\n")}${shipped.length > 12 ? `\n… ${shipped.length - 12} more` : ""}\n\nCost of the work I did on it: $${Number(cost).toFixed(2)}. Say "is the ${epic} epic complete?" for a check of every acceptance criterion against the code.` });
+  audit("service", "epic.summary", epic, { tickets: kids.length });
+  return true;
 }
 
 export const CLOSE_STEPS: Record<string, (ctx: StepCtx) => Promise<StepResult>> = {
@@ -85,6 +113,18 @@ export const CLOSE_STEPS: Record<string, (ctx: StepCtx) => Promise<StepResult>> 
     const pr = prOf(it, ctx.project);
     const ref = refOf(it);
     const s = loadSettings();
+    // O1: the ticket moves on in Jira when you allowed it ("move tickets to Done when merged" – setting jira.moveOnMerge)
+    const moveTo = (s as any).jira?.moveOnMerge as string | undefined;
+    // a two-repo ticket moves once ALL its parts are merged (never on the first one)
+    const lead = it.data.leadId as string | undefined;
+    const openParts = lead ? (db().prepare("SELECT COUNT(*) AS n FROM tasks WHERE id<>? AND json_extract(data,'$.leadId')=? AND state NOT IN ('MERGED','DONE','CANCELLED','CLOSED')").get(it.id, lead) as any).n : 0;
+    if (moveTo && it.source === "jira" && pr && jiraKey(it) && !(it.data as any).jiraMoved && !openParts) {
+      try {
+        const r = await clients.jira()?.moveTo?.(jiraKey(it), moveTo);
+        if (r?.moved) { mergeData(it.id, { jiraMoved: r.status }); audit("service", "jira.moved", it.id, { to: r.status }); }
+        else if (r) await notify({ kind: "info", taskId: it.id, taskRef: it.source_ref ?? undefined, dedupeKey: `jira-move:${it.id}`, title: `${jiraKey(it)}: couldn't move it to "${moveTo}" in Jira`, body: `Its workflow allows: ${(r.options ?? []).join(", ") || "no moves from here"}. Say "move tickets to <status> when merged" to change it.` }).catch(() => {});
+      } catch { /* Jira optional */ }
+    }
     if (s.notifications.jiraComments && it.source === "jira" && pr) {
       try { await clients.jira()?.addComment(jiraKey(it), `PR merged (${pr.repo}): ${pr.url ?? `#${pr.num}`}`); } catch { /* optional */ }
     }
@@ -103,6 +143,7 @@ export const CLOSE_STEPS: Record<string, (ctx: StepCtx) => Promise<StepResult>> 
     ].filter(Boolean);
     await notify({ kind: "done", taskId: it.id, taskRef: ref, dedupeKey: `merged:${it.id}`, title: `✅ ${ref} merged – done`, body: lines.join("\n") || "Nothing else waits on it.", url: pr?.url });
     audit("service", "item.closed", it.id, { pr: pr?.num, ...c });
+    await epicSummaryIfDone(it).catch(() => {});
     return { status: "done", note: "merged → done" };
   },
 };
