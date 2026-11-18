@@ -14,7 +14,6 @@ import { connectionMeta, isConnected } from "../connectors/registry.js";
 import { teamsPersonal, AIW_PREFIX } from "../connectors/teamsPersonal.js";
 import { decideAndApply, startAwaiting, cancelTask, resumeTask, tick, answerTask } from "../engine/engine.js";
 import { inboxView, inboxSummaryLine, taskDetail } from "../api/ops.js";
-import { runTicket } from "./intake.js";
 import { answerQuestion, resetConversation } from "../chat/assistant.js";
 import { handleChatMessage } from "./teamsIntent.js";
 import { holdTicks, releaseTicks } from "../engine/engine.js";
@@ -134,8 +133,12 @@ export async function executeCommand(c: ParsedCommand, who: string): Promise<str
     case "resume": { if (!c.ref) return need("a task"); const t = resumeTask(c.ref); await tick(); return !t ? `No task ${c.ref}.` : t.state === "QUEUED" || t.state === "RUNNING" ? `▶️ Resumed ${t.source_ref} – continuing from where it stopped.` : `${t.source_ref} can't be resumed now (it is ${t.state.toLowerCase().replace(/_/g, " ")}).`; }
     case "run": {
       if (!c.ref) return need("a Jira key");
-      try { const t = await runTicket(c.ref.toUpperCase()); await tick(); return `Queued ${t.source_ref ?? c.ref}. I'll post here when the plan is ready.`; }
-      catch (e: any) { return `Could not start ${c.ref}: ${e.message}`; }
+      // the same start as "start KAN-45" in words: someone else's ticket is asked first, a repository not on this
+      // computer is offered for cloning, a ticket already in progress is reported – never started twice
+      const { toolStart } = await import("../conductor/tools.js");
+      const r = await toolStart({ ref: c.ref.toUpperCase() } as any, { who, original: `start ${c.ref}` } as any);
+      if (r.ask) { const { setAwaiting } = await import("../conductor/state.js"); setAwaiting({ type: "conductor", question: r.ask.question, calls: r.ask.calls, options: r.ask.options, at: Date.now() } as any); return [r.reply, r.ask.question].filter(Boolean).join("\n\n"); }
+      return r.reply;
     }
     default: return `Unknown command "${c.cmd}". Type "aiw help".`;
   }

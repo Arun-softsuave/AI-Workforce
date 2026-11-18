@@ -22,7 +22,10 @@ export async function addRepo(a: AddRepoArgs, who: string, opts: { background?: 
   const id = String(a.name ?? gh.split("/")[1]).toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-|-$/g, "");
   if (getProject(id)) return { ok: false, reply: `${id} is already set up.` };
   const all = loadProjects();
-  const sibling = all.find((p) => (a.group ? (p.group ?? p.id) === a.group : true) && p.local?.path) ?? all[0];
+  // several products here and none named: ask, never guess which product (and Jira keys) it joins
+  const products = [...new Set(all.map((p) => p.group ?? p.id))];
+  if (!a.group && products.length > 1) return { ok: false, reply: `Which product is ${gh} part of – ${products.join(" or ")}? Say "add ${gh} to ${products[0]}".` };
+  const sibling =all.find((p) => (a.group ? (p.group ?? p.id) === a.group : true) && p.local?.path) ?? all[0];
   const dir = a.path ?? (sibling?.local?.path ? path.join(path.dirname(sibling.local.path), gh.split("/")[1]) : undefined);
   if (!dir) return { ok: false, reply: `Where should ${gh} live on this computer? Say "add ${gh} at D:\\\\code\\\\${gh.split("/")[1]}".` };
   if (!fs.existsSync(dir)) {

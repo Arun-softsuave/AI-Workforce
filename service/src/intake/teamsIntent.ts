@@ -1,5 +1,5 @@
 import { audit } from "../core/db.js";
-import { loadSettings } from "../core/config.js";
+import { loadSettings, loadProjects } from "../core/config.js";
 import { truncate, redactSecrets as redactKnownKeys } from "../core/util.js";
 import { formatChoices, optionNumber, plainNumbers } from "../core/questions.js";
 import { listTasks, getTask, type Task } from "../engine/tasks.js";
@@ -160,8 +160,12 @@ export function ruleIntent(text: string, p: Pending = pendingItems(), aiAvailabl
   const prRef = parsePrRef(t) ? undefined : key;
   if (prNamed && /\b(fix|resolve|solve|address)\b/i.test(t) && /\b(qa|q\.a\.)\b/i.test(t) && /\b(issues?|bugs?|findings?)\b/i.test(t)) return { intent: { intent: "fix_qa", text: t, ref: prRef } };
   if (prNamed && /\b(fix|resolve|solve|address|handle)\b/i.test(t) && /\b(comments?|review|feedback|remarks?|suggestions?)\b/i.test(t)) return { intent: { intent: "resolve_comments", text: t, ref: prRef } };
-  // "PR 134 failed, fix it", "fix the CI on KAN-40", "make the checks pass", "fix PR 134"
-  if (prNamed && /\b(fix|solve|repair|make .{0,20}(pass|green))\b/i.test(t) && (CI_WORDS.test(t) || !!parsePrRef(t))) return { intent: { intent: "fix_ci", text: t, ref: prRef } };
+  // H8: "fix these on PR 140" after a review of your own PR – the review's findings (comments path, with the findings)
+  if (prNamed && /\b(fix|address|resolve)\b/i.test(t) && /\b(these|them|those|the findings|your findings|what you found)\b/i.test(t)) return { intent: { intent: "resolve_comments", text: t, ref: prRef } };
+  // "PR 134 failed, fix it", "fix the CI on KAN-40", "make the checks pass" – CI only
+  if (prNamed && /\b(fix|solve|repair|make .{0,20}(pass|green))\b/i.test(t) && CI_WORDS.test(t)) return { intent: { intent: "fix_ci", text: t, ref: prRef } };
+  // I5: a bare "fix PR 150" – everything that is red or open on it (CI and review comments)
+  if (prNamed && /\b(fix|solve|repair)\b/i.test(t) && !!parsePrRef(t)) return { intent: { intent: "resolve_comments", text: t, ref: prRef } };
   if (prNamed && (/^\s*(please\s+)?(run\s+|do\s+)?(the\s+)?qa\b/i.test(t) || /\b(run|do|start)\s+(the\s+)?qa\b/i.test(t) || /\bqa\s+(the\s+|for\s+|on\s+)?(pr|pull|ticket|it)\b/i.test(t))) return { intent: { intent: "qa_pr", text: t, ref: prRef } };
   // "review PR 90", a PR link, "review KAN-52's PR", "add comments on KAN-60" (a teammate's ticket), "review Eric's PR"
   if (prNamed && /\b(review|add (review |some )?comments?|put (some |review )?comments?|leave (some )?comments?|comment on)\b/i.test(t)) return { intent: { intent: "review_pr", text: t, ref: prRef } };
@@ -189,7 +193,10 @@ export function ruleIntent(text: string, p: Pending = pendingItems(), aiAvailabl
   }
   // N1–N3 / B14: a test plan, user stories, a design review or a bug is not "start building" – the Conductor picks the role
   const roleWords = /\b(test plan|test cases|qa plan|user stories|stories for|design review|review (the|this) (design|figma)|bug)\b/i.test(t);
-  if (key && START.test(t) && !roleWords && (!/\?\s*$/.test(t) || /^(please\s+)?(can|could|would|will) you\b/i.test(t))) {
+  // B19 / B20: a start that carries more ("…first, it's urgent", "…only backend", "…no approval needed") is read whole by
+  // the Conductor, so the priority or rule is never lost
+  const extra = aiAvailable && /\b(first|urgent|asap|priority|only|don'?t touch|do not touch|no (need|approval)|without (asking|approval)|skip|together|as a batch|separately|then|after|before|depends?)\b/i.test(t);
+  if (key && START.test(t) && !roleWords && !extra && (!/\?\s*$/.test(t) || /^(please\s+)?(can|could|would|will) you\b/i.test(t))) {
     const keys = ticketKeysIn(t);
     return { intent: keys.length > 1 ? { intent: "start_ticket", ref: keys[0], refs: keys } : { intent: "start_ticket", ref: key } };
   }
@@ -358,8 +365,26 @@ async function execute(i: Intent, who: string, original: string): Promise<string
         ...stuck.map((t) => `⚠️ ${refOf(t)} stopped again right away: ${truncate(t.error ?? "unknown reason", 300)}`),
       ].filter(Boolean).join("\n");
     }
-    case "review_pr": { const r = await startReviewFromText(i.text ?? original, i.ref, who); await tick(); return r; }
-    case "resolve_comments": case "fix_qa": case "fix_ci": {
+    case "review_pr": {
+      // H4: "review KAN-12" for old work – the Conductor's audit path (merged work against its criteria) when that is meant
+      const { wantsAudit } = await import("../conductor/tools.js");
+      if (i.ref && !/github\.com\/[^\s]+\/pull\/\d+|\bPR[\s#-]*\d+\b/i.test(i.text ?? original) && wantsAudit(i.text ?? original, i.ref)) {
+        const { startAuditFromText } = await import("../engine/steps/audit.js");
+        const a = await startAuditFromText(`${i.text ?? original}${(i.text ?? original).includes(i.ref) ? "" : ` ${i.ref}`}`, who); await tick(); return a;
+      }
+      const r = await startReviewFromText(i.text ?? original, i.ref, who);
+      // no open PR for the ticket: its merged work is reviewed instead of a dead end
+      if (i.ref && /^❓|no (open )?pull request|couldn'?t find a PR|no PR/i.test(r)) { const { startAuditFromText } = await import("../engine/steps/audit.js"); const a = await startAuditFromText(`review ${i.ref}`, who); await tick(); return a; }
+      await tick(); return r;
+    }
+    case "resolve_comments": case "fix_ci": {
+      // the same path as the Conductor: a ticket of yours with an open PR gets the fix as a job on its own item (its
+      // rules apply, never a second fixer on the same PR); anything else falls back to a fix task
+      const { runTool } = await import("../conductor/tools.js");
+      const r = await runTool({ tool: "fix_pr", args: { ref: i.ref, text: i.text ?? original, mode: i.intent === "fix_ci" ? "ci" : "comments" } } as any, { who, original } as any);
+      return r.reply;
+    }
+    case "fix_qa": {
       const { startFixFromText } = await import("../engine/prFix.js");
       const r = await startFixFromText(i.text ?? original, i.ref, who, i.intent === "fix_qa" ? "issues" : i.intent === "fix_ci" ? "ci" : "comments");
       await tick();
@@ -477,6 +502,17 @@ export async function handleChatMessage(text: string, who: string, ctx: MessageC
     audit(`user:${who}`, "teams.secret_blocked", undefined, {});
     return "🔒 That message looks like it contains a secret (a key, token or password), so I did not read it or keep it.\n\n- Please **revoke or rotate it** – it is now in the Teams history.\n- To give me a value safely, run `aiw secret set NAME` on this computer, then reply \"done\".";
   }
+  // H4 / H6 / H7: "issues AUDIT-KAN-12" (all) or "issues AUDIT-KAN-12 1, 3" – file the review's drafted issues
+  { const m = /^\s*issues?\s+(AUDIT-[\w.@-]+)\s*(.*)$/i.exec(text); if (m) { const { createAuditIssues } = await import("../engine/steps/audit.js"); const picks = (m[2].match(/\d+/g) ?? []).map(Number); return createAuditIssues(m[1].toUpperCase(), picks.length ? picks : "all", who); } }
+  // O3: "add rule R1" / "add rule R1: <your wording>" / "skip rule R1" – a rule idea from repeated review comments
+  { const m = /^\s*(add|skip)\s+rule\s+(R\d+)\s*(?::\s*(.+))?$/i.exec(text); if (m) {
+    const L = await import("../engine/steps/close_out.js");
+    for (const p of loadProjects()) {
+      const r = m[1].toLowerCase() === "add" ? L.acceptRule(p.id, m[2].toUpperCase(), { by: `user:${who}`, line: m[3] }) : L.rejectRule(p.id, m[2].toUpperCase(), { by: `user:${who}` });
+      if (r) return m[1].toLowerCase() === "add" ? `✅ Added to ${p.id}'s rules card: "${r.line}". Every agent follows it from the next step.` : `👍 Skipped ${m[2].toUpperCase()} – I won't suggest it again.`;
+    }
+    return `I have no rule idea ${m[2].toUpperCase()} waiting.`;
+  } }
   // C7: "adapt KAN-45" – take the ticket's change from Jira (re-plan before the PR, update the PR after it)
   { const { ADAPT, adaptTicket } = await import("../engine/adapt.js"); const m = ADAPT.exec(text); if (m) return adaptTicket(m[1], who); }
   // "more": the rest of the last reply that was shortened (R-MSG)

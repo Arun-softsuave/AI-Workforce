@@ -619,7 +619,13 @@ function leadPlanMessage(t: Task): string {
     if (part.files?.length) sections.push(section("📄 Files", bullets(part.files, 20)));
     if (part.tests?.length) sections.push(section("🧪 Tests", bullets(part.tests)));
   }
-  if (p.risks?.length) sections.push(section("⚠️ Risks", bullets(p.risks)));
+  const leadRisks = [...(p.risks ?? [])];
+  if ((p.parts ?? []).some((part: any) => (part.files ?? []).some((f: string) => MIGRATION_FILE.test(String(f)))) && !leadRisks.some((r: string) => /migration/i.test(String(r)))) leadRisks.push("Database migration – I never run it on a shared database; check it before it runs there.");
+  if (leadRisks.length) sections.push(section("⚠️ Risks", bullets(leadRisks)));
+  if ((p.outsideWork ?? []).length) sections.push(section("🧩 Outside these repositories (for a person)", bullets(p.outsideWork)));
+  // C6 for a two-repo change: a frontend part without a design
+  const frontPart = targets.map((id) => getProject(id)).find((x) => x && isFrontendProject(x));
+  if (frontPart) { const nd = noDesignNote({ ...t, project_id: frontPart.id } as Task); if (nd) sections.push(nd); }
   if (t.data.assumptions?.length) sections.push(section("💭 Assumptions (questions left open)", bullets(t.data.assumptions)));
   const issues = t.data.planReview && !t.data.planReview.pass ? t.data.planReview.issues ?? [] : [];
   if (issues.length) sections.push(section("🔎 Plan reviewer still flags", bullets(issues.map((x: any) => `[${x.severity}] ${x.description}`))));
@@ -1298,7 +1304,13 @@ export const STEPS: Record<string, StepFn> = {
       const t = await runTests(ctx, testCmd, wt);
       const env = t.envError ? `no test database: ${t.envError}` : t.code !== 0 ? environmentFailure(t.output) : undefined;
       if (env && ctx.settings.workflow.untestedWork !== "pause") markUntested(ctx, `the test command could not run here (${env})`);
-      else if (t.code !== 0) return { status: "fail", reason: `Final test run failed after rebase:\n${truncate(failingSection(t.output), 1500)}` };
+      else if (t.code !== 0) {
+        // E3: once more before calling it a failure – a flaky test is noted in the PR, never "fixed"
+        const again = await runTests(ctx, testCmd, wt);
+        if (again.code !== 0) return { status: "fail", reason: `Final test run failed after rebase:\n${truncate(failingSection(again.output), 1500)}` };
+        ctx.save({ tests: { ...(ctx.task.data.tests ?? {}), flaky: true } });
+        warnings.push("A test failed once and passed on the re-run (flaky) – worth a look, not changed by me");
+      }
     }
     if (ctx.task.data.testsUnavailable) warnings.push(`Not tested on this computer: ${ctx.task.data.testsUnavailable.reason}`);
     if (stray.length) warnings.push(`Left out of the PR: ${stray.map((x) => `${x.file} (${x.why})`).join("; ")}`);
@@ -1362,7 +1374,12 @@ export const STEPS: Record<string, StepFn> = {
     const action = ctx.params.action ?? "create_pr";
     const d = ctx.task.data;
     const existing = latestApproval(ctx.task.id, action);
-    if (existing && existing.action === action && existing.state === "approved") return { status: "ok", note: "already approved" };
+    // an approval is only reused while it still fits the code it was given for (D6: changed since → ask again)
+    if (existing && existing.action === action && existing.state === "approved") {
+      const fits = !ctx.task.worktree || !existing.head_sha || verifyBinding(existing, ctx.task.worktree).ok;
+      if (fits) return { status: "ok", note: "already approved" };
+      ctx.save({ reapprove: "The code changed after you approved it" });
+    }
     if (ctx.task.playbook === "dev-lead") return requestLeadApproval(ctx);
     const wt = ctx.task.worktree;
     const binding = wt && d.baseSha
@@ -1386,7 +1403,8 @@ export const STEPS: Record<string, StepFn> = {
     if (d.reviews) facts.push(["Reviews", Object.entries(d.reviews).map(([k, v]: any) => `${k} ${v.pass ? "OK" : "issues"}`).join(", ")]);
     if (binding.headSha) facts.push(["Commit", binding.headSha.slice(0, 7)]);
     if (d.unresolvedIssues?.length) facts.push(["Needs attention", `${d.unresolvedIssues.length} unresolved review findings`]);
-    const what = action === "create_pr" ? "Built and tested – raise the PR?" : action === "post_jira_comment" ? "Ready – post to Jira?" : "Approval needed";
+    const what = ctx.task.data.reapprove ? `${ctx.task.data.reapprove} – please look again` : action === "create_pr" ? "Built and tested – raise the PR?" : action === "post_jira_comment" ? "Ready – post to Jira?" : "Approval needed";
+    if (ctx.task.data.reapprove) ctx.save({ reapprove: null });
     const body = action === "create_pr"
       ? resultMessage(getTask(ctx.task.id) ?? ctx.task)
       : `${d.artefact?.summary ?? ctx.task.title ?? ""}${d.artefact?.markdown ? `\n\n${truncate(d.artefact.markdown, 3000)}` : ""}`;
@@ -1426,10 +1444,22 @@ export const STEPS: Record<string, StepFn> = {
     if (!gh || !repo) return { status: "fail", reason: "GitHub is not connected for this project" };
     try { G.pushBranch(wt, repo, ctx.task.branch!, gh.gitAuthHeader()); }
     catch (e: any) {
+      // I2: someone (you) pushed to this branch meanwhile – my unpushed commits go ON TOP of yours, then a normal push;
+      // never a force-push. A conflict between the two stops and tells you.
+      const remoteRef = `refs/aiw/remote/${ctx.task.branch}`;
+      const nonFf = !G.pushRefusal(e, repo, ctx.task.branch ?? undefined) && /non-fast-forward|fetch first|Updates were rejected because/i.test(String(e?.message ?? e));
+      if (nonFf) G.git(wt, ["fetch", "--quiet", "--force", G.remoteUrl(repo), `+refs/heads/${ctx.task.branch}:${remoteRef}`], { extraHeader: gh.gitAuthHeader(), allowFail: true });
+      if (nonFf && G.git(wt, ["rev-parse", "--verify", "--quiet", remoteRef], { allowFail: true })) {
+        if (!G.rebaseOnto(wt, remoteRef)) return { status: "pause", reason: `Someone pushed to ${ctx.task.branch} and it conflicts with my unpushed work. Nothing was overwritten. Bring them together in ${wt}, then say "resume ${ctx.task.source_ref}".` };
+        audit("service", "publish.rebased_on_their_commits", ctx.task.id, { branch: ctx.task.branch });
+        try { G.pushBranch(wt, repo, ctx.task.branch!, gh.gitAuthHeader()); }
+        catch (e2: any) { const refused2 = G.pushRefusal(e2, repo, ctx.task.branch ?? undefined); if (!refused2) throw e2; ctx.save({ pushRefused: { at: new Date().toISOString(), repo, reason: refused2 } }); return { status: "pause", reason: refused2 }; }
+      } else {
       const refused = G.pushRefusal(e, repo, ctx.task.branch ?? undefined);
       if (!refused) throw e;
       ctx.save({ pushRefused: { at: new Date().toISOString(), repo, reason: refused } });
       return { status: "pause", reason: refused };
+      }
     }
     const raw = ctx.task.data.report ?? { title: ctx.task.title, body: "" };
     const report = { title: stripAttribution(raw.title ?? ""), body: await withMergeOrder(ctx.task, stripAttribution(raw.body ?? "")) };
@@ -1565,7 +1595,7 @@ export const STEPS: Record<string, StepFn> = {
     });
     const tag = (repo: string, xs: string[]) => targets.length > 1 ? xs.map((x) => `[${repo}] ${x}`) : xs;
     ctx.save({
-      plan: { summary: r.data.summary, parts, risks: r.data.risks ?? [], steps: parts.flatMap((p) => tag(p.repo, p.steps)), files: parts.flatMap((p) => tag(p.repo, p.files)), tests: parts.flatMap((p) => tag(p.repo, p.tests)) },
+      plan: { summary: r.data.summary, parts, risks: r.data.risks ?? [], outsideWork: r.data.outsideWork ?? [], steps: parts.flatMap((p) => tag(p.repo, p.steps)), files: parts.flatMap((p) => tag(p.repo, p.files)), tests: parts.flatMap((p) => tag(p.repo, p.tests)) },
       planAt: new Date().toISOString(),
     });
     docWrite(() => writePlan(ctx.task, ctx.task.data.plan));

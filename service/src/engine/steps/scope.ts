@@ -578,6 +578,10 @@ export function normalisePlan(out: any, sc: Pick<ScopeData, "issues" | "kind">, 
 async function createMissingAtStart(ctx: StepCtx): Promise<void> {
   const sc = scopeOf(ctx.task);
   if (!sc?.plan || !sc.epic || !sc.plan.missing.length || (sc as any).missingCreatedAt) return;
+  // Jira writes pass the gate: YOUR approval of this plan (not one given by a rule) or your rule to create tickets
+  const a = latestApproval(ctx.task.id, "implement_plan");
+  const byYou = a?.state === "approved" && !String(a.approver ?? "").startsWith("policy");
+  if (!byYou && needsApproval("jira_ticket", ctx.task, { settings: ctx.settings, project: ctx.project }).ask) return;   // the epic check asks at the end
   const jira = clients.jira();
   if (!jira?.createIssue) return;
   const created: ScopeIssue[] = [];
@@ -593,7 +597,8 @@ async function createMissingAtStart(ctx: StepCtx): Promise<void> {
   const repo = sc.plan.tickets[0]?.repo ?? ctx.project.id;
   const plan = { ...sc.plan, tickets: [...sc.plan.tickets, ...created.map((c) => ({ key: c.key, repo, areas: [], size: "M" as Size, contracts: [] }))],
     waves: [...sc.plan.waves, created.map((c) => c.key)], order: [...sc.plan.order, ...created.map((c) => c.key)] };
-  ctx.save({ scope: { ...sc, issues: [...sc.issues, ...created], plan, ...({ missingCreatedAt: nowIso() } as any), epicCheck: { ...(sc as any).epicCheck, created: created.map((c) => c.key) } } });
+  // the created stories carry their keys in plan.missing, so the epic check never proposes them again
+  ctx.save({ scope: { ...sc, issues: [...sc.issues, ...created], plan, ...({ missingCreatedAt: nowIso() } as any) } });
   audit("user", "scope.stories_created", ctx.task.id, { created: created.map((c) => c.key), at: "plan approval" });
   await notify({ kind: "info", taskId: ctx.task.id, taskRef: refOf(ctx.task), dedupeKey: `missing-created:${ctx.task.id}`, title: `🧩 Created ${created.length} missing stor${created.length === 1 ? "y" : "ies"} under ${sc.epic.key}`, body: `${created.map((c) => `${c.key} ${c.title}`).join("\n")}\nThey are built in the last wave of this run.` }).catch(() => {});
 }

@@ -69,6 +69,18 @@ export function pendingItems(): Pending {
   const approvals = listTasks({ states: ["AWAITING_APPROVAL"] }).filter(mine)
     .map((task) => ({ task, approval: latestApproval(task.id)! }))
     .filter((x) => x.approval?.state === "pending");
+  // a job BESIDE an open PR (push the comment / CI / conflict fixes, post a review) asks without changing the item's
+  // state – its approval waits too, so "1" / "yes" / "post" answer it like any other
+  const seen = new Set(approvals.map((x) => x.task.id));
+  const beside = db().prepare(`SELECT a.* FROM approvals a JOIN tasks t ON t.id = a.task_id WHERE a.state='pending'
+    AND t.state IN ('PR_OPEN','BLOCKED') ORDER BY a.requested_at DESC`).all() as unknown as Approval[];
+  for (const a of beside) {
+    if (seen.has(a.task_id)) continue;
+    const task = getTask(a.task_id);
+    if (!task) continue;
+    seen.add(task.id);
+    approvals.push({ task, approval: a });
+  }
   return { approvals, questions: listTasks({ states: ["NEEDS_INFO"] }).filter(mine), starts: listTasks({ states: ["AWAITING_START"] }).filter(mine) };
 }
 
@@ -852,6 +864,20 @@ async function toolAdopt(args: ToolArgs, ctx: ToolCtx): Promise<ToolResult> {
   return said(String(r));
 }
 
+/** Open epics of the configured Jira projects whose title has the message's words (best first). */
+async function epicsByName(text: string): Promise<{ key: string; title: string }[]> {
+  const jira = clients.jira();
+  const keys = [...new Set(loadProjects().flatMap((p) => p.jira?.keys ?? []))];
+  const words = text.toLowerCase().replace(/\b(build|create|make|do|start|work on|the|a|an|epic|please|for|of|whole)\b/g, " ").replace(/[^\p{L}\p{N}\s-]/gu, " ").split(/\s+/).filter((w) => w.length > 2).slice(0, 6);
+  if (!jira || !keys.length || !words.length) return [];
+  try {
+    const found = await jira.search(`project in (${keys.join(",")}) AND issuetype = Epic AND statusCategory != Done AND text ~ "${words.join(" ").replace(/"/g, "")}" ORDER BY updated DESC`, 10);
+    const score = (t: string) => words.filter((w) => t.toLowerCase().includes(w)).length;
+    const ranked = found.map((i) => ({ key: i.key, title: i.title, s: score(i.title) })).filter((x) => x.s > 0).sort((a, b) => b.s - a.s);
+    return ranked.filter((x) => x.s === ranked[0]?.s).map(({ key, title }) => ({ key, title }));
+  } catch { return []; }
+}
+
 /** W8 step 1 / B9–B12: the scope preview (engine/steps/scope.ts). A sprint or "all my tickets" asks once to start. */
 async function toolPreviewScope(args: ToolArgs, ctx: ToolCtx): Promise<ToolResult> {
   const { previewScope } = await import("../engine/steps/scope.js");
@@ -862,6 +888,13 @@ async function toolPreviewScope(args: ToolArgs, ctx: ToolCtx): Promise<ToolResul
   // ("rebuild the dashboard") becomes new work: a short interview first (the linked document is read), then ONE plan
   // split into parts for your approval – never a blind start
   const { parseScopeTarget } = await import("../engine/steps/scope.js");
+  // B10: an epic named in words ("build the seller onboarding epic") – found in Jira by its name, then the epic path
+  if (!parseScopeTarget(text) && /\bepic\b/i.test(text)) {
+    const epics = await epicsByName(text);
+    if (epics.length === 1) { const r = await previewScope(`${text} ${epics[0].key}`, ctx.who); if (r.itemId) { const t = getTask(r.itemId); if (t) setFocus(refOf(t)); await tick(); } return r.ask ? { ok: r.ok !== false, reply: r.reply, ask: { question: r.ask.question, calls: r.ask.calls as ToolCall[] } } : said(r.reply, r.ok !== false); }
+    if (epics.length > 1) return asking(`Which epic? ${epics.slice(0, 3).map((e, n) => `${n + 1}. ${e.key} – ${truncate(e.title, 50)}`).join(" · ")}`,
+      { options: epics.slice(0, 3).map((e) => ({ label: e.key, key: e.key, calls: [{ tool: "preview_scope" as const, args: { ref: e.key, text: `build the ${e.key} epic` } }] })) });
+  }
   if (!parseScopeTarget(text) && (/https?:\/\/\S*(notion\.so|figma\.com|docs\.google|confluence|sharepoint|\.pdf)/i.test(text) || /\b(build|rebuild|redo|redesign|implement|create|make)\b/i.test(text))) {
     return startRequest(text, args, ctx);
   }

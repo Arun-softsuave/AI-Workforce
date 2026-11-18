@@ -235,7 +235,8 @@ test("'PR 7 failed, fix it and make CI pass' fixes the FAILING CI CHECKS (not th
 
   // short messages: the rules; long ones: the conversation model (its fix_ci intent)
   assert.equal((ruleIntent("PR 7 CI failed, fix it") as any).intent?.intent, "fix_ci");
-  assert.equal((ruleIntent("fix PR 7") as any).intent?.intent, "fix_ci");
+  // I5: a bare "fix PR 7" fixes everything red or open on it – the comments and any failing check
+  assert.equal((ruleIntent("fix PR 7") as any).intent?.intent, "resolve_comments");
   assert.equal((ruleIntent("resolve the comments on PR 7") as any).intent?.intent, "resolve_comments");
   const msg = "Backend pr failed -> https://github.com/acme/shop/pull/7 check and fix it and notify me ensure it must pass all the ci tests";
   setRunner(new MockRunner({

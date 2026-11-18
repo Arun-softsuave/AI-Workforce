@@ -383,8 +383,9 @@ export async function startBackend(project: ProjectConfig, sha: string, tag: str
     if (envDb && await loginWorks(project, prof.database.engine, envDb)) {
       dbWhere = `${isLocalHost(envDb.host) ? "the local" : "the shared"} database from .env (${envDb.db})`;
       // a shared database: no background workers / schedulers / real emails from this test copy (the profile says how)
-      if (!isLocalHost(envDb.host)) for (const q of prof.quietEnv ?? []) if (q.name) env[q.name] = q.value;
-      if (!isLocalHost(envDb.host) && (prof.quietEnv ?? []).length) dbWhere += `, background work off (${prof.quietEnv.map((q) => q.name).join(", ")})`;
+      // M8: background workers, schedulers, real emails and payments stay off whenever the plugin runs the app
+      for (const q of prof.quietEnv ?? []) if (q.name) env[q.name] = q.value;
+      if ((prof.quietEnv ?? []).length) dbWhere += `, background work off (${prof.quietEnv.map((q) => q.name).join(", ")})`;
     } else {
       const db = await tempDatabase(project, tag);
       if ("error" in db) { cleanups.forEach((c) => c()); return { error: db.error }; }

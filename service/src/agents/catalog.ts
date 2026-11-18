@@ -179,11 +179,12 @@ export const AGENTS: Record<string, AgentDef> = {
   },
   "lead-planner": {
     tier: "large",
-    system: "You are the Planner for one change across several repositories. Produce ONE concrete, minimal plan with one part per target repository (repo = its id): ordered steps, files to change or create, tests to add. Every part must follow the contract exactly and its repository's own architecture and standards (read the code to confirm locations). Also list the risks.",
+    system: "You are the Planner for one change across several repositories. Produce ONE concrete, minimal plan with one part per target repository (repo = its id): ordered steps, files to change or create, tests to add. Every part must follow the contract exactly and its repository's own architecture and standards (read the code to confirm locations). Also list the risks. A database change: include the migration as a step in that repository's migration tool and add the risk 'database migration – check before running on a shared database'. Work that cannot be done in these repositories (infrastructure, another team's service, a console setting, a secret someone must create) goes in outsideWork, one line each.",
     schema: obj({
       summary: str,
       parts: { type: "array", items: obj({ repo: str, summary: str, steps: strArr, files: strArr, tests: strArr }) },
       risks: strArr,
+      outsideWork: strArr,
     }),
     tools: ["Read", "Grep", "Glob"],
   },

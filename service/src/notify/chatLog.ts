@@ -19,6 +19,9 @@ export function refsIn(text: string): string[] {
 /** Tokens and keys never go into the chat history the assistant reads (JWTs, long key-like strings, NAME=secret lines). */
 export function redactSecrets(text: string): string {
   return text
+    // known key formats of any length (GitHub, Slack, AWS, Anthropic/OpenAI-style, Google, Stripe) – never kept, never sent to a model
+    .replace(/\b(gh[pousr]_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{20,}|xox[abprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|sk-(?:ant-)?[A-Za-z0-9_-]{16,}|AIza[0-9A-Za-z_-]{30,}|(?:sk|rk|pk)_(?:live|test)_[A-Za-z0-9]{10,})\b/g, "[key hidden]")
+    .replace(/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(-----END [A-Z ]*PRIVATE KEY-----|$)/g, "[private key hidden]")
     .replace(/\beyJ[\w-]{8,}\.[\w-]{8,}\.[\w-]{8,}\b/g, "[token hidden]")
     .replace(/\b((?:[A-Z_]*(?:SECRET|TOKEN|PASSWORD|KEY)[A-Z_]*)\s*=\s*)\S+/gi, "$1[hidden]")
     .replace(/\b(qa\s+token\s+)[\s\S]*/i, "$1[hidden]")

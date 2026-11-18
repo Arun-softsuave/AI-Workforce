@@ -578,6 +578,9 @@ export function resumeTask(ref: string): Task | undefined {
   const t = getTask(ref);
   if (!t) return undefined;
   if (t.state === "STALE" || t.state === "FAILED_PUBLISH") return refreshTask(ref);
+  // D6: paused because the code changed after your approval – re-check and ask again (resuming at publish would only
+  // fail the same check and pause again)
+  if (t.state === "PAUSED" && /^STALE\b/.test(t.error ?? "")) { mergeData(t.id, { retryAt: null, errorCount: 0 }); return refreshTask(ref); }
   if (t.state === "PR_OPEN") {
     // engine v2: a paused job on an open PR (its own build's tail, a fix, a rebase) leaves the item in PR_OPEN;
     // the kernel tick puts those jobs back in the queue (kernel/runner.ts requeuePausedJobs)

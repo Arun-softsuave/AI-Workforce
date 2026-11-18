@@ -170,9 +170,10 @@ test("approval becomes stale if the code changes after the request", async () =>
   fs.writeFileSync(path.join(t.worktree!, "late.txt"), "unexpected");
   sh(t.worktree!, "add", "-A"); sh(t.worktree!, "-c", "user.name=x", "-c", "user.email=x@x", "commit", "-q", "-m", "late change");
   await decideAndApply("PAY-150", "approved", "Tester", "dashboard");
-  const p = await settle("PAY-150", ["PAUSED", "DONE"]);
-  assert.equal(p.state, "PAUSED");
-  assert.match(p.error ?? "", /STALE/);
+  // D6 (1.1.1): the approval no longer fits the code – you are asked again at once, with the reason (never a pause loop)
+  const p = await settle("PAY-150", ["AWAITING_APPROVAL", "PAUSED", "DONE"]);
+  assert.equal(p.state, "AWAITING_APPROVAL", p.error ?? "");
+  assert.ok(inbox().some((i) => /The code changed after you approved it – please look again/.test(i.title)), inbox().map((i) => i.title).join(" | "));
   assert.equal(prs.filter((x) => x.title.includes("PAY-150")).length, 0, "nothing was published");
 });
 

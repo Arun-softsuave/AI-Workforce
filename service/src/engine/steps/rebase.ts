@@ -114,6 +114,12 @@ export const REBASE_STEPS: Record<string, (ctx: StepCtx) => Promise<StepResult>>
     if (!gh?.prForReview) return { status: "fail", reason: "GitHub is not connected" };
     const pr = await gh.prForReview(pr0.repo, pr0.num);
     if (pr.merged || pr.state !== "open") return { status: "done", note: `PR #${pr0.num} is ${pr.merged ? "merged" : pr.state}` };
+    // M7 hard rail: a PR whose head IS a protected branch (dev → main release PRs, hotfix branches …) is never pushed to
+    const { isProtectedBranch } = await import("../../policy/gate.js");
+    if (isProtectedBranch(pr.headRef)) {
+      await tell(ctx, `⚠️ PR #${pr0.num}: I don't update ${pr.headRef}`, `PR #${pr0.num} comes from ${pr.headRef}, a protected branch – I never push to it. Bring ${pr.baseRef} into it yourself if needed.`, pr.url);
+      return { status: "done", note: `head ${pr.headRef} is protected – told you` };
+    }
     const repo = ctx.project.local.path;
     const url = G.remoteUrl(pr0.repo);
     const auth = gh.gitAuthHeader();

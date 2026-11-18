@@ -23,8 +23,10 @@ export function tokensToday(projectId: string): number {
 /** Called before every AI step. Pauses at 80% of the task budget (once) and hard-stops at 100% / daily cap. */
 export function checkBudget(project: ProjectConfig, task: Task): BudgetCheck {
   // Default: budgets never stop work – the cost is shown in Teams instead (settings.workflow.stopForBudget).
-  if (!loadSettings().workflow.stopForBudget) return { ok: true, warn: false, used: task.tokens_used, limit: Infinity };
+  if (!project?.budget) return { ok: true, warn: false, used: task.tokens_used, limit: Infinity };
   const limit = taskBudget(project, task.size) * (task.data.budgetExtensions ?? 1);
+  // E12: without budget stops (the default) the work never stops – but you are still told once at 80 %
+  if (!loadSettings().workflow.stopForBudget) return { ok: true, warn: task.tokens_used >= 0.8 * limit && !task.data.budgetWarned, used: task.tokens_used, limit };
   const used = task.tokens_used;
   const day = tokensToday(project.id);
   if (day >= project.budget.dailyTokens) return { ok: false, warn: false, used: day, limit: project.budget.dailyTokens, reason: `daily token budget for ${project.id} reached` };

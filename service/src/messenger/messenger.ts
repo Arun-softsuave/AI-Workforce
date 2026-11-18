@@ -36,13 +36,28 @@ function itemIdFor(n: Notice): string | null {
   return r?.id ?? null;
 }
 
+/** The plan notes that must reach you even when the message is the design document's summary. */
+export function planNotes(body: string): string[] {
+  const out: string[] = [];
+  const blocks = body.split(/\n\s*\n/);
+  const outside = blocks.find((b) => /Outside these repositories/.test(b));
+  if (outside) out.push(outside.split("\n").slice(0, 4).join("\n"));
+  const mig = body.split("\n").find((l) => /Database migration/i.test(l));
+  if (mig) out.push(`⚠️ ${mig.replace(/^[-•*\s]+/, "")}`);
+  const design = blocks.find((b) => /^🎨 /.test(b.trim()));
+  if (design) out.push(design.trim());
+  return out;
+}
+
 /** A plan with a design document: the document's ≤ 10-line summary, the full document behind "details". */
 function designOverride(n: Notice, itemId: string | null): { body: string; details: string } | undefined {
   if (n.approvalAction !== "implement_plan" && !/plan/i.test(n.dedupeKey ?? "")) return undefined;
   for (const id of [itemId, n.taskRef].filter(Boolean) as string[]) {
     try {
       const doc = readDoc(id);
-      if (doc) return { body: designSummary(id).replace(/Reply "details [^"]+"/, `Reply "details ${refOf(n)}"`), details: doc.text };
+      // C6 / C9 / C11: the notes the plan message adds (no design given, a database migration, work outside the repos)
+      // are not in the document's summary – they stay in the Teams message
+      if (doc) return { body: [designSummary(id).replace(/Reply "details [^"]+"/, `Reply "details ${refOf(n)}"`), ...planNotes(n.body ?? "")].join("\n\n"), details: doc.text };
     } catch { /* not a valid document id */ }
   }
   return undefined;
