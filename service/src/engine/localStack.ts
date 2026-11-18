@@ -321,6 +321,36 @@ export async function testEnvironment(project: ProjectConfig, wt: string, tag: s
   return { env, where: `a ${db.where === "file" ? "temporary file" : `${db.where} temporary`} database${cache.key && !cache.url ? ", no cache" : ""}`, cleanup: () => { db.cleanup(); cache.cleanup?.(); } };
 }
 
+/**
+ * Environment for a project's test suite on the .env database (R-DB, your decision): the project's own .env database,
+ * the secret settings saved with `aiw secret set`, and background workers / schedulers / real emails switched off
+ * (the profile's quiet settings) – always, not only for a shared database. The plugin never runs SQL of its own here.
+ * Returns an error only when the .env database can't be reached.
+ */
+export async function envTestEnvironment(project: ProjectConfig, wt: string): Promise<{ env: Record<string, string>; where: string; cleanup: () => void } | { error: string }> {
+  const prof = profileOf(project);
+  const dotenv = readDotEnv(project.local.path);
+  let saved: Record<string, string> = {};
+  try { saved = JSON.parse(getSecret(`qa.${project.id}.env`) ?? "{}"); } catch { /* none */ }
+  const env: Record<string, string> = { CI: "1", ...saved };
+  if (prof.language === "python") env.PYTHONPATH = wt;
+  for (const q of prof.quietEnv ?? []) if (q.name) env[q.name] = q.value;
+  const quiet = (prof.quietEnv ?? []).map((q) => q.name).filter(Boolean);
+  if (prof.database.engine === "none") return { env, where: "no database", cleanup: () => {} };
+  const all = { ...dotenv, ...saved };
+  const raw = firstOf(all, [...prof.database.syncUrlVars, ...prof.database.urlVars]);
+  if (prof.database.engine === "sqlite") return { env, where: "the .env database (SQLite file)", cleanup: () => {} };
+  const u = parseDbUrl(raw);
+  if (!u) return { error: `no database address in ${project.id}'s .env (${[...prof.database.urlVars, ...prof.database.syncUrlVars].join(" / ") || "DATABASE_URL"})` };
+  if (!(await reachable(u.host, u.port))) return { error: `the .env database (${redactUrl(raw!)}) is not reachable` };
+  return { env, where: `the .env database (${u.db})${quiet.length ? `, background work off (${quiet.join(", ")})` : ""}`, cleanup: () => {} };
+}
+
+/** The test environment the settings ask for: the .env database (default) or a temporary one. */
+export async function suiteEnvironment(project: ProjectConfig, wt: string, tag: string, mode: "env" | "temp" = "env") {
+  return mode === "temp" ? testEnvironment(project, wt, tag) : envTestEnvironment(project, wt);
+}
+
 // ------------------------------------------------------------------ the running backend (QA live checks)
 
 export interface Stack { api: string; origin: string; port: number; db: string; stop: () => Promise<void> }

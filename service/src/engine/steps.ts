@@ -30,7 +30,10 @@ import { getPlaybook, stepIndex } from "./playbooks.js";
 import { branchNameFor, commitMessageFor, rulesBlock, prTemplateText, expandCheck } from "../brain/conventions.js";
 import { stripAttribution, attributionHits, attributionInDiff, NO_ATTRIBUTION_RULE } from "../core/attribution.js";
 import { captureScreenshots, screenshotsLine, withScreenshots } from "./screenshots.js";
-import { isPythonBackend, findPython, profileTestCommand, testEnvironment, testsNeedDatabase, testsForChange, withResults, testRunPassed } from "./localStack.js";
+import { scopeRules, scopePrompt, scopeViolations, repoExcluded } from "../policy/scopeGuard.js";
+import { classifyFile, docstringLine } from "../brain/standards.js";
+import { extraAgentCommands, dependencyFiles, addedDependencies, missingDocstrings } from "./standardsGuard.js";
+import { isPythonBackend, findPython, profileTestCommand, suiteEnvironment, testsNeedDatabase, testsForChange, withResults, testRunPassed } from "./localStack.js";
 import { ensureProfile, profileOf } from "./testProfile.js";
 import { writePlan, writeUnderstanding, writeContract, docBlock } from "./steps/design_doc.js";
 import { readDoc as readDesignDoc } from "../knowledge/designDoc.js";
@@ -205,14 +208,22 @@ export const testCommandOf = (ctx: StepCtx) => {
   return !cmd || (broken && cmd.includes(broken)) ? profileTestCommand(ctx.project) ?? cmd : cmd;
 };
 
-/** Test suites that use a database drop and recreate tables, so they must never reach the .env (dev / shared) database. */
-const isSafeTestsOnly = (ctx: StepCtx) => testsNeedDatabase(ctx.project);
+/** Which database a test suite uses: the .env one (default, your decision) or a temporary one (workflow.testDatabase: temp). */
+const testDbMode = (ctx: StepCtx): "env" | "temp" => (ctx.settings.workflow.testDatabase === "temp" ? "temp" : "env");
+/** Only a TEMPORARY test database is set up by the plugin, so then the agent must not run the suite itself. */
+const isSafeTestsOnly = (ctx: StepCtx) => testsNeedDatabase(ctx.project) && testDbMode(ctx) === "temp";
+/** The environment the agent's run_tests tool gets for a suite that needs the .env database (quiet settings, saved secrets). */
+async function agentTestEnv(ctx: StepCtx, wt: string): Promise<Record<string, string> | undefined> {
+  if (!testsNeedDatabase(ctx.project) || testDbMode(ctx) !== "env") return undefined;
+  const te = await suiteEnvironment(ctx.project, wt, ctx.task.id, "env");
+  return "error" in te ? undefined : te.env;
+}
 
 /**
  * Run the project's tests. For a Python backend every database variable points at a TEMPORARY database (local
  * PostgreSQL first, Docker second) that is dropped afterwards – never the .env one. envError: no safe database.
  */
-export async function runTests(ctx: StepCtx, cmd: string, wt: string): Promise<{ code: number; output: string; envError?: string; scope?: string }> {
+export async function runTests(ctx: StepCtx, cmd: string, wt: string): Promise<{ code: number; output: string; envError?: string; scope?: string; where?: string }> {
   // the tests for the change (changed test files + tests named after the changed modules); the whole suite only when none
   // match – a backend's full suite can take most of an hour, and CI runs it anyway
   const files = ctx.task.data.baseSha ? testsForChange(wt, G.changedFiles(wt, ctx.task.data.baseSha)) : [];
@@ -224,10 +235,10 @@ export async function runTests(ctx: StepCtx, cmd: string, wt: string): Promise<{
   // every test passed and only a whole-suite rule (coverage minimum) failed: that says nothing about the change
   const res = withResults(scoped);                                // exact pass / fail counts where the runner can give them
   const finish = (r: { code: number; output: string }) => ({ ...r, code: testRunPassed(r, res.read()) ? 0 : r.code || 1, scope });
-  if (!isSafeTestsOnly(ctx)) return finish(await G.runCommand(res.cmd, wt));
-  const te = await testEnvironment(ctx.project, wt, ctx.task.id);
+  if (!testsNeedDatabase(ctx.project)) return finish(await G.runCommand(res.cmd, wt));
+  const te = await suiteEnvironment(ctx.project, wt, ctx.task.id, testDbMode(ctx));
   if ("error" in te) return { code: 1, output: te.error, envError: te.error, scope };
-  try { return finish(await G.runCommand(res.cmd, wt, 30 * 60_000, te.env)); } finally { te.cleanup(); }
+  try { return { ...finish(await G.runCommand(res.cmd, wt, 30 * 60_000, te.env)), where: te.where }; } finally { te.cleanup(); }
 }
 
 /**
@@ -255,7 +266,7 @@ export function markUntested(ctx: StepCtx, reason: string, fix?: string): void {
 /** The tests line for Teams messages. */
 function testsLine(d: Record<string, any>): string {
   if (d.testsUnavailable) return `⚠️ NOT run on this computer – ${d.testsUnavailable.reason}. The change and its tests were checked by reading only; the PR's CI must pass before merging.${d.testsUnavailable.fix ? `\nTo test locally: ${d.testsUnavailable.fix}` : ""}`;
-  return d.tests?.ran ? (d.tests.passed ? `✅ passed${d.tests.attempts ? ` (attempt ${d.tests.attempts})` : ""}${d.tests.scope ? ` – ${d.tests.scope}` : ""}${d.tests.flaky ? ", one flaky run" : ""}` : "❌ failing") : "no test command in this repo";
+  return d.tests?.ran ? (d.tests.passed ? `✅ passed${d.tests.attempts ? ` (attempt ${d.tests.attempts})` : ""}${d.tests.scope ? ` – ${d.tests.scope}` : ""}${d.tests.where ? ` on ${d.tests.where.replace(/^the /, "the ")}` : ""}${d.tests.flaky ? ", one flaky run" : ""}` : "❌ failing") : "no test command in this repo";
 }
 /**
  * E13: an agent is stuck after its round limit. The item pauses (not fails – "resume" retries from here) with
@@ -319,9 +330,11 @@ function reportDiff(ctx: StepCtx): string {
   try { const diff = G.diffAgainst(wt, base); return diff.trim() ? `## The change (diff, may be cut)\n${untrusted("diff", truncate(diff, 12_000))}` : ""; } catch { return ""; }
 }
 
-function implementerAllow(testCmd?: string): string[] {
+function implementerAllow(testCmd?: string, extra: string[] = []): string[] {
   const allow = ["Read", "Edit", "Write", "Glob", "Grep", "Bash(git status:*)", "Bash(git diff:*)", "Bash(ls:*)", "Bash(dir:*)"];
   if (testCmd) allow.push(`Bash(${testCmd}:*)`, `Bash(${testCmd})`);
+  // R-STD / E5 / E10: the repository's own lint-fix and format commands, and its package manager (lock file kept right)
+  for (const c of extra) allow.push(`Bash(${c}:*)`);
   return allow;
 }
 
@@ -334,6 +347,26 @@ function commitWithConvention(ctx: StepCtx, wt: string, summary: string, typeOve
   const key = (ctx.task.kind === "pr_fix" ? ctx.task.data.ticket?.key : undefined) || jiraKey(ctx.task) || ctx.task.id;
   const msg = commitMessageFor(ctx.project.conventions, /^PR-\d+$/.test(key) ? "" : key, type, summary, [...new Set([...status, ...files])]);
   G.commitAll(wt, msg, ctx.settings.profile.name || "Developer");
+}
+
+/** New files of this change that never belong in a PR (brain/standards.ts NEVER_PUSH + the team's test layout). */
+export function strayFiles(ctx: StepCtx, wt: string): { file: string; why: string }[] {
+  const base = ctx.task.data.baseSha;
+  if (!base) return [];
+  const layout = ctx.project.conventions?.standards?.tests;
+  const imageDirs = ["public/", "assets/", "static/", "src/assets/", "app/assets/", "images/"];
+  return G.changedFiles(wt, base).filter((f) => fs.existsSync(path.join(wt, f))).flatMap((f) => {
+    const existed = G.git(wt, ["ls-tree", "--name-only", base, "--", f], { allowFail: true }).trim() !== "";
+    const v = classifyFile(f, layout, existed, imageDirs);
+    return v.kind === "junk" ? [{ file: f, why: v.why }] : [];
+  });
+}
+
+/** The change's diff text (for the PR's dependency line), or "" when the workspace is gone. */
+function reportDiffRaw(ctx: StepCtx): string {
+  const wt = ctx.task.worktree, base = ctx.task.data.baseSha;
+  if (!wt || !base || !fs.existsSync(wt)) return "";
+  try { return G.diffAgainst(wt, base); } catch { return ""; }
 }
 
 /** Run the project's detected lint / format / type checks on the changed files. */
@@ -846,8 +879,9 @@ export const STEPS: Record<string, StepFn> = {
   async plan(ctx) {
     const prior = ctx.task.data.planIssues?.length ? `\n## Issues found in the previous plan (fix them)\n${json(ctx.task.data.planIssues)}` : "";
     const assumptions = ctx.task.data.assumptions?.length ? `\n\n## Unanswered questions – choose a sensible assumption for each and list it under risks\n${ctx.task.data.assumptions.map((q: string) => `- ${q}`).join("\n")}` : "";
+    const areaRules = scopePrompt(scopeRules(ctx.task.id));
     const r = await ctx.agent("planner",
-      `${ticketBlock(ctx.task)}\n\n## Requirements\n${json(ctx.task.data.requirements ?? {})}${ctx.task.data.findings ? `\n\n## Code Explorer findings (files, symbols and lines to build on)\n${findingsText(ctx.task.data.findings)}` : ""}\n\n## Project context\n${ctx.task.data.contextPack ?? ""}${feedbackBlock(ctx.task)}${prior}${assumptions}\n\n${scopeNoteBlock(ctx.task)}${ctx.task.data.planIssues?.length ? `\n\n${designDocFor(ctx.task, "plan")}` : ""}\n\nPlan from the findings; read files only to confirm a location they leave open. Do not modify anything.`,
+      `${areaRules ? `${areaRules}\n\n` : ""}${ticketBlock(ctx.task)}\n\n## Requirements\n${json(ctx.task.data.requirements ?? {})}${ctx.task.data.findings ? `\n\n## Code Explorer findings (files, symbols and lines to build on)\n${findingsText(ctx.task.data.findings)}` : ""}\n\n## Project context\n${ctx.task.data.contextPack ?? ""}${feedbackBlock(ctx.task)}${prior}${assumptions}\n\n${scopeNoteBlock(ctx.task)}${ctx.task.data.planIssues?.length ? `\n\n${designDocFor(ctx.task, "plan")}` : ""}\n\nPlan from the findings; read files only to confirm a location they leave open. Do not modify anything.`,
       { cwd: ctx.task.worktree ?? ctx.project.local.path, tools: ["Read", "Grep", "Glob"], maxTurns: 20, tier: ctx.params.tier });
     ctx.save({ plan: r.data, planAt: new Date().toISOString() });
     // finishing a developer's branch (W16): the plan covers only the rest, and the document keeps what was left to do
@@ -924,7 +958,7 @@ export const STEPS: Record<string, StepFn> = {
     const safeOnly = isSafeTestsOnly(ctx);
     const compactProfile: CompactProfile = {
       testCommand: safeOnly ? undefined : testCmd, testFiles: profileOf(ctx.project).testFiles,
-      lintCommands: ctx.project.conventions?.checks ?? [], base: ctx.task.data.baseSha,
+      lintCommands: ctx.project.conventions?.checks ?? [], base: ctx.task.data.baseSha, env: await agentTestEnv(ctx, wt),
     };
     let lastFailure = "";
     for (let i = 1; i <= loops; i++) {
@@ -935,6 +969,8 @@ export const STEPS: Record<string, StepFn> = {
         `## Plan\n${json(ctx.task.data.plan ?? { summary: "Make the minimal change the ticket asks for." })}`,
         ctx.task.data.findings ? `## Code Explorer findings (exact files and lines – open these directly, no need to search again)\n${findingsText(ctx.task.data.findings, ctx.project.id)}` : "",
         `## Project context\n${ctx.task.data.contextPack ?? ""}`,
+        scopePrompt(scopeRules(ctx.task.id)),
+        extraAgentCommands(ctx.project).length ? `## Repository tools you may run\n${extraAgentCommands(ctx.project).map((c) => `- ${c}`).join("\n")}\nFix lint / format problems with these. A new dependency is added only with the package manager (so its lock file is updated) – never by editing a lock file.` : "",
         feedbackBlock(ctx.task),
         (ctx.task.data.ciFailures ?? []).length ? `## Failing CI checks on GitHub – your change must make each of them pass (find the root cause; do not weaken or delete tests or checks)\n${ctx.task.data.ciFailures.map((x: string) => untrusted("ci-log", x)).join("\n\n")}` : "",
         unavailable
@@ -945,7 +981,7 @@ export const STEPS: Record<string, StepFn> = {
       ].filter(Boolean).join("\n\n");
       ctx.save({ implementAttempt: i, implementLoops: loops });
       // a Python backend's tests need a temporary database the agent cannot set up – the plugin runs them instead
-      const r = await ctx.agent("implementer", prompt, { cwd: wt, allow: implementerAllow(safeOnly ? undefined : testCmd), maxTurns: 60, compact: compactProfile });
+      const r = await ctx.agent("implementer", prompt, { cwd: wt, allow: implementerAllow(safeOnly ? undefined : testCmd, extraAgentCommands(ctx.project)), maxTurns: 60, compact: compactProfile });
       const asked = normaliseQuestions(r.data.questions, 3);
       if (asked.length) {
         // Keep the work done so far (committed in the task branch), then ask instead of guessing.
@@ -966,7 +1002,7 @@ export const STEPS: Record<string, StepFn> = {
         return { status: "ok", note: u ? `not tested on this computer: ${u.reason}` : "no test command" };
       }
       const t = await runTests(ctx, testCmd, wt);
-      if (t.code === 0) { ctx.save({ implementation: r.data, tests: { ran: true, passed: true, attempts: i, scope: t.scope }, checks: checks.ran }); return { status: "ok", note: `tests passed (attempt ${i}, ${t.scope})` }; }
+      if (t.code === 0) { ctx.save({ implementation: r.data, tests: { ran: true, passed: true, attempts: i, scope: t.scope, where: t.where }, checks: checks.ran }); return { status: "ok", note: `tests passed (attempt ${i}, ${t.scope})` }; }
       // The test command itself could not run here (missing Python, database or Docker…): that says nothing about the code.
       const env = t.envError ? `no safe test database – ${t.envError}` : environmentFailure(t.output);
       if (env && ctx.settings.workflow.untestedWork !== "pause") {
@@ -976,7 +1012,7 @@ export const STEPS: Record<string, StepFn> = {
       }
       // flaky check: re-run once before spending another AI round
       const again = await runTests(ctx, testCmd, wt);
-      if (again.code === 0) { ctx.save({ implementation: r.data, tests: { ran: true, passed: true, attempts: i, flaky: true }, checks: checks.ran }); return { status: "ok", note: "tests passed on re-run (flaky)" }; }
+      if (again.code === 0) { ctx.save({ implementation: r.data, tests: { ran: true, passed: true, attempts: i, flaky: true, where: again.where }, checks: checks.ran }); return { status: "ok", note: "tests passed on re-run (flaky)" }; }
       // only the failures with file:line (about 1.5 KB) when the output is recognised; else the failing section
       const c = compactOutput(t.output, t.code);
       lastFailure = c.failures.length ? c.text : truncate(failingSection(t.output), 4000);
@@ -1021,7 +1057,7 @@ export const STEPS: Record<string, StepFn> = {
       if (round === rounds) break;
       const issues = failing.flatMap((k) => results[k].issues.map((x: any) => ({ reviewer: k, ...x })));
       await ctx.agent("implementer", `${ticketBlock(ctx.task)}\n\n## Fix these review findings (keep the change minimal)\n${json(issues)}\n\n## Plan\n${json(ctx.task.data.plan ?? {})}`,
-        { cwd: wt, allow: implementerAllow(isSafeTestsOnly(ctx) ? undefined : testCommandOf(ctx)), maxTurns: 40 });
+        { cwd: wt, allow: implementerAllow(isSafeTestsOnly(ctx) ? undefined : testCommandOf(ctx), extraAgentCommands(ctx.project)), maxTurns: 40 });
       commitWithConvention(ctx, wt, "address review findings");
       pending = failing;
     }
@@ -1053,6 +1089,43 @@ export const STEPS: Record<string, StepFn> = {
       if (!G.rebaseOnto(wt, latest.ref)) return { status: "pause", reason: `Conflicts while rebasing onto the latest ${baseBranch}. Resolve in ${wt} and run \`aiw resume ${ctx.task.source_ref}\`.` };
       ctx.save({ baseSha: latest.sha });
     }
+    // your area rules (B20): a changed file they keep out is put back as it was before this work, and listed
+    const outOfScope = scopeViolations(G.changedFiles(wt, ctx.task.data.baseSha), scopeRules(ctx.task.id));
+    if (outOfScope.length) {
+      for (const v of outOfScope) {
+        const existed = G.git(wt, ["ls-tree", "--name-only", ctx.task.data.baseSha, "--", v.file], { allowFail: true }).trim() !== "";
+        if (existed) G.git(wt, ["checkout", ctx.task.data.baseSha, "--", v.file], { allowFail: true });
+        else G.git(wt, ["rm", "-q", "-f", "--", v.file], { allowFail: true });
+      }
+      if (G.git(wt, ["status", "--porcelain"], { allowFail: true }).trim()) commitWithConvention(ctx, wt, "keep files outside the agreed scope unchanged", "chore");
+      ctx.save({ scopeReverted: outOfScope });
+      audit("service", "scope.reverted", ctx.task.id, { files: outOfScope });
+    }
+    // R-STD: scratch / debug scripts, logs, local .env files, coverage output and tests outside the team's test layout
+    // never go into the PR – taken out of the change (the work itself stays) and listed in the result
+    const stray = strayFiles(ctx, wt);
+    if (stray.length) {
+      for (const f of stray) G.git(wt, ["rm", "-q", "-f", "--cached", "--", f.file], { allowFail: true });
+      if (G.git(wt, ["diff", "--cached", "--name-only"], { allowFail: true }).trim()) {
+        const key = jiraKey(ctx.task) || "";
+        G.git(wt, ["commit", "-q", "-m", commitMessageFor(ctx.project.conventions, key, "chore", "remove files that do not belong in the change", stray.map((x) => x.file))], { allowFail: true });
+      }
+      for (const f of stray) { try { fs.rmSync(path.join(wt, f.file), { force: true }); } catch { /* gone */ } }
+      ctx.save({ strayRemoved: stray });
+      audit("service", "standards.stray_removed", ctx.task.id, { files: stray });
+    }
+    // R-STD / E6: new or changed public functions without the doc comment the team writes – one short pass
+    const docRules = ctx.project.conventions?.standards?.docstrings ?? [];
+    const noDocs = docRules.length && !ctx.task.data.docstringPass ? missingDocstrings(wt, G.diffAgainst(wt, ctx.task.data.baseSha), docRules) : [];
+    if (noDocs.length) {
+      ctx.save({ docstringPass: { at: new Date().toISOString(), items: noDocs.slice(0, 30) } });
+      await ctx.agent("implementer", [
+        "Add the missing doc comments ONLY – change no code, no behaviour, no formatting elsewhere. Do not commit.",
+        docRules.map((r) => `${docstringLine(r)}${r.example ? `\nExample from this repository:\n${r.example}` : ""}`).join("\n\n"),
+        `## Public functions and classes without one\n${noDocs.slice(0, 30).map((d) => `- ${d.file}:${d.line} ${d.name}`).join("\n")}`,
+      ].join("\n\n"), { cwd: wt, allow: ["Read", "Edit", "Grep", "Glob"], maxTurns: 15, tier: "small" } as any).catch(() => undefined);
+      if (G.git(wt, ["status", "--porcelain"], { allowFail: true }).trim()) commitWithConvention(ctx, wt, "add doc comments to new public functions", "docs");
+    }
     const diff = G.diffAgainst(wt, ctx.task.data.baseSha);
     const marks = attributionInDiff(diff);
     if (marks.length) return { status: "fail", reason: `Hard rule: the change mentions Claude/AI authorship – ${marks.slice(0, 5).map((m) => `${m.file}: "${m.line}"`).join("; ")}` };
@@ -1069,11 +1142,13 @@ export const STEPS: Record<string, StepFn> = {
     const testCmd = ctx.task.data.testsUnavailable ? undefined : testCommandOf(ctx);
     if (testCmd) {
       const t = await runTests(ctx, testCmd, wt);
-      const env = t.envError ? `no safe test database: ${t.envError}` : t.code !== 0 ? environmentFailure(t.output) : undefined;
+      const env = t.envError ? `no test database: ${t.envError}` : t.code !== 0 ? environmentFailure(t.output) : undefined;
       if (env && ctx.settings.workflow.untestedWork !== "pause") markUntested(ctx, `the test command could not run here (${env})`);
       else if (t.code !== 0) return { status: "fail", reason: `Final test run failed after rebase:\n${truncate(failingSection(t.output), 1500)}` };
     }
     if (ctx.task.data.testsUnavailable) warnings.push(`Not tested on this computer: ${ctx.task.data.testsUnavailable.reason}`);
+    if (stray.length) warnings.push(`Left out of the PR: ${stray.map((x) => `${x.file} (${x.why})`).join("; ")}`);
+    if (outOfScope.length) warnings.push(`Put back as they were (outside your rules): ${outOfScope.map((v) => `${v.file} – ${v.why}`).join("; ")}`);
     const checks = await runChecks(ctx, wt);
     if (!checks.ok) return { status: "fail", reason: `Project checks failed after rebase:\n${truncate(checks.output, 1500)}` };
     ctx.save({ diffStat: stat, changedFiles: files, prepublishWarnings: warnings });
@@ -1100,12 +1175,13 @@ export const STEPS: Record<string, StepFn> = {
     const appendix = [
       "", "---",
       ctx.task.source === "chat" && d.agreedRequirements ? `**Requirements (agreed before implementation):**\n${requirementsMarkdown(d.agreedRequirements)}` : `**Ticket:** ${d.ticket?.url ?? ctx.task.source_ref ?? ""}`,
-      `**Tests:** ${d.testsUnavailable ? `not run locally (${d.testsUnavailable.reason}) – please make sure CI passes before merging` : d.tests?.ran ? (d.tests.passed ? `passed (attempts: ${d.tests.attempts}${d.tests.flaky ? ", flaky test detected" : ""})${d.tests.scope?.startsWith("targeted") ? ` – locally the ${d.tests.scope.replace(/^targeted: /, "")} ran; the full suite runs in CI` : ""}` : "FAILING") : "no test command"}`,
+      `**Tests:** ${d.testsUnavailable ? `not run locally (${d.testsUnavailable.reason}) – please make sure CI passes before merging` : d.tests?.ran ? (d.tests.passed ? `passed (attempts: ${d.tests.attempts}${d.tests.flaky ? ", flaky test detected" : ""})${d.tests.scope?.startsWith("targeted") ? ` – locally the ${d.tests.scope.replace(/^targeted: /, "")} ran; the full suite runs in CI` : ""}${d.tests.where ? `; tested on ${d.tests.where}` : ""}` : "FAILING") : "no test command"}`,
       `**Reviews:** ${reviewLine || "n/a"}`,
       checksLine,
       d.unresolvedIssues?.length ? `**Unresolved review findings:**\n${d.unresolvedIssues.map((x: any) => `- [${x.reviewer}/${x.severity}] ${x.file}: ${x.description}`).join("\n")}` : "",
       d.prepublishWarnings?.length ? `**Warnings:** ${d.prepublishWarnings.join("; ")}` : "",
       (d.targets ?? []).length > 1 ? `**Multi-repo change:** ${d.targets.join(" + ")} (Jira ${jiraKey(ctx.task)})` : "",
+      dependencyFiles(d.changedFiles ?? []).length ? `**Dependencies:** ${(() => { const added = addedDependencies(reportDiffRaw(ctx)); return added.length ? `added ${added.join(", ")}` : "changed"; })()} (${dependencyFiles(d.changedFiles ?? []).join(", ")})` : "",
       `**Change size:** ${d.diffStat ? `${d.diffStat.files} files, +${d.diffStat.added}/-${d.diffStat.removed}` : "n/a"}`,
     ].filter((x) => x !== "").join("\n");
     // Only real Jira keys prefix the PR title; a chat request's TASK-n id means nothing to reviewers.
@@ -1263,6 +1339,11 @@ export const STEPS: Record<string, StepFn> = {
     const ids = members.map((m) => m.id);
     let targets = [...new Set<string>((r.data.targets ?? []).filter((x: string) => ids.includes(x)))];
     if (!targets.length) targets = heuristicTargets(ticketText(ctx.task), members);
+    // "only backend" (B20): a repository outside your rule is not changed at all – said in the plan, never built
+    const rules = scopeRules(ctx.task.id);
+    const left = targets.filter((id) => repoExcluded({ id }, rules, members));
+    if (left.length && left.length < targets.length) targets = targets.filter((id) => !left.includes(id));
+    if (left.length) ctx.save({ scopeSkipped: left.map((id) => ({ repo: id, why: `you said only ${rules.only}` })) });
     const order = targets.length > 1 && r.data.order === "parallel" ? "parallel" : "sequential";
     ctx.save({
       understanding: r.data, targets, order, group: ids,

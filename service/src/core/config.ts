@@ -40,6 +40,8 @@ export interface Settings {
     planApproval: "always" | "autonomy" | "skip";
     /** "ask" (default): raising the PR waits for your OK in Teams. "skip": the PR is raised as soon as it is built, tested and reviewed. */
     prApproval?: "ask" | "skip";
+    /** Database for test suites: "env" (default, decided 16/18 Nov) the project's .env database; "temp" a temporary one. */
+    testDatabase?: "env" | "temp";
     /** "primary": when the primary channel is the two-way Teams chat, approvals and answers are accepted ONLY there. "any": from anywhere. */
     decisionsVia: "primary" | "any";
     /** Daily check-up message (local time, "HH:MM"), or "off". */
@@ -118,7 +120,7 @@ export const DEFAULT_SETTINGS: Settings = {
     askBeforeStart: ["L"], implementLoops: 3, reviewRounds: 2, maxDiffLines: 1500,
   },
   notifications: { primary: "desktop", fallback: ["inbox"], quietHours: "off", digestTime: "09:00", jiraComments: false, exclusive: true },
-  workflow: { planApproval: "always", decisionsVia: "primary", checkupTime: "10:00", questionRounds: 4, interviewRounds: 5, untestedWork: "continue", stopForBudget: false, qaAfterFix: true, ticketReport: true },
+  workflow: { planApproval: "always", decisionsVia: "primary", checkupTime: "10:00", questionRounds: 4, interviewRounds: 5, untestedWork: "continue", testDatabase: "env", stopForBudget: false, qaAfterFix: true, ticketReport: true },
   service: { port: 47821 },
   pr: { draft: false, autoFixCi: true, autoReview: false, autoPostReview: false, autoQaIssues: false },
   team: { members: [] },

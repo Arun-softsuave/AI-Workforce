@@ -472,6 +472,8 @@ export async function handleChatMessage(text: string, who: string, ctx: MessageC
     audit(`user:${who}`, "teams.secret_blocked", undefined, {});
     return "🔒 That message looks like it contains a secret (a key, token or password), so I did not read it or keep it.\n\n- Please **revoke or rotate it** – it is now in the Teams history.\n- To give me a value safely, run `aiw secret set NAME` on this computer, then reply \"done\".";
   }
+  // "more": the rest of the last reply that was shortened (R-MSG)
+  { const { moreReply } = await import("../messenger/details.js"); const more = moreReply(text); if (more) return more; }
   const awaiting = getAwaiting();
   if (awaiting) {
     const r = await handleAwaiting(awaiting, text, who);

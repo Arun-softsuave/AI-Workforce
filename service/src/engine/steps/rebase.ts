@@ -17,7 +17,7 @@ import { mergeData } from "../tasks.js";
 import { truncate } from "../../core/util.js";
 import { clients } from "../../connectors/registry.js";
 import * as G from "../../git/git.js";
-import { attributionHits } from "../../core/attribution.js";
+import { attributionHits, attributionInDiff } from "../../core/attribution.js";
 import { requestApproval, getApproval, decide, verifyBinding } from "../../approvals/approvals.js";
 import { notify } from "../../notify/router.js";
 import { untrusted } from "../../agents/runner.js";
@@ -232,6 +232,9 @@ export const REBASE_STEPS: Record<string, (ctx: StepCtx) => Promise<StepResult>>
       blocks,
     ].filter(Boolean).join("\n\n"), { cwd: wt, tools: ["Read", "Edit", "Write", "Grep", "Glob"], maxTurns: big ? 60 : 20 });
     const left = files.filter((f) => { try { return MARKERS.test(fs.readFileSync(path.join(wt, f.path), "utf8")); } catch { return true; } });
+    // M4: what the agent wrote into the resolved files must not mention AI / Claude (hard rule)
+    const marks = attributionInDiff(G.git(wt, ["diff", "HEAD", "--", ...names], { allowFail: true }));
+    if (marks.length) return stop(`The resolution mentioned AI authorship, so I stopped before committing (${marks.slice(0, 3).map((m) => m.file).join(", ")}).`);
     if (left.length) return stop(`I could not resolve every conflict safely (${left.length} file${left.length === 1 ? "" : "s"} still have conflict markers).`, left.map((f) => f.path));
     let commitError = "";
     for (const msg of messages) {

@@ -17,7 +17,7 @@ import { createTask, getTask, listTasks, mergeData, transition, updateTask, type
 import { ticketBlock, environmentFailure, costText, type StepCtx, type StepResult } from "./steps.js";
 import { resolvePrTargets } from "./targets.js";
 import { webApp, withBuiltApp, writeAppConfig } from "./screenshots.js";
-import { profileTestCommand, testEnvironment, testsNeedDatabase, liveStackFor, backendOf, LIVE_INSTRUCTIONS, withResults, testRunPassed } from "./localStack.js";
+import { profileTestCommand, suiteEnvironment, testsNeedDatabase, liveStackFor, backendOf, LIVE_INSTRUCTIONS, withResults, testRunPassed } from "./localStack.js";
 import { ensureProfile, profileOf } from "./testProfile.js";
 
 /**
@@ -131,13 +131,13 @@ export const QA_STEPS: Record<string, (ctx: StepCtx) => Promise<StepResult>> = {
     const plan = d.qaPlan ?? {};
     const runs: Record<string, any> = {};
     // 1) the repository's own tests for the changed areas (re-run once when they fail: flaky or real?).
-    //    A Python backend's tests get a TEMPORARY database (local PostgreSQL first, Docker second) – never the .env one.
+    //    Tests that need a database use the .env one (default) or a temporary one (workflow.testDatabase: temp).
     const files = safeFiles(wt, plan.testFiles ?? []);
     const py = testsNeedDatabase(ctx.project);
     const cmd = ctx.project.qa?.testCommand ?? profileTestCommand(ctx.project) ?? qaTestCommand(ctx.project);
     if (!cmd) runs.unit = { ran: false, why: profileOf(ctx.project).testCommand ? "no working runtime for its tests on this computer" : "no test command in this repository" };
     else {
-      const te = py ? await testEnvironment(ctx.project, wt, ctx.task.id) : { env: {} as Record<string, string>, where: "", cleanup: () => {} };
+      const te = py ? await suiteEnvironment(ctx.project, wt, ctx.task.id, ctx.settings.workflow.testDatabase === "temp" ? "temp" : "env") : { env: {} as Record<string, string>, where: "", cleanup: () => {} };
       if ("error" in te) runs.unit = { ran: false, environment: true, why: te.error };
       else {
         try {

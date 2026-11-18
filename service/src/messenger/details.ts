@@ -65,3 +65,34 @@ export function detailsNotice(ref: string): { kind: string; taskRef?: string; ti
   const d = detailsFor(ref);
   return { kind: "details", taskRef: ref === "digest" ? undefined : ref, title: d ? d.title : `${ref}: no details yet`, body: d ? d.text.trim() : `I have no details for ${ref} yet.`, dedupeKey: `details:${ref}:${Date.now()}` };
 }
+
+// ------------------------------------------------------------------ long chat replies (R-MSG)
+
+const MORE_KEY = "chat.moreText";
+/** Most lines of a chat reply before the rest waits behind "more" (questions and "more" itself are never cut). */
+export const CHAT_MAX_LINES = 12;
+
+/**
+ * A long reply (a status list, a long answer) is shortened to its first lines plus "say more"; the rest is kept
+ * (one at a time) and sent when you say "more". Replies with choices or questions are never cut.
+ */
+export function shortenReply(reply: string, maxLines = CHAT_MAX_LINES): string {
+  const lines = String(reply ?? "").split("\n");
+  if (lines.length <= maxLines + 3 || /\b(reply|say)\s+["“]?\d/i.test(reply) || /\?\s*$/.test(lines.slice(0, maxLines).join("\n").trim())) return reply;
+  const cut = maxLines;
+  const rest = lines.slice(cut).join("\n").trim();
+  if (!rest) return reply;
+  try { db().prepare("INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(MORE_KEY, rest); } catch { return reply; }
+  const n = rest.split("\n").filter((l) => l.trim()).length;
+  return `${lines.slice(0, cut).join("\n").trimEnd()}\n\n… ${n} more line${n === 1 ? "" : "s"} – say "more" (or open the dashboard).`;
+}
+
+/** "more": the rest of the last shortened reply (itself shortened again when still long). */
+export function moreReply(text: string): string | undefined {
+  if (!/^\s*(more|show more|the rest|continue)\s*[.!]?\s*$/i.test(text ?? "")) return undefined;
+  let rest: string | undefined;
+  try { rest = (db().prepare("SELECT value FROM meta WHERE key=?").get(MORE_KEY) as any)?.value; } catch { /* none */ }
+  if (!rest) return undefined;
+  try { db().prepare("DELETE FROM meta WHERE key=?").run(MORE_KEY); } catch { /* ignore */ }
+  return shortenReply(rest);
+}

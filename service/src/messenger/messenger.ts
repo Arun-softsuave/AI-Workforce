@@ -8,7 +8,7 @@ import { inMergeWindow, mergeKeyOf } from "./merge.js";
 /**
  * The Messenger (IMPLEMENTATION-PLAN W17, §5 5.17): sits inside notify/router.ts and decides, per external channel,
  * what a notice looks like and when it goes:
- *  - short templates: long bodies shrink to ≤ 10 lines with "details KAN-x" (questions are never shortened);
+ *  - short templates: long bodies shrink to ≤ 6 lines with "details KAN-x" (questions are never shortened);
  *  - 60 s merging of routine updates about the same item;
  *  - quiet hours: non-urgent messages are held and come back as ONE catch-up message (plus each open question);
  *  - the morning digest (digest.ts) and "details" (details.ts).

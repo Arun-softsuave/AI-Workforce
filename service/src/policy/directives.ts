@@ -213,7 +213,13 @@ export function chainOf(itemOrId: string | { id: string }): Node[] {
 export function precedenceOf(chain: Node[]): { scope: DirectiveScope; id: string | null }[] {
   const list: { scope: DirectiveScope; id: string | null }[] = [];
   // item: the item itself and any non-container parent (a part inherits its ticket's rules), nearest first
-  for (const n of chain) if (!CONTAINER[n.level] || n === chain[0]) list.push({ scope: "item", id: n.id });
+  for (const n of chain) {
+    if (!(!CONTAINER[n.level] || n === chain[0])) continue;
+    list.push({ scope: "item", id: n.id });
+    // a rule given before the item existed is stored under its key (KAN-60); a repo part "KAN-60@web" inherits it
+    const key = n.source_ref?.split("@")[0];
+    if (key && key !== n.id) list.push({ scope: "item", id: key });
+  }
   for (const s of ["batch", "epic", "sprint"] as const) for (const n of chain) if (n.level === s) list.push({ scope: s, id: n.id });
   list.push({ scope: "global", id: null });
   return list;

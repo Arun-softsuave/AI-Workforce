@@ -78,11 +78,12 @@ async function checkTests(p: ProjectConfig): Promise<ReadyItem[]> {
       : { area: "Tests", state: "fail", detail: `The project's Python (${env.brokenPython}) does not start, so tests can't run here.`, fix: "Repair the environment (e.g. `uv sync`), then `aiw ready " + p.id + "`." });
   }
   if (prof.database?.engine && prof.database.engine !== "none") {
-    const { testEnvironment } = await import("./localStack.js");
-    const t = await testEnvironment(p, p.local.path, "ready");
-    if ("error" in t) out.push({ area: "Test database", state: "fail", detail: `No safe temporary database: ${truncate(t.error, 300)}`, fix: "Start Docker Desktop, or give a local database login with `aiw qa database " + p.id + "` (in your own terminal)." });
+    const { suiteEnvironment } = await import("./localStack.js");
+    const mode = loadSettings().workflow.testDatabase === "temp" ? "temp" : "env";
+    const t = await suiteEnvironment(p, p.local.path, "ready", mode);
+    if ("error" in t) out.push({ area: "Test database", state: "fail", detail: `${mode === "env" ? "The .env database can't be used" : "No temporary database"}: ${truncate(t.error, 300)}`, fix: mode === "env" ? "Start the database the project's .env points at, then `aiw ready " + p.id + "`." : "Start Docker Desktop, or give a local database login with `aiw qa database " + p.id + "` (in your own terminal)." });
     else {
-      out.push({ area: "Test database", state: "ok", detail: `Tests get ${t.where} – never the .env database.` });
+      out.push({ area: "Test database", state: "ok", detail: `Tests use ${t.where}.` });
       // collect (not run) the tests with that environment: proves the runner and imports work
       if (/pytest/.test(prof.testCommand)) {
         const { profileTestCommand } = await import("./localStack.js");

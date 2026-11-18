@@ -211,7 +211,7 @@ export const FIX_STEPS: Record<string, (ctx: StepCtx) => Promise<StepResult>> = 
     if (!gh?.prForReview) return { status: "fail", reason: "GitHub is not connected" };
     const pr = await gh.prForReview(f.repo, f.num);
     if (pr.merged || pr.state !== "open") return { status: "fail", reason: `PR #${f.num} is ${pr.merged ? "merged" : pr.state} – nothing to fix` };
-    if (pr.headRepo && pr.headRepo.toLowerCase() !== f.repo.toLowerCase()) return { status: "fail", reason: `PR #${f.num} comes from a fork (${pr.headRepo}) – its branch can't be pushed from here` };
+    if (pr.headRepo && pr.headRepo.toLowerCase() !== f.repo.toLowerCase()) return { status: "fail", reason: `PR #${f.num} comes from a fork (${pr.headRepo}) – its branch can't be pushed from here. Say "review PR ${f.num}" and I'll review it instead.` };
     const me = await myLogin();
     if (me && pr.author.toLowerCase() !== me.toLowerCase() && !raisedHere(f.repo, f.num)) return { status: "fail", reason: `PR #${f.num} is ${pr.author}'s – only its author pushes fixes. Say "review PR ${f.num}" to review it instead.` };
 

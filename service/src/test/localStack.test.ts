@@ -3,7 +3,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
-import { saveSettings, DEFAULT_SETTINGS, upsertProject, normaliseProject, getProject } from "../core/config.js";
+import { saveSettings, DEFAULT_SETTINGS, upsertProject, normaliseProject, getProject, type Settings } from "../core/config.js";
 import { setSecret } from "../core/secrets.js";
 import { readDotEnv, parseDbUrl, redactUrl, demoAccount, isPythonBackend, testEnvironment, tempDatabase, setTempDatabaseFactory, liveStackFor } from "../engine/localStack.js";
 import { runTests, testCommandOf, type StepCtx } from "../engine/steps.js";
@@ -33,7 +33,9 @@ upsertProject(normaliseProject({ id: "api", group: "shop", local: { path: api, t
 const { repo: web } = makeRepo("web");
 upsertProject(normaliseProject({ id: "web", group: "shop", local: { path: web }, roles: ["frontend-developer"], autonomy: "prepare" }));
 
-const ctxFor = (projectId: string): StepCtx => ({ task: { id: "t_local", data: {}, source_ref: "KAN-1" } as unknown as Task, project: getProject(projectId)!, settings: DEFAULT_SETTINGS, runner: undefined as any, params: {}, usage: { tokensIn: 0, tokensOut: 0, cost: 0, agents: [] }, agent: undefined as any, save: () => ({}) as any });
+/** testDatabase "temp" = the temporary database mode; the default ("env") uses the .env database (your decision, 18 Nov). */
+const TEMP: Settings = { ...DEFAULT_SETTINGS, workflow: { ...DEFAULT_SETTINGS.workflow, testDatabase: "temp" } };
+const ctxFor = (projectId: string, settings: Settings = TEMP): StepCtx => ({ task: { id: "t_local", data: {}, source_ref: "KAN-1" } as unknown as Task, project: getProject(projectId)!, settings, runner: undefined as any, params: {}, usage: { tokensIn: 0, tokensOut: 0, cost: 0, agents: [] }, agent: undefined as any, save: () => ({}) as any });
 
 test(".env parsing and database URLs", () => {
   const env = readDotEnv(api);
@@ -45,7 +47,7 @@ test(".env parsing and database URLs", () => {
   assert.ok(!isPythonBackend(web));
 });
 
-test("test suites get a TEMPORARY database – never the .env one – and it is removed afterwards", async () => {
+test("testDatabase temp: test suites get a TEMPORARY database – never the .env one – and it is removed afterwards", async () => {
   let dropped = 0;
   setTempDatabaseFactory(async () => ({ where: "local", asyncUrl: "postgresql+asyncpg://u:p@127.0.0.1:5432/qa_temp_1", syncUrl: "postgresql://u:p@127.0.0.1:5432/qa_temp_1", cleanup: () => { dropped++; } }));
   const ctx = ctxFor("api");
@@ -61,7 +63,7 @@ test("test suites get a TEMPORARY database – never the .env one – and it is 
   if (!("error" in te)) te.cleanup();
 });
 
-test("no safe database (no local PostgreSQL, no Docker): the tests are NOT run at all", async () => {
+test("testDatabase temp, no safe database (no local PostgreSQL, no Docker): the tests are NOT run at all", async () => {
   setTempDatabaseFactory(undefined);
   fs.rmSync(path.join(api, "db-used.txt"), { force: true });
   const ctx = ctxFor("api");
@@ -70,6 +72,14 @@ test("no safe database (no local PostgreSQL, no Docker): the tests are NOT run a
   assert.ok(!fs.existsSync(path.join(api, "db-used.txt")), "the test command never ran against the .env database");
   const direct = await tempDatabase(getProject("api")!, "y");
   assert.ok("error" in direct);
+});
+
+test("default (.env database): the suite runs with the .env database; an unreachable one is an environment problem, nothing runs", async () => {
+  fs.rmSync(path.join(api, "db-used.txt"), { force: true });
+  const ctx = ctxFor("api", DEFAULT_SETTINGS);
+  const r = await runTests(ctx, testCommandOf(ctx)!, api);
+  assert.ok((r.envError ?? "").includes("the .env database (postgresql://***@db.shared.example:5432/nue_market) is not reachable"), String(r.envError));
+  assert.ok(!fs.existsSync(path.join(api, "db-used.txt")));
 });
 
 test("a frontend's tests are not touched (no database rewiring)", async () => {

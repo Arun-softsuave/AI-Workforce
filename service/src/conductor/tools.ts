@@ -341,14 +341,17 @@ export async function toolSetDirective(args: ToolArgs, ctx: ToolCtx): Promise<To
   if (!rule) return said(`I can't keep that as a rule ("${truncate(args.rule ?? "", 40)}"). I can: skip plan or PR approval, only touch an area, not touch something, fix CI or comments without asking, decide small questions myself.`, false);
   let scope = args.scope ?? (args.ref ? "item" : "global");
   let target = scope === "item" ? taskFor(args.ref ?? ctx.quotedItem ?? getFocus() ?? undefined) : undefined;
-  if (scope === "item" && !target) {
+  // a rule for a ticket that isn't here yet ("KAN-60: only backend, I'll start it later"): kept under its key and
+  // applied as soon as the ticket arrives (the policy matches an item by its key too)
+  const pendingKey = scope === "item" && !target && args.ref && /^[A-Z][A-Z0-9]+-\d+(@[\w.-]+)?$/i.test(args.ref.trim()) ? args.ref.trim().toUpperCase().replace(/@.*$/, "") : undefined;
+  if (scope === "item" && !target && !pendingKey) {
     if (args.ref) return said(`I can't find ${args.ref}.`, false);
     scope = "global";
   }
-  const r = setDirective(scope as any, target ? target.id : null, rule, args.value ?? "skip", ctx.fromMsg ?? null);
+  const r = setDirective(scope as any, target ? target.id : pendingKey ?? null, rule, args.value ?? "skip", ctx.fromMsg ?? null);
   if (!r.ok) return said(r.message, false);
   recordUndo({ kind: "directive", id: r.directive.id, text: r.echo, at: Date.now() });
-  const out = [r.echo];
+  const out = [pendingKey ? `${r.echo} (for ${pendingKey} once it arrives)` : r.echo];
   // the rule applies to the work that waits right now too (J6): "no need to ask for approval" approves the waiting plan
   const now = target ?? taskFor(ctx.quotedItem ?? getFocus() ?? undefined);
   const a = now ? latestApproval(now.id) : undefined;

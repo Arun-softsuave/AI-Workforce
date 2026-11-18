@@ -284,6 +284,8 @@ export async function pollTeamsCommands(force = false): Promise<number> {
 
 /** Post a reply (split when long), keep it in the chat history and remember each part's Teams id. */
 async function sendReply(client: TeamsPersonalClient, chat: string, botMode: boolean, reply: string, itemId?: string): Promise<void> {
+  // R-MSG: a long reply (status lists, long answers) is cut to its first lines; the rest comes on "more"
+  { const { shortenReply } = await import("../messenger/details.js"); reply = shortenReply(reply); }
   const sent: { part: string; r: Awaited<ReturnType<TeamsPersonalClient["sendMessage"]>> | undefined }[] = [];
   for (const part of splitMessage(reply)) sent.push({ part, r: await client.sendMessage(chat, botMode ? part : `${AIW_PREFIX}\n${part}`) });
   logChat("out", reply, { kind: "chat" });

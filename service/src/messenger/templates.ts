@@ -17,18 +17,18 @@ export interface KindTemplate {
 }
 
 export const TEMPLATES: Record<string, KindTemplate> = {
-  info:                 { routine: true,  maxLines: 10, label: "update" },
+  info:                 { routine: true,  maxLines: 6,  label: "update" },
   picked_up:            { routine: true,  maxLines: 6,  label: "picked up" },
   pr_comment:           { routine: true,  maxLines: 6,  label: "new PR comment" },
-  pr_created:           { routine: false, maxLines: 10, label: "PR raised" },
+  pr_created:           { routine: false, maxLines: 6,  label: "PR raised" },
   report_ready:         { routine: false, maxLines: 6,  label: "report ready" },
-  approval_needed:      { routine: false, maxLines: 10, label: "waiting for your OK" },
+  approval_needed:      { routine: false, maxLines: 6,  label: "waiting for your OK" },
   needs_info:           { routine: false, maxLines: 0,  label: "question" },
-  burst:                { routine: false, maxLines: 10, label: "start?" },
-  failed:               { routine: false, maxLines: 8,  label: "failed" },
-  paused:               { routine: false, maxLines: 8,  label: "paused" },
+  burst:                { routine: false, maxLines: 6,  label: "start?" },
+  failed:               { routine: false, maxLines: 6,  label: "failed" },
+  paused:               { routine: false, maxLines: 6,  label: "paused" },
   stale:                { routine: false, maxLines: 6,  label: "approval out of date" },
-  pr_changes_requested: { routine: false, maxLines: 8,  label: "changes requested" },
+  pr_changes_requested: { routine: false, maxLines: 6,  label: "changes requested" },
   connector_problem:    { routine: false, maxLines: 4,  label: "connection problem" },
   checkup:              { routine: false, maxLines: 0,  label: "daily check-up" },
   digest:               { routine: false, maxLines: 0,  label: "morning digest" },
@@ -37,7 +37,7 @@ export const TEMPLATES: Record<string, KindTemplate> = {
   merged:               { routine: false, maxLines: 0,  label: "updates" },
   catch_up:             { routine: false, maxLines: 0,  label: "while you were away" },
 };
-const DEFAULT_TEMPLATE: KindTemplate = { routine: false, maxLines: 10, label: "update" };
+const DEFAULT_TEMPLATE: KindTemplate = { routine: false, maxLines: 6, label: "update" };
 
 export const templateFor = (kind: string): KindTemplate => TEMPLATES[kind] ?? DEFAULT_TEMPLATE;
 
