@@ -1,3 +1,4 @@
+import { noteRateLimit, RATE_LIMITED } from "../kernel/slots.js";
 import fs from "node:fs";
 import path from "node:path";
 import { loadSettings, type Tier } from "../core/config.js";
@@ -169,11 +170,15 @@ export class ClaudeSdkRunner implements Runner {
       for await (const m of q as AsyncIterable<any>) if (m.type === "result") result = m;
       if (!result) return fail(model, "Agent ended without a result");
       const base = { ...splitUsage(result.usage), costUsd: result.total_cost_usd ?? 0, model, effort: opts.effort };
-      if (result.subtype !== "success" || result.is_error) return { ...base, ok: false, text: result.result ?? "", error: result.subtype };
+      if (result.subtype !== "success" || result.is_error) {
+        if (RATE_LIMITED.test(String(result.result ?? ""))) noteRateLimit();   // fewer slots for 10 minutes (kernel/slots.ts)
+        return { ...base, ok: false, text: result.result ?? "", error: result.subtype };
+      }
       const data = result.structured_output ?? (req.schema ? parseJsonLoose(result.result) : undefined);
       return { ...base, ok: !req.schema || data !== undefined, text: result.result ?? "", data, error: req.schema && data === undefined ? "no structured output" : undefined };
     } catch (e: any) {
       logger.error("agent run failed", { agent: req.agent, error: e.message });
+      if (RATE_LIMITED.test(String(e.message ?? ""))) noteRateLimit();
       return fail(model, e.message);
     } finally {
       clearTimeout(timer);

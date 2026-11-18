@@ -21,6 +21,7 @@
  *  8. at most `slots` running jobs in total                 → "all slots busy (5 of 5)"
  * Order of start: job priority, item priority (lower = more urgent), item due date (none last), then age.
  */
+import { slotPlan, LIGHT_JOBS } from "./slots.js";
 import { db, getMeta } from "../core/db.js";
 import { safeJson } from "../core/util.js";
 import { loadSettings, getProject, type Settings } from "../core/config.js";
@@ -135,7 +136,8 @@ export function decide(limits: SchedulerLimits, snap: SchedulerSnapshot): Decisi
   const waitingOn = new Map(snap.active.filter((j) => j.state === "waiting").map((j) => [j.item_id, j] as const));
   /** Build jobs taking a repo slot / an area: the running ones plus those started in this pass. */
   const building: Job[] = running.filter(isBuildJob);
-  let used = running.length;
+  // light jobs (git / GitHub only) never take a slot
+  let used = running.filter((j) => !LIGHT_JOBS.includes(j.type)).length;
 
   const start: Job[] = [];
   const held: Decision["held"] = [];
@@ -170,7 +172,7 @@ export function decide(limits: SchedulerLimits, snap: SchedulerSnapshot): Decisi
 
     // 3. retry later
     const retryAt = job.data?.retryAt ? new Date(job.data.retryAt).getTime() : 0;
-    if (retryAt && retryAt > now) { hold(job, "retry_later", `retrying at ${new Date(retryAt).toISOString().slice(11, 16)}`); continue; }
+    if (retryAt && retryAt > now) { hold(job, "retry_later", job.data?.laterReason ? String(job.data.laterReason) : `retrying at ${new Date(retryAt).toISOString().slice(11, 16)}`); continue; }
 
     // 4. one active job per item
     if (busyItems.has(job.item_id)) { hold(job, "item_busy", "waiting for its current job"); continue; }
@@ -208,10 +210,11 @@ export function decide(limits: SchedulerLimits, snap: SchedulerSnapshot): Decisi
     }
 
     // 8. slots
-    if (used >= limits.slots) { hold(job, "slots", `all slots busy (${used} of ${limits.slots})`); continue; }
+    const light = LIGHT_JOBS.includes(job.type);
+    if (!light && used >= limits.slots) { hold(job, "slots", `all slots busy (${used} of ${limits.slots})`); continue; }
 
     start.push(job);
-    used++;
+    if (!light) used++;
     busyItems.add(job.item_id);
     if (build) building.push(job);
   }
@@ -292,6 +295,7 @@ void _pickRunnableMatchesContract;
 /** Limits from settings: slots = limits.maxParallel, buildsPerRepo = limits.maxPerProject, the rest DEFAULT_LIMITS. */
 export const limitsFrom: LimitsFrom = (settings: Settings) => ({
   ...DEFAULT_LIMITS,
-  slots: Math.max(1, Number(settings?.limits?.maxParallel) || DEFAULT_LIMITS.slots),
+  // dynamic: the cap (limits.maxParallel) lowered by budget, rate limits and this computer (kernel/slots.ts)
+  slots: slotPlan(settings).slots,
   buildsPerRepo: Math.max(1, Number(settings?.limits?.maxPerProject) || DEFAULT_LIMITS.buildsPerRepo),
 });

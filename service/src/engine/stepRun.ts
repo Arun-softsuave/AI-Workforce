@@ -55,6 +55,19 @@ export function keepWorkspace(task: Task, ctx: StepCtx): void {
 export function applyTicketChange(task: Task, pb: { steps: { name: string }[] }): Task {
   const change = task.data.ticketChange;
   if (!change) return task;
+  // C7: once building has started, a major change is OFFERED ("adapt?") – the build goes on as planned unless you say
+  // "adapt KAN-x"; before building it is simply taken (re-planned from the new text)
+  const implAt = pb.steps.findIndex((s) => s.name === "implement_test" || s.name === "run_parts");
+  if (change === "major" && implAt >= 0 && task.step_index > implAt) {
+    if (!task.data.adaptOffered) {
+      mergeData(task.id, { ticketChange: null, adaptOffered: new Date().toISOString() });
+      import("./adapt.js").then(({ offerAdapt }) => {
+        const o = offerAdapt(getTask(task.id) ?? task);
+        return notify({ kind: "info", taskId: task.id, taskRef: task.source_ref ?? undefined, dedupeKey: `adapt?:${task.id}:${task.data.pendingTicket?.description?.length ?? 0}`, title: o.title, body: o.body });
+      }).catch(() => {});
+    } else mergeData(task.id, { ticketChange: null });
+    return getTask(task.id)!;
+  }
   const patch: Record<string, any> = { ticket: task.data.pendingTicket ?? task.data.ticket, ticketChange: null, pendingTicket: null };
   if (change === "major") {
     const restart = Math.max(0, pb.steps.findIndex((s) => s.name === "context_pack"));

@@ -13,7 +13,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { audit } from "../../core/db.js";
-import { mergeData } from "../tasks.js";
+import { mergeData, getTask } from "../tasks.js";
 import { truncate } from "../../core/util.js";
 import { clients } from "../../connectors/registry.js";
 import * as G from "../../git/git.js";
@@ -127,7 +127,9 @@ export const REBASE_STEPS: Record<string, (ctx: StepCtx) => Promise<StepResult>>
     const info = { mode, repo: pr0.repo, num: pr0.num, url: pr.url, branch: pr.headRef, base, headSha, baseRefName: baseRef, headRefName: headRef };
     if (mode === "new_commits") {
       // our own folder of the item (the build's): only work that was never pushed has to move on top of their commits
-      const wt = ctx.task.worktree && fs.existsSync(ctx.task.worktree) ? ctx.task.worktree : undefined;
+      // (a job's view hides the item's folder – read it from the item itself)
+      const own = ctx.task.worktree ?? getTask(ctx.task.id)?.worktree ?? undefined;
+      const wt = own && fs.existsSync(own) ? own : undefined;
       const ahead = wt ? Number(G.git(wt, ["rev-list", "--count", `${headSha}..HEAD`], { allowFail: true }) || "0") : 0;
       ctx.save({ rebase: { ...info, wt: wt ?? null, ahead } });
       return done(ahead ? `${ahead} local commit(s) to put on top` : "nothing local to move");

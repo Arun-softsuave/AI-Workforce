@@ -84,12 +84,12 @@ function raisedHere(repo: string, num: number): boolean {
 /** comments = review comments AND failing CI checks · ci = failing CI checks only · issues = QA's GitHub issues */
 export type FixMode = "comments" | "issues" | "ci" | "requests";
 
-export function startFixTask(project: ProjectConfig, repo: string, num: number, by: string, via: string, opts: { mode?: FixMode; issues?: number[]; requests?: string[]; ciRound?: number } = {}): { task: Task; existing: boolean } {
+export function startFixTask(project: ProjectConfig, repo: string, num: number, by: string, via: string, opts: { mode?: FixMode; issues?: number[]; requests?: string[]; ciRound?: number; explicit?: boolean } = {}): { task: Task; existing: boolean } {
   const sourceId = `fix:${repo}#${num}`;
   const before = listTasks({ states: ["TRIAGED", "QUEUED", "RUNNING", "NEEDS_INFO", "AWAITING_APPROVAL", "PAUSED", "REJECTED", "STALE"] }).find((t) => t.source_id === sourceId);
   if (before) return { task: before, existing: true };
   const t = createTask({ projectId: project.id, source: via, sourceId, sourceRef: `FIX-${num}@${project.id}`, title: `Fixes for ${repo}#${num}`, kind: "pr_fix", state: "TRIAGED",
-    data: { fix: { repo, num, by, via, mode: opts.mode ?? "comments", issues: opts.issues ?? [], requests: opts.requests ?? [], ciRound: opts.ciRound ?? 1, requestedAt: new Date().toISOString() } } });
+    data: { fix: { repo, num, by, via, mode: opts.mode ?? "comments", issues: opts.issues ?? [], requests: opts.requests ?? [], ciRound: opts.ciRound ?? 1, requestedAt: new Date().toISOString(), ...(opts.explicit ? { explicit: true } : {}) } } });
   updateTask(t.id, { playbook: "pr-fix", size: "S" });
   transition(t.id, "QUEUED", `fixes requested by ${by}`);
   audit(`user:${by}`, "fix.requested", t.id, { repo, num, mode: opts.mode ?? "comments" });
@@ -112,7 +112,7 @@ export async function startFixFromText(text: string, ticketRef: string | undefin
     }
     const issues = mode === "issues" ? qaIssuesOf(x) : [];
     if (mode === "issues" && !issues.length) { lines.push(`- PR #${x.num} (${x.project.id}): no open QA issues I created for it.`); continue; }
-    const { task, existing } = startFixTask(x.project, x.repo, x.num, by, via, { mode, issues });
+    const { task, existing } = startFixTask(x.project, x.repo, x.num, by, via, { mode, issues, explicit: true });
     if (!existing) started++;
     lines.push(existing ? `- PR #${x.num} (${x.project.id}) – already in progress (${task.source_ref})` : `- PR #${x.num} in ${x.repo} – ${task.source_ref}`);
   }
@@ -478,6 +478,8 @@ export const FIX_STEPS: Record<string, (ctx: StepCtx) => Promise<StepResult>> = 
     // rails (protected branch, secrets, local-only files) refuse; protected paths always ask. The older item-level
     // "no approvals" flag does the same for comment fixes.
     const { canPush } = await import("../policy/gate.js");
+    // comment and QA fixes are shown to you first (your rule) unless you set "resolve comments without asking";
+    // CI fixes follow auto_fix_ci (pushed straight away by default)
     const g = canPush(ctx.task.id, { branch: d.prHeadRef, files: d.baseSha ? G.changedFiles(wt, d.baseSha) : [], purpose: d.fix?.mode === "ci" ? "ci_fix" : "comment_fix" });
     if (g.verdict === "deny") return { status: "fail", reason: g.reason };
     const byPolicy = g.verdict === "allow" || !!d.directives?.no_approvals;

@@ -123,6 +123,20 @@ async function startRequest(t: Task): Promise<Task> {
 
 /** Choose the playbook and move a triaged task to its next state (shared by lead and sibling tasks). */
 async function afterTriage(t: Task, project: ProjectConfig, size: string, clear: boolean, questions: Question[], playbook?: string): Promise<Task> {
+  // O4: a triage question already answered (same words or the same question re-worded, this ticket or a wider scope)
+  // is never asked again – its answer goes in as a clarification
+  if (questions.length) {
+    try {
+      const { findDecision } = await import("../knowledge/decisions.js");
+      const known = questions.map((q) => ({ q, d: findDecision(t.id, q.question) }));
+      const reuse = known.filter((x) => x.d);
+      if (reuse.length) {
+        mergeData(t.id, { clarifications: [...(t.data.clarifications ?? []), ...reuse.map((x) => ({ questions: [x.q.question], answer: x.d!.answer, reply: x.d!.answer, by: "decision log", at: new Date().toISOString() }))] });
+        questions = known.filter((x) => !x.d).map((x) => x.q);
+        if (!questions.length) clear = true;
+      }
+    } catch { /* the log is optional */ }
+  }
   const settings = loadSettings();
   let pb = playbook ?? playbookFor(t.kind, size) ?? "dev-feature";
   // "plan" autonomy means: always get approval before implementing – the fast lane has no plan step, so use the full playbook.
@@ -190,6 +204,11 @@ export async function tick(): Promise<void> {
         transition(t.id, "STALE", "approval expired");
         await notify({ kind: "stale", taskId: t.id, taskRef: t.source_ref ?? undefined, dedupeKey: a.id, title: `${t.source_ref}: approval expired`, body: `Say "refresh ${t.source_ref}" here (or click Refresh on the dashboard): I check it again and ask you once more.` });
       }
+    }
+    // J7: tickets you paused "until Monday" come back by themselves at that time
+    for (const t of listTasks({ states: ["PAUSED"] }).filter((x) => x.data.pausedUntil && new Date(x.data.pausedUntil).getTime() <= Date.now())) {
+      mergeData(t.id, { pausedByUser: null, pausedWith: null, pausedUntil: null });
+      if (resumeTask(t.id)) audit("service", "task.resumed_on_time", t.id, {});
     }
     // Paused = no AI work at all: new tickets are only recorded (DETECTED) and triaged after resume.
     if (isPaused()) return;
@@ -347,6 +366,9 @@ export async function runTask(taskId: string): Promise<Task> {
         return pause(task, result.reason);
       case "fail":
         return fail(task, result.reason);
+      case "later":
+        mergeData(task.id, { retryAt: result.retryAt, waitingFor: result.reason });
+        return transition(task.id, "QUEUED", result.reason);
     }
   }
   return finish(task);

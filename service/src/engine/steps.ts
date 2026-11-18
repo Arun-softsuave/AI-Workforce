@@ -66,6 +66,8 @@ export type StepResult =
   | { status: "pause"; reason: string }
   | { status: "fail"; reason: string }
   | { status: "done"; note?: string }
+  /** Not yet – try this same step again at retryAt (e.g. another ticket is changing the same files right now). */
+  | { status: "later"; reason: string; retryAt: string }
   /** Multi-repository work: the lead waits for its parts (WAITING_PARTS), a finished part waits for the lead (PART_READY). */
   | { status: "wait"; state: "WAITING_PARTS" | "PART_READY"; note?: string };
 
@@ -367,6 +369,57 @@ function reportDiffRaw(ctx: StepCtx): string {
   const wt = ctx.task.worktree, base = ctx.task.data.baseSha;
   if (!wt || !base || !fs.existsSync(wt)) return "";
   try { return G.diffAgainst(wt, base); } catch { return ""; }
+}
+
+/**
+ * L2 / B8: before building, another ticket changing the same files in this repository either goes first (this one waits
+ * and says so) or – when its PR is already open – this one is stacked on its branch. Checked once per build.
+ */
+async function overlapCheck(ctx: StepCtx, wt: string): Promise<StepResult | undefined> {
+  if (ctx.task.data.overlapChecked || ctx.task.kind === "pr_fix") return undefined;
+  const { areasFromFiles, overlappingItem, setAreas, stackOn } = await import("./overlap.js");
+  const areas = areasFromFiles(ctx.task.data.plan?.files ?? []);
+  if (!areas.length) { ctx.save({ overlapChecked: true }); return undefined; }
+  const hit = overlappingItem(ctx.task as any, areas);
+  const ref = ctx.task.source_ref ?? ctx.task.id;
+  if (hit && !hit.prOpen) {
+    const reason = `waiting for ${hit.ref} – it is changing the same files right now`;
+    await notify({ kind: "info", taskId: ctx.task.id, taskRef: ref, dedupeKey: `overlap:${ctx.task.id}:${hit.id}`, title: `⏳ ${ref} waits for ${hit.ref}`,
+      body: `Both change ${areas.slice(0, 3).join(", ")} in ${ctx.project.id}. I build ${ref} as soon as ${hit.ref}'s PR is raised (stacked on it), so the two never clash.` }).catch(() => {});
+    return { status: "later", reason, retryAt: new Date(Date.now() + 10 * 60_000).toISOString() };
+  }
+  if (hit?.prOpen && hit.branch && G.headSha(wt) === ctx.task.data.baseSha) {
+    const repo = ctx.project.local.path;
+    const target = G.resolveBase(repo, hit.branch);
+    G.git(wt, ["reset", "--hard", "-q", target.ref]);
+    ctx.save({ stackBase: { branch: hit.branch, ref: hit.ref, item: hit.id }, baseSha: target.sha, baseRef: target.ref });
+    stackOn(ctx.task.id, hit);
+    await notify({ kind: "info", taskId: ctx.task.id, taskRef: ref, dedupeKey: `stacked:${ctx.task.id}:${hit.id}`, title: `🧱 ${ref} is built on top of ${hit.ref}`,
+      body: `They change the same files, and ${hit.ref}'s PR is still open – so ${ref}'s PR will target ${hit.branch}. When ${hit.ref} merges I move it to the base branch.` }).catch(() => {});
+  }
+  setAreas(ctx.task.id, areas);
+  ctx.save({ overlapChecked: true });
+  return undefined;
+}
+
+/**
+ * C5: claims from the ticket, the PRD and Figma that disagree (the analyst lists them) → questions with options, the
+ * recommended source first (Figma for how it looks, the ticket for behaviour). Topics already decided are skipped.
+ */
+async function sourceConflictQuestions(ctx: StepCtx, claims: unknown): Promise<{ question: string; options: string[] }[]> {
+  if (!Array.isArray(claims) || claims.length < 2) return [];
+  const { findConflicts } = await import("../knowledge/askDesk.js");
+  const valid = claims.filter((c: any) => c && typeof c.topic === "string" && typeof c.value === "string" && /^(ticket|prd|figma|code)$/i.test(String(c.source)))
+    .map((c: any) => ({ topic: c.topic, source: String(c.source).toLowerCase(), value: c.value }));
+  const asked = new Set((ctx.task.data.clarifications ?? []).map((x: any) => String(x.question ?? x.q ?? "").toLowerCase()));
+  const out = findConflicts(valid).map((c) => {
+    const best = c.claims.find((x) => x.source === c.recommend)!;
+    const others = c.claims.filter((x) => x !== best);
+    return { question: `${c.topic}: ${c.claims.map((x) => `the ${x.source === "prd" ? "PRD" : x.source === "figma" ? "design" : x.source} says ${x.value}`).join(", ")}. Which is right? (I'd follow the ${c.recommend === "prd" ? "PRD" : c.recommend === "figma" ? "design" : c.recommend} – ${c.why}.)`,
+      options: [`${best.value} (${best.source})`, ...others.map((x) => `${x.value} (${x.source})`)] };
+  }).filter((q) => !asked.has(q.question.toLowerCase()));
+  if (out.length) ctx.save({ sourceConflicts: out.map((q) => q.question) });
+  return out;
 }
 
 /** Run the project's detected lint / format / type checks on the changed files. */
@@ -870,7 +923,9 @@ export const STEPS: Record<string, StepFn> = {
     ctx.save({ requirements: r.data });
     docWrite(() => writeUnderstanding(ctx.task, { requirements: r.data, findings }));
     noteCode(ctx.task, findings, { [ctx.project.id]: ctx.task.worktree ?? ctx.project.local.path });
-    const open = normaliseQuestions(r.data.openQuestions, 3);
+    // C5: the ticket, PRD and Figma disagree – one question per topic, the recommended source first (askDesk rules)
+    const conflictQs = await sourceConflictQuestions(ctx, r.data.sourceClaims);
+    const open = normaliseQuestions([...conflictQs, ...(r.data.openQuestions ?? [])], 3);
     if (open.length && clarifyRoundsLeft(ctx.task, ctx.settings) > 0) return { status: "need_info", questions: open, context: "While analysing the requirements" };
     if (open.length) ctx.save({ assumptions: questionTexts(open) });   // cap reached: proceed, but say so in the plan
     return { status: "ok" };
@@ -949,6 +1004,7 @@ export const STEPS: Record<string, StepFn> = {
   async implement_test(ctx) {
     { const missing = needWorkspace(ctx); if (missing) return missing; }
     const wt = ctx.task.worktree!;
+    { const r = await overlapCheck(ctx, wt); if (r) return r; }
     // Tests that cannot run on this computer don't stop the work: build anyway and say so clearly (settings.workflow.untestedWork).
     const testCmd = ctx.task.data.testsUnavailable ? undefined : testCommandOf(ctx);
     const loops = ctx.settings.limits.implementLoops;
@@ -991,7 +1047,15 @@ export const STEPS: Record<string, StepFn> = {
         lastFailure = `You asked:\n${questionTexts(asked).map((q) => `- ${q}`).join("\n")}\nNo more questions can be asked for this task – use your recommended (first) option for each, finish the change and mention the assumption in your summary.`;
         continue;
       }
-      commitWithConvention(ctx, wt, String(r.data.commitSubject || r.data.summary || "implement change").split("\n")[0]);
+      // E11: the team's git hook refused the commit – the agent fixes what the hook reports in the next round (never skipped)
+      try { commitWithConvention(ctx, wt, String(r.data.commitSubject || r.data.summary || "implement change").split("\n")[0]); }
+      catch (e: any) {
+        const out = String(e?.message ?? e);
+        if (!/hook|pre-commit|commit-msg|Failed|exit code/i.test(out)) throw e;
+        audit("service", "build.hook_failed", ctx.task.id, { attempt: i, output: truncate(out, 400) });
+        lastFailure = `The repository's git hook refused the commit. Fix exactly what it reports (do not disable or skip the hook):\n${truncate(out.replace(/^git \S+ failed:\s*/i, ""), 4000)}`;
+        continue;
+      }
       if (!G.changedFiles(wt, ctx.task.data.baseSha).length) { lastFailure = "No files were changed."; continue; }
       // The team's lint / format / type checks are part of "done", just like the tests.
       const checks = await runChecks(ctx, wt);

@@ -1,7 +1,8 @@
 import fs from "node:fs";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
-import { audit, db } from "../core/db.js";
+import { audit, db, getMeta } from "../core/db.js";
+import { clients } from "../connectors/registry.js";
 import { updateItem } from "../kernel/items.js";
 import { truncate } from "../core/util.js";
 import { loadSettings, updateSettings, loadProjects, upsertProject, engineVersion, type ProjectConfig, type TeamMember } from "../core/config.js";
@@ -170,16 +171,48 @@ async function startOne(key: string, args: ToolArgs, ctx: ToolCtx): Promise<Star
   if (ix && !ix.mine && ix.assignee && !args.takeOver && !ctx.confirmed) {
     return { kind: "ask", ask: { question: `${k} is ${ix.assignee}'s. Take it over?`, calls: [{ tool: "start", args: { ref: k, takeOver: true, again: args.again } }] } };
   }
+  // B5 for a ticket not in the index yet: its assignee from Jira itself
+  let owner = ix?.assignee;
+  if (!ix && !args.takeOver && !ctx.confirmed) {
+    try {
+      const i = await clients.jira()?.getIssue(k);
+      const me = getMeta("jira.accountId");
+      if (i?.assignee && me && i.assignee !== me) {
+        owner = i.assigneeName ?? "someone else";
+        return { kind: "ask", ask: { question: `${k} is ${owner}'s. Take it over?`, calls: [{ tool: "start", args: { ref: k, takeOver: true, again: args.again } }] } };
+      }
+    } catch { /* Jira unreachable: the start itself reports it */ }
+  }
   try {
     const t = await runTicket(k);
-    if (args.takeOver && ix?.assignee) mergeData(t.id, { takenOverFrom: ix.assignee });
+    if (args.takeOver && owner) mergeData(t.id, { takenOverFrom: owner });
     recordUndo({ kind: "start", itemId: t.id, ref: refOf(t), at: Date.now() });
     return { kind: "new", ref: refOf(t), title: t.title ?? "" };
   } catch (e: any) { return { kind: "error", detail: e.message }; }
 }
 
 /** Words that ask for several tickets as one batch (W7) rather than side by side. */
+/** "do them separately": several tickets started each on its own (no batch). */
+export const SEPARATE_WORDS = /\b(separately|each on (its|their) own|independently|one by one|not (as )?a batch)\b/i;
 export const BATCH_WORDS = /\b(as (a|one) batch|batch|together|in (the right )?order|one plan|stack(ed)?|depends? on|dependenc(y|ies)|merge order)\b/i;
+
+/** B2: open tickets of the configured Jira projects whose title or description has the words (best few first). */
+async function jiraTextSearch(text: string): Promise<{ key: string; title: string }[]> {
+  if (/\(new work, no ticket\)$/.test(text)) return [];
+  const jira = clients.jira();
+  const keys = [...new Set(loadProjects().flatMap((p) => p.jira?.keys ?? []))];
+  const words = text.toLowerCase().replace(/\b(do|start|work on|build|the|a|an|task|ticket|story|please|for|on|of|to|and|it)\b/g, " ").replace(/[^\p{L}\p{N}\s-]/gu, " ").split(/\s+/).filter((w) => w.length > 2).slice(0, 6);
+  if (!jira || !keys.length || !words.length) return [];
+  const q = words.join(" ").replace(/"/g, "");
+  const jql = `project in (${keys.join(",")}) AND statusCategory != Done AND text ~ "${q}" ORDER BY updated DESC`;
+  try {
+    const found = await jira.search(jql, 10);
+    // all the words in the title beats a description match
+    const score = (t: string) => words.filter((w) => t.toLowerCase().includes(w)).length;
+    return found.map((i) => ({ key: i.key, title: i.title, s: score(i.title) })).sort((a, b) => b.s - a.s)
+      .filter((x, _, all) => x.s >= Math.max(1, all[0].s) || all[0].s === 0).slice(0, 3).map(({ key, title }) => ({ key, title }));
+  } catch { return []; }
+}
 
 /** Start one or more tickets ("plan for KAN-42", "work on KAN-60, KAN-61 and KAN-62", "do the invite email task"). */
 export async function toolStart(args: ToolArgs, ctx: ToolCtx): Promise<ToolResult> {
@@ -193,7 +226,14 @@ export async function toolStart(args: ToolArgs, ctx: ToolCtx): Promise<ToolResul
       return asking(f.question, { options: f.matches.slice(0, 3).map((m) => ({ label: m.ref, key: m.ref, calls: [{ tool: "start", args: { ref: m.ref, takeOver: args.takeOver } }] })) });
     }
     if (tickets.length) keys = tickets.map((m) => m.ref);
-    else return startRequest(text, args, ctx);
+    else {
+      // B2: not in the recent-ticket index – search Jira by its words (title and description) before treating it as new work
+      const hits = await jiraTextSearch(text);
+      if (hits.length === 1) keys = [hits[0].key];
+      else if (hits.length > 1) return asking(`Which ticket do you mean? ${hits.slice(0, 3).map((h, n) => `${n + 1}. ${h.key} – ${truncate(h.title, 60)}`).join(" · ")} – or "new" for new work without a ticket.`,
+        { options: [...hits.slice(0, 3).map((h) => ({ label: h.key, key: h.key, calls: [{ tool: "start" as const, args: { ref: h.key, takeOver: args.takeOver } }] })), { label: "new", key: "new", calls: [{ tool: "start" as const, args: { text: `${text} (new work, no ticket)` } }] }] });
+      else return startRequest(text, args, ctx);
+    }
   }
   if (!keys.length) return said("Which ticket? For example: plan for KAN-42");
   if (keys.length === 1) {
@@ -209,12 +249,18 @@ export async function toolStart(args: ToolArgs, ctx: ToolCtx): Promise<ToolResul
   }
   // W7 (engine v2): several tickets asked for TOGETHER ("as a batch", "in order", "they depend on each other") become ONE
   // batch – overlap check, waves, stacked PRs, merge order, one approval. A plain list still starts each ticket on its own.
-  if (engineVersion() === "v2" && keys.length >= 2 && !args.separately && BATCH_WORDS.test(`${ctx.original} ${text}`)) {
+  // W7 (engine v2): several tickets asked for TOGETHER ("as a batch", "in order", "they depend on each other") become ONE
+  // batch – waves, stacked PRs, merge order, one approval. A plain list starts each ticket on its own; tickets that turn
+  // out to change the same files then wait for each other or stack automatically when building starts (engine/overlap.ts).
+  if (engineVersion() === "v2" && keys.length >= 2 && !args.separately && !SEPARATE_WORDS.test(`${ctx.original} ${text}`) && BATCH_WORDS.test(`${ctx.original} ${text}`)) {
     const { startBatch } = await import("../engine/steps/scope.js");
     const r = await startBatch(keys, ctx.who, ctx.original);
-    if (r.itemId) { const t = getTask(r.itemId); if (t) setFocus(refOf(t)); await tick(); }
-    if (r.ask) return { ok: r.ok !== false, reply: r.reply, ask: { question: r.ask.question, calls: r.ask.calls as ToolCall[] } };
-    return said(r.reply, r.ok !== false);
+    if (r.ok !== false || BATCH_WORDS.test(`${ctx.original} ${text}`)) {
+      if (r.itemId) { const t = getTask(r.itemId); if (t) setFocus(refOf(t)); await tick(); }
+      if (r.ask) return { ok: r.ok !== false, reply: r.reply, ask: { question: r.ask.question, calls: r.ask.calls as ToolCall[] } };
+      return said(r.reply, r.ok !== false);
+    }
+    // the batch could not be read (e.g. Jira is down): start them one by one below
   }
   // several tickets: each becomes its own item with its own plan, questions and PR – worked on side by side
   const lines: string[] = [];
@@ -327,8 +373,16 @@ export async function toolDecide(args: ToolArgs, ctx: ToolCtx): Promise<ToolResu
     if (change.length < 3) return asking(`What should I change for ${ref}?`);
     mergeData(t.id, { planChanges: [...(t.data.planChanges ?? []), { text: change, by: ctx.who, at: new Date().toISOString() }] });
     try { const { addDecision } = await import("../knowledge/designDoc.js"); addDecision(t.id, "Change asked when approving", change, ctx.who); } catch { /* no design document yet */ }
-    const r = await decideAndApply(ref, "approved", ctx.who, "teams-personal");
-    return said(r.ok ? `✅ Approved ${ref} with your change: "${truncate(change, 120)}". Building now.` : r.message, r.ok);
+    // the plan is made again WITH the change (once), then building starts – no second approval round
+    const { decideWithChange } = await import("../approvals/approvals.js");
+    const { applyDecision } = await import("../engine/engine.js");
+    const d = decideWithChange(ref, change, ctx.who, ctx.channel ?? "teams-personal");
+    if (!d.ok) return said(d.message, false);
+    await applyDecision(d.approval);
+    await tick();
+    return said(d.replan
+      ? `✅ Approved ${ref} with your change: "${truncate(change, 120)}". I'm updating the plan with it, then building – the updated plan comes here for information, no second approval.`
+      : `✅ Approved ${ref} with your change: "${truncate(change, 120)}".`);
   }
   const r = await decideAndApply(ref, "approved", ctx.who, "teams-personal");
   return said(r.message, r.ok);
@@ -364,7 +418,8 @@ export async function toolSetDirective(args: ToolArgs, ctx: ToolCtx): Promise<To
   return said(out.join("\n"));
 }
 
-const PREFS: Record<string, { path: string[]; kind: "bool" | "enum" | "text"; values?: string[]; text: (v: any) => string }> = {
+const PREFS: Record<string, { path: string[]; kind: "bool" | "enum" | "text" | "number"; values?: string[]; min?: number; max?: number; text: (v: any) => string }> = {
+  "limits.maxParallel": { path: ["limits", "maxParallel"], kind: "number", min: 1, max: 16, text: (v) => `at most ${v} AI jobs at once (fewer when the budget, a rate limit or this computer needs it)` },
   "pr.draft": { path: ["pr", "draft"], kind: "bool", text: (v) => v ? "raise draft PRs" : "raise normal (ready for review) PRs" },
   "pr.autoFixCi": { path: ["pr", "autoFixCi"], kind: "bool", text: (v) => v ? "fix failing CI without asking" : "show CI fixes before pushing" },
   "pr.autoReview": { path: ["pr", "autoReview"], kind: "bool", text: (v) => v ? "review teammates' PRs as soon as I'm asked" : "tell you about review requests and wait" },
@@ -381,7 +436,8 @@ const PREFS: Record<string, { path: string[]; kind: "bool" | "enum" | "text"; va
   "profile.workingHours": { path: ["profile", "workingHours"], kind: "text", text: (v) => `working hours ${v}` },
 };
 const PREF_ALIASES: Record<string, string> = { draft: "pr.draft", draft_pr: "pr.draft", draft_prs: "pr.draft", quiet_hours: "notifications.quietHours", digest: "notifications.digestTime", working_hours: "profile.workingHours",
-  plan_approval: "workflow.planApproval", pr_approval: "workflow.prApproval", auto_fix_ci: "pr.autoFixCi", auto_review: "pr.autoReview", report: "workflow.ticketReport" };
+  plan_approval: "workflow.planApproval", pr_approval: "workflow.prApproval", auto_fix_ci: "pr.autoFixCi", auto_review: "pr.autoReview", report: "workflow.ticketReport",
+  slots: "limits.maxParallel", max_parallel: "limits.maxParallel", parallel: "limits.maxParallel", agents: "limits.maxParallel" };
 
 function boolOf(v: unknown): boolean | undefined {
   const s = String(v ?? "").trim().toLowerCase();
@@ -396,10 +452,14 @@ export function toolPrefs(args: ToolArgs, ctx: ToolCtx): ToolResult {
   if (/^team\.(add|remove)$/i.test(key)) return teamChange(key.toLowerCase().endsWith("add") ? "add" : "remove", args);
   const k = PREFS[key] ? key : PREF_ALIASES[key.toLowerCase().replace(/[\s-]+/g, "_")];
   const spec = k ? PREFS[k] : undefined;
-  if (!spec || !k) return said(`I can't change "${truncate(key, 40)}" from the chat. I can change: draft PRs, CI auto-fix, review posting, QA issues, plan/PR approval, quiet hours, digest time, working hours, the team.`, false);
+  if (!spec || !k) return said(`I can't change "${truncate(key, 40)}" from the chat. I can change: slots ("use 4 slots"), draft PRs, CI auto-fix, review posting, QA issues, plan/PR approval, quiet hours, digest time, working hours, the team.`, false);
   let value: any = args.value;
   if (spec.kind === "bool") { value = boolOf(args.value); if (value === undefined) return said(`Should ${spec.text(true)} be on or off?`, false); }
   if (spec.kind === "enum" && !spec.values!.includes(String(value))) return said(`${k} can be ${spec.values!.join(", ")}.`, false);
+  if (spec.kind === "number") {
+    value = Number(String(value ?? "").replace(/[^\d]/g, ""));
+    if (!Number.isInteger(value) || value < (spec.min ?? 0) || value > (spec.max ?? 1e9)) return said(`Give a number from ${spec.min} to ${spec.max}.`, false);
+  }
   if (spec.kind === "text") {
     value = String(value ?? "").trim();
     if (!/^(off|\d{1,2}:\d{2}(-\d{1,2}:\d{2})?)$/.test(value)) return said(`Please give a time like 09:00 or a range like 22:00-07:00${k === "notifications.quietHours" ? ", or off" : ""}.`, false);
@@ -457,18 +517,30 @@ export async function toolControl(args: ToolArgs, ctx: ToolCtx): Promise<ToolRes
   if (!all && !t && action !== "undo") return said(`I can't find ${args.ref}.`, false);
   switch (action) {
     case "pause": {
+      // J7: "until Monday" / "for 2 hours" / "until 14:00" become a real time (not understood → until you say resume)
+      const { parseUntil, untilLabel } = await import("../core/until.js");
+      const untilIso = args.until ? parseUntil(args.until, new Date(), String(loadSettings().profile?.workingHours ?? "09:00").split("-")[0]) : undefined;
+      const untilText = untilIso ? ` until ${untilLabel(untilIso)}` : "";
+      const notUnderstood = args.until && !untilIso ? ` (I didn't understand "${truncate(args.until, 30)}" as a time, so until you say resume)` : "";
       if (!t) {
-        pauseAll(args.until);
+        pauseAll(untilIso);
         recordUndo({ kind: "pause", all: true, at: Date.now() });
-        return said(`⏸️ Paused – no new work starts${args.until ? ` until ${args.until}` : ""}. Running steps finish first. Say "resume" to continue.`);
+        return said(`⏸️ Paused – no new work starts${untilText}${notUnderstood}. Running steps finish first. Say "resume" to continue${untilIso ? " earlier" : ""}.`);
       }
       const ref = refOf(t);
       const { stopItemJobs } = await import("../kernel/runner.js");
-      stopItemJobs(t.id, "paused by you");
-      if (canTransition(t, "PAUSED")) transition(t.id, "PAUSED", "paused by you");
-      mergeData(t.id, { pausedByUser: true });
+      // a batch, epic or sprint pauses with everything in it (each child is resumed with it)
+      const { treeOf } = await import("../kernel/items.js");
+      const container = ["batch", "epic", "sprint"].includes(String((t as any).level)) || t.kind === "scope";
+      const members = container ? treeOf(t.id).filter((x: any) => x.id !== t.id && !["DONE", "CANCELLED", "FAILED", "MERGED", "PR_OPEN", "PAUSED"].includes(x.state)) : [];
+      for (const x of [t, ...members] as any[]) {
+        stopItemJobs(x.id, "paused by you");
+        const cur = getTask(x.id)!;
+        if (canTransition(cur, "PAUSED")) transition(x.id, "PAUSED", x.id === t.id ? "paused by you" : `paused with ${ref}`);
+        mergeData(x.id, { pausedByUser: true, ...(x.id !== t.id ? { pausedWith: t.id } : {}), ...(untilIso ? { pausedUntil: untilIso } : {}) });
+      }
       recordUndo({ kind: "pause", itemId: t.id, ref, at: Date.now() });
-      return said(`⏸️ Paused ${ref}. Say "resume ${ref}" to continue.`);
+      return said(`⏸️ Paused ${ref}${members.length ? ` and its ${members.length} ticket${members.length === 1 ? "" : "s"}` : ""}${untilText}${notUnderstood}. Say "resume ${ref}" to continue${untilIso ? " earlier" : ""}.`);
     }
     case "resume": {
       if (!t) {
@@ -540,7 +612,13 @@ async function resumeOne(t: Task): Promise<ToolResult> {
   const list = ["PAUSED", "FAILED", "STALE", "FAILED_PUBLISH", "NEEDS_INFO"].includes(t.state) ? [t] : tasksOfTicket(ref).filter((x) => ["PAUSED", "FAILED", "STALE", "FAILED_PUBLISH"].includes(x.state));
   if (!list.length) return said(`${ref} isn't paused – ${taskNow(t).now}.`);
   const done = list.map((x) => resumeTask(refOf(x))).filter((x): x is Task => !!x);
-  if (t.data.pausedByUser) mergeData(t.id, { pausedByUser: null });
+  if (t.data.pausedByUser) mergeData(t.id, { pausedByUser: null, pausedUntil: null });
+  // the tickets paused with a batch / epic / sprint come back with it
+  for (const x of listTasks({ states: ["PAUSED"] }).filter((y) => y.data.pausedWith === t.id)) {
+    const r = resumeTask(x.id);
+    if (r) done.push(r);
+    mergeData(x.id, { pausedByUser: null, pausedWith: null, pausedUntil: null });
+  }
   await tick();
   return said(`▶️ Resumed ${done.map(refOf).join(", ")} – continuing from where it stopped.`);
 }
@@ -659,7 +737,17 @@ async function toolFixPr(args: ToolArgs, ctx: ToolCtx): Promise<ToolResult> {
   }
   if (targets.length) {
     const { emit } = await import("../kernel/events.js");
-    for (const x of targets) emit({ type: "user_command", idemKey: `cmd:${x.id}:${command}:${Date.now()}`, itemId: x.id, payload: { command, by: ctx.who, ours: true, ...(command === "rebase" && resolveAll ? { resolveAll: true } : {}) } });
+    const { ownFindingsFor } = await import("../engine/prReview.js");
+    const { getProject: projectOf } = await import("../core/config.js");
+    const wantsFindings = /\b(these|them|those|the findings|your (review|findings)|what you found)\b/i.test(String(args.text ?? ctx.original ?? ""));
+    for (const x of targets) {
+      // G8 "recheck and resolve": an open conflict with the base goes first (bring the base in), then CI and comments
+      if (command === "resolve" && (x.data as any)?.conflict?.state === "open") emit({ type: "user_command", idemKey: `cmd:${x.id}:rebase:${Date.now()}`, itemId: x.id, payload: { command: "rebase", by: ctx.who, ours: true } });
+      // H8: "fix these" after a review of your own PR – the review's findings are what gets fixed
+      const pr = (x.data as any)?.pr;
+      const findings = command === "resolve" && wantsFindings && pr?.number ? ownFindingsFor(String(pr.repo ?? projectOf(x.project_id)?.github?.repo ?? ""), Number(pr.number)) : undefined;
+      emit({ type: "user_command", idemKey: `cmd:${x.id}:${command}:${Date.now()}`, itemId: x.id, payload: { command, by: ctx.who, ours: true, ...(command === "rebase" && resolveAll ? { resolveAll: true } : {}), ...(findings?.length ? { requests: findings } : {}) } });
+    }
     await tick();
     const r = targets.map(refOf).join(" and ");
     return said(command === "fix_ci"

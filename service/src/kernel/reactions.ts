@@ -112,7 +112,9 @@ export const REACTIONS: Reaction[] = [
   { on: "ci_passed", job: "none", recipe: "notify", guard: ourPr, note: "CI green → tell you" },
 
   // W10 – comments and reviews on our PR (the author is told; the reviewer's own plugin confirms to them)
-  { on: "changes_requested", job: "comment_fix", recipe: "comment_fix", priority: 2, merge: "merge", guard: and(ourPr, itemOpen), note: "changes requested → fix the comments" },
+  // G10: changes requested are blocking – you are told and offered the fix; it starts by itself only under "auto resolve"
+  { on: "changes_requested", job: "comment_fix", recipe: "comment_fix", priority: 2, merge: "merge", guard: and(ourPr, itemOpen, autoResolve), note: "changes requested → fix the comments (your auto-resolve rule)" },
+  { on: "changes_requested", job: "none", recipe: "notify", guard: ourPr, note: "changes requested → tell you (blocking) and offer the fix" },
   { on: "comment_added", job: "comment_fix", recipe: "comment_fix", priority: 2, merge: "merge", guard: and(ourPr, itemOpen, autoResolve), note: "new comments → fix them" },
   { on: "comment_added", job: "none", recipe: "notify", guard: ourPr, note: "new comments → summary to you" },
   { on: "review_comment", job: "comment_fix", recipe: "comment_fix", priority: 2, merge: "merge", guard: and(ourPr, itemOpen, autoResolve), note: "new comments → fix them" },

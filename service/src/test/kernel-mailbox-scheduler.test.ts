@@ -245,10 +245,13 @@ test("scheduler: item states, pause, retry and one job per item give plain reaso
 });
 
 test("scheduler: limitsFrom reads settings.limits", () => {
-  assert.deepEqual(limitsFrom(DEFAULT_SETTINGS), { slots: DEFAULT_SETTINGS.limits.maxParallel, buildsPerRepo: DEFAULT_SETTINGS.limits.maxPerProject, honourEdges: true, areaLocks: true });
+  // slots are dynamic (kernel/slots.ts): never above the cap, at least 1; the repo limit comes straight from settings
+  const d = limitsFrom(DEFAULT_SETTINGS);
+  assert.ok(d.slots >= 1 && d.slots <= DEFAULT_SETTINGS.limits.maxParallel, String(d.slots));
+  assert.deepEqual({ buildsPerRepo: d.buildsPerRepo, honourEdges: d.honourEdges, areaLocks: d.areaLocks }, { buildsPerRepo: DEFAULT_SETTINGS.limits.maxPerProject, honourEdges: true, areaLocks: true });
   const s = structuredClone(DEFAULT_SETTINGS);
-  s.limits.maxParallel = 5; s.limits.maxPerProject = 1;
-  assert.deepEqual({ ...limitsFrom(s) }, { slots: 5, buildsPerRepo: 1, honourEdges: true, areaLocks: true });
+  s.limits.maxParallel = 1; s.limits.maxPerProject = 1;
+  assert.deepEqual({ ...limitsFrom(s) }, { slots: 1, buildsPerRepo: 1, honourEdges: true, areaLocks: true });
 });
 
 // ------------------------------------------------------------------ scheduler with the database

@@ -10,8 +10,8 @@
  * - Effector steps (prepublish, publish, publish_parts) are checkpointed on the job before they run.
  * - After a restart only the in-flight step runs again; inside it, finished no-tool model calls come from agent_cache.
  */
-import { loadSettings, getProject, type Settings } from "../core/config.js";
-import { db, audit } from "../core/db.js";
+import { loadSettings, updateSettings, getProject, type Settings } from "../core/config.js";
+import { db, audit, getMeta, setMeta } from "../core/db.js";
 import { logger } from "../core/log.js";
 import { nowIso, sha256, truncate, backoff } from "../core/util.js";
 import { normaliseQuestions } from "../core/questions.js";
@@ -167,6 +167,8 @@ export const applyStepResult: ApplyStepResult = (job, item, recipe, result): Ste
       return { next: "wait", jobState: "waiting", itemState: owned ? "PAUSED" : undefined, reason: result.reason };
     case "fail":
       return { next: "end", jobState: "failed", itemState: owned ? "FAILED" : undefined, reason: result.reason };
+    case "later":
+      return { next: "wait", jobState: "waiting", reason: result.reason };
   }
 };
 
@@ -405,6 +407,10 @@ async function applyOutcome(job: Job, item: Item, owned: boolean, drives: boolea
     case "wait":
       if (drives) transition(item.id, result.state, result.note ?? "waiting");
       return toWaiting(job, result.note ?? "waiting");
+    case "later":
+      // back in the queue at the same step; the scheduler starts it again after retryAt (the reason is shown)
+      if (drives) mergeData(item.id, { waitingFor: result.reason });
+      return patchJob(job.id, { state: "queued", activity: truncate(result.reason, 200), activity_at: nowIso(), data: { ...getJob(job.id)!.data, retryAt: result.retryAt, laterReason: result.reason } });
     case "need_info": {
       const qs = normaliseQuestions(result.questions, 4);
       if (drives && item.kind === "part") {
@@ -524,16 +530,29 @@ export interface KernelTickOpts {
   settings?: Settings;
 }
 
+/** Once (1.0.7): the old fixed default of 3 slots becomes the dynamic cap of 8 you chose (a value you set yourself stays). */
+function upgradeSlots(): void {
+  try {
+    if (getMeta("slots.dynamic") === "1") return;
+    const cur = loadSettings().limits?.maxParallel;
+    if (cur === 3) updateSettings((x) => { x.limits.maxParallel = 8; });
+    setMeta("slots.dynamic", "1");
+  } catch { /* next tick */ }
+}
+
 /** One kernel pass (engine.ts tick when engine.version is v2): migrate once, route events, keep jobs, start what may run. */
 export async function kernelTick(opts: KernelTickOpts = {}): Promise<void> {
   const settings = opts.settings ?? loadSettings();
   try { migrateToKernel(); repairIgnoredPrEvents(); db().prepare("UPDATE jobs SET state='waiting' WHERE type='ci_watch' AND state='queued'").run(); } catch (e: any) { logger.error("v2 data migration failed", { error: e.message }); }
+  upgradeSlots();
   linkParts();
   try { routeEvents(settings); } catch (e: any) { logger.error("event routing failed", { error: e.message }); }
   sweepJobs();
   requeuePausedJobs();
   ensureJobs(opts.eligible);
   const d = pickRunnable(limitsFrom(settings), []);
+  // L1: why each queued job waits, kept on the job (status, the dashboard's queue)
+  try { const up = db().prepare("UPDATE jobs SET activity=? WHERE id=? AND state='queued'"); for (const w of d.waiting) up.run(w.reason.slice(0, 200), w.jobId); } catch { /* display only */ }
   for (const j of d.start) {
     if (live.has(j.id)) continue;
     const claimed = startJob(j.id);

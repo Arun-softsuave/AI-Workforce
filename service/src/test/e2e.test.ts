@@ -184,14 +184,16 @@ test("unclear ticket asks a question instead of spending tokens", async () => {
   assert.ok(!runner.calls.some((c) => c.prompt.includes("PAY-160") && c.agent !== "triage"));
 });
 
-test("unassigned ticket cancels its running work", async () => {
+test("C8: a ticket reassigned in Jira pauses its work (nothing thrown away) and offers resume or cancel", async () => {
   issues = [issue("PAY-170")];
   await pollJira();
   const t = listTasks({}).find((x) => x.source_ref === "PAY-170")!;
   await triageTask(getTask(t.id)!);
   issues = [issue("PAY-170", { assignee: "someone-else" })];
   await pollJira();
-  assert.equal(getTask("PAY-170")!.state, "CANCELLED");
+  const now = getTask("PAY-170")!;
+  assert.equal(now.state, "PAUSED");
+  assert.equal(now.data.pausedByJira?.why, "reassigned to someone else in Jira");
 });
 
 test("sprint-start burst is batched into one decision", async () => {

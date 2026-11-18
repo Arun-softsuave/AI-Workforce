@@ -1,3 +1,4 @@
+import { slotPlan } from "../kernel/slots.js";
 import { db, getMeta } from "../core/db.js";
 import { loadSettings } from "../core/config.js";
 import { safeJson } from "../core/util.js";
@@ -509,9 +510,16 @@ export function dependencyView(id: string) {
 
 // ------------------------------------------------------------------ agents, queue
 
+/** Why the scheduler holds this item's queued job right now (kernel), or undefined. */
+export function heldReason(itemId: string): string | undefined {
+  try { return ((db().prepare("SELECT activity FROM jobs WHERE item_id=? AND state='queued' AND type<>'ci_watch' ORDER BY priority, created_at LIMIT 1").get(itemId) as any)?.activity) || undefined; } catch { return undefined; }
+}
+
 function queueReason(t: Task, runningCount: number, maxParallel: number): { why: string; tone: Tone } {
   if (t.state === "AWAITING_START") return { why: "Needs your start", tone: "you" };
   if (isPaused()) return { why: "New work is paused", tone: "you" };
+  const held = heldReason(t.id);
+  if (held && /^(waiting|all slots|repo limit|retrying|budget|blocked|paused|needs|you took)/i.test(held)) return { why: held.charAt(0).toUpperCase() + held.slice(1), tone: /your|you /.test(held) ? "you" : "wait" };
   if (t.data.retryAt && new Date(t.data.retryAt).getTime() > Date.now()) {
     return { why: `Tries again at ${new Date(t.data.retryAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`, tone: "wait" };
   }
@@ -539,10 +547,11 @@ export function agents() {
   const s = loadSettings();
   const busy = workingNow();
   const busyAgents = new Set(busy.map((b) => b.agent));
-  const queued = listTasks({ states: ["QUEUED", "AWAITING_START"], limit: 100 });
+  // also tickets whose job went back to the queue to wait (e.g. "waiting for KAN-45 – same files")
+  const queued = [...listTasks({ states: ["QUEUED", "AWAITING_START"], limit: 100 }), ...listTasks({ states: ["RUNNING"], limit: 100 }).filter((t) => !!heldReason(t.id) && /^waiting/i.test(heldReason(t.id)!))];
   const queue = queued.map((t, i) => ({ pos: i + 1, taskId: t.id, ref: refOf(t), title: t.title ?? "", repo: t.project_id, ...queueReason(t, busy.length, s.limits.maxParallel) }));
   return {
-    slots: { used: busy.length, total: s.limits.maxParallel, perRepo: s.limits.maxPerProject },
+    slots: (() => { const sp = slotPlan(s); return { used: busy.length, total: sp.slots, cap: sp.cap, limitedBy: sp.limitedBy ?? null, perRepo: s.limits.maxPerProject }; })(),
     busy,
     ready: AGENT_ROLE.filter(([k]) => !busyAgents.has(k)).map(([k, what]) => ({ agent: k, label: agentName(k), tier: agentTier(k), what })),
     queue,
@@ -656,7 +665,7 @@ export function overview() {
     service: { running: true, paused, pausedUntil: paused ? getMeta("paused_until") ?? null : null, version: rt?.version ?? VERSION,
       startedAt: rt?.startedAt ?? null, uptime: uptimeText(rt?.startedAt), mock: s.models.provider === "mock" },
     top: {
-      needsYou: needs.length, agentsBusy: working.length, slots: s.limits.maxParallel,
+      needsYou: needs.length, agentsBusy: working.length, slots: slotPlan(s).slots,
       inProgress: n("RUNNING", "QUEUED", "PUBLISHING", "WAITING_PARTS", "NEEDS_INFO", "AWAITING_APPROVAL", "STALE", "PAUSED", "REJECTED", "FAILED_PUBLISH", "ASKING_LEAD"),
       waiting: n("DETECTED", "TRIAGED", "AWAITING_START"),
       connections: { ok: conns.filter((c) => c.tone === "ok").length, total: conns.length, toCheck: needConn.length },

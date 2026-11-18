@@ -12,12 +12,34 @@ export function git(cwd: string, args: string[], opts: { allowFail?: boolean; ex
   if (!cwd || !fs.existsSync(cwd)) throw new GitError(`git ${args[0]}: working directory missing (${cwd || "none"})`);
   const full = opts.extraHeader ? ["-c", `http.extraheader=${opts.extraHeader}`, ...args] : args;
   try {
-    return execFileSync("git", full, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], maxBuffer: 64 * 1024 * 1024, env: opts.env ? { ...process.env, ...opts.env } : undefined }).trim();
+    const out = execFileSync("git", full, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], maxBuffer: 64 * 1024 * 1024, env: opts.env ? { ...process.env, ...opts.env } : undefined }).trim();
+    if (args[0] === "push") notePushed(cwd);
+    return out;
   } catch (e: any) {
     if (opts.allowFail) return "";
     const msg = String(e.stderr ?? e.message).replace(/AUTHORIZATION: basic \S+/gi, "AUTHORIZATION: ***");
     throw new GitError(`git ${args[0]} failed: ${msg.trim()}`);
   }
+}
+
+/**
+ * I2 / G13: every commit the plugin pushed (its HEAD after a push), so a new head on our PR branch that the plugin did
+ * NOT push is recognised as yours or a teammate's – even when it was pushed with the same GitHub login.
+ */
+const pushedFile = () => path.join(paths.home(), "pushed-shas.txt");
+function notePushed(cwd: string): void {
+  try {
+    const sha = execFileSync("git", ["rev-parse", "HEAD"], { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+    if (!/^[0-9a-f]{40}$/.test(sha)) return;
+    const f = pushedFile();
+    fs.appendFileSync(f, `${sha}\n`);
+    const st = fs.statSync(f);
+    if (st.size > 400_000) fs.writeFileSync(f, fs.readFileSync(f, "utf8").split("\n").filter(Boolean).slice(-4000).join("\n") + "\n");
+  } catch { /* best effort */ }
+}
+export function pushedByPlugin(sha: string): boolean {
+  if (!sha) return false;
+  try { return fs.readFileSync(pushedFile(), "utf8").includes(`${sha}\n`); } catch { return false; }
 }
 
 export function isGitRepo(dir: string): boolean {

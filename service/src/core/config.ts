@@ -116,7 +116,7 @@ export const DEFAULT_SETTINGS: Settings = {
   models: { provider: "claude", small: "claude-haiku-5-5", medium: "claude-sonnet-5-5", large: "claude-opus-5-5" },
   cost: { maxBudgetUsd: 25, taskBudget: false, taskBudgetTokens: { small: 60_000, medium: 300_000, large: 600_000 } },
   limits: {
-    maxParallel: 3, maxPerProject: 2, burstThreshold: 5, pollMinutes: 3, pollMinutesOffHours: 3,
+    maxParallel: 8, maxPerProject: 2, burstThreshold: 5, pollMinutes: 3, pollMinutesOffHours: 3,
     askBeforeStart: ["L"], implementLoops: 3, reviewRounds: 2, maxDiffLines: 1500,
   },
   notifications: { primary: "desktop", fallback: ["inbox"], quietHours: "off", digestTime: "09:00", jiraComments: false, exclusive: true },

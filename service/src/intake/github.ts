@@ -26,6 +26,7 @@ import type { GitHubClient } from "../connectors/github.js";
 import { emit } from "../kernel/events.js";
 import { itemForPr, itemForPrOrLight } from "../kernel/prs.js";
 import { toItem } from "../kernel/items.js";
+import { pushedByPlugin } from "../git/git.js";
 import type { Item } from "../kernel/types.js";
 import { sanitize, detectInjection } from "../policy/untrusted.js";
 
@@ -233,8 +234,11 @@ class Producer {
       if (ours || (!mine && (item || iReviewed(repo, num)))) {
         const commits = await this.newCommits(repo, num, prev.head);
         const others = commits.filter((c) => !same(c.author, this.me));
-        if (!ours || others.length) {          // our own pushes are not news
-          const by = (ours ? others : commits)[0]?.author ?? (ours ? "" : author);
+        // the plugin's own pushes are not news; a push the plugin did not make (you, by hand – same login – or a
+        // teammate) is: local work is moved on top of it, never over it (I2 / G13)
+        const yours = ours && !others.length && !pushedByPlugin(head);
+        if (!ours || others.length || yours) {
+          const by = yours ? "you" : (ours ? others : commits)[0]?.author ?? (ours ? "" : author);
           this.emit("new_commits", `gh:new_commits:${repo.toLowerCase()}#${num}:${head}`, {
             ...base, from: prev.head, to: head, count: commits.length, authors: [...new Set(commits.map((c) => c.author))], by,
             ...(ours ? {} : { ours: false }),

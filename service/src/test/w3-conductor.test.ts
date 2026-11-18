@@ -394,7 +394,7 @@ test("A9: 'Eric left the team' removes him from the team and the reviewer list; 
 
 test("J7: 'pause everything until Monday' pauses; 'resume' (fast path) lifts it", async () => {
   const r = await sayModel("pause everything until Monday please", { calls: [{ tool: "control", args: { action: "pause", until: "2026-11-23" } }] });
-  assert.match(r, /Paused – no new work starts until 2026-11-23/);
+  assert.match(r, /Paused – no new work starts until Monday \d\d:\d\d/);
   assert.equal(isPaused(), true);
   assert.match(await sayFast("resume"), /Resumed – new work starts again/);
   assert.equal(isPaused(), false);

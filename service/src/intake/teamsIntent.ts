@@ -266,6 +266,8 @@ function replyTo(item: NonNullable<ReturnType<typeof itemFor>>, reply: string): 
     return { reply: `For ${ref}:\n\n${formatChoices(item.approval.action)}` };
   }
   if (YES.test(reply)) return { intent: { intent: "approve", ref } };
+  // D4 "yes but skip the email part" / "ok, but use the existing validator": approve WITH a change – the Conductor decides
+  if (/^\s*(yes|yeah|ok|okay|sure|approve[d]?|go ahead|looks good|lgtm)\b[\s,.!-]*(but|except|only|and|just)\b/i.test(reply)) return undefined;
   const no = NO.exec(reply);
   if (no) return no[2].trim().length >= 3 ? { intent: { intent: "reject", ref, text: no[2].trim() } } : { option: { ref, action: item.approval.action, n: 2 } };
   if (CANCEL.test(reply)) return { intent: { intent: "cancel", ref } };
@@ -472,6 +474,8 @@ export async function handleChatMessage(text: string, who: string, ctx: MessageC
     audit(`user:${who}`, "teams.secret_blocked", undefined, {});
     return "🔒 That message looks like it contains a secret (a key, token or password), so I did not read it or keep it.\n\n- Please **revoke or rotate it** – it is now in the Teams history.\n- To give me a value safely, run `aiw secret set NAME` on this computer, then reply \"done\".";
   }
+  // C7: "adapt KAN-45" – take the ticket's change from Jira (re-plan before the PR, update the PR after it)
+  { const { ADAPT, adaptTicket } = await import("../engine/adapt.js"); const m = ADAPT.exec(text); if (m) return adaptTicket(m[1], who); }
   // "more": the rest of the last reply that was shortened (R-MSG)
   { const { moreReply } = await import("../messenger/details.js"); const more = moreReply(text); if (more) return more; }
   const awaiting = getAwaiting();

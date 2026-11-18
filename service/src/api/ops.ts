@@ -44,6 +44,11 @@ const STEP_LABEL: Record<string, string> = {
 };
 
 /** Plain-language "where is it now" for one task – used by Claude Code (MCP), the Teams chat and the daily check-up. */
+/** Why the kernel holds this item's queued job ("waiting for KAN-45 – same files", "all slots busy"), or undefined. */
+function heldWhy(itemId: string): string | undefined {
+  try { const a = (db().prepare("SELECT activity FROM jobs WHERE item_id=? AND state='queued' AND type<>'ci_watch' ORDER BY priority, created_at LIMIT 1").get(itemId) as any)?.activity; return a && /^(waiting|all slots|repo limit|retrying|budget|blocked)/i.test(a) ? a : undefined; } catch { return undefined; }
+}
+
 export function taskNow(t: Task): { now: string; waitingFor?: string } {
   let total = 0, name = "";
   try { const pb = getPlaybook(t.playbook ?? ""); total = pb.steps.length; name = pb.steps[t.step_index]?.name ?? ""; } catch { /* not triaged yet */ }
@@ -51,8 +56,8 @@ export function taskNow(t: Task): { now: string; waitingFor?: string } {
   const attempt = name === "implement_test" && t.data.implementAttempt ? `, attempt ${t.data.implementAttempt} of ${t.data.implementLoops ?? 3}` : "";
   switch (t.state) {
     case "DETECTED": case "TRIAGED": return { now: "just picked up – sizing the work" };
-    case "QUEUED": return { now: stepText ? `queued – next: ${stepText}` : "queued" };
-    case "RUNNING": return { now: `${stepText}${attempt}` || "working" };
+    case "QUEUED": { const why = heldWhy(t.id); return { now: `queued${why ? ` – ${why}` : stepText ? ` – next: ${stepText}` : ""}` }; }
+    case "RUNNING": { const why = heldWhy(t.id); return { now: why ?? (`${stepText}${attempt}` || "working") }; }
     case "NEEDS_INFO": return { now: `asked you ${normaliseQuestions(t.data.questions, 10).length > 1 ? "some questions" : "a question"}`, waitingFor: "your answer in Teams" };
     case "AWAITING_START": return { now: "waiting to start", waitingFor: "you to say start" };
     case "AWAITING_APPROVAL": {

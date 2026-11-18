@@ -115,10 +115,13 @@ test("G9/K2: a reviewer comments → the author is told with the quote and 'reso
   assert.match(r.msgs[0].body, /resolve the comments on PR 109/);
 });
 
-test("G10: changes requested → blocking: a comment_fix job on the PR's item", async () => {
+test("G10: changes requested → you are told it blocks, with the offer to fix (no job until you say so)", async () => {
   const it = myPr("KAN-10", 110);
   const r = await on(it, "changes_requested", { num: 110, author: "eric", text: "Needs a test for the limit" });
-  assert.deepEqual(r.jobs.map((j) => j.type), ["comment_fix"]);
+  assert.deepEqual(r.jobs.map((j) => j.type), []);
+  const m = r.msgs.find((x) => /requested changes/.test(x.title));
+  assert.ok(m, r.msgs.map((x) => x.title).join(" | "));
+  assert.match(m!.body, /Needs a test for the limit[\s\S]*resolve the comments on PR 110/);
 });
 
 test("G12: a comment that needs a product decision asks you; a wrong one gets a polite answer", () => {

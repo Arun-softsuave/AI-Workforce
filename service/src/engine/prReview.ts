@@ -160,6 +160,21 @@ export function reviewPreview(t: Task): string {
 
 const ticketKeyRe = (keys: string[]) => (keys.length ? new RegExp(`\\b(${keys.map((k) => k.replace(/[^A-Z0-9]/gi, "")).join("|")})-\\d+\\b`, "i") : /\b[A-Z][A-Z0-9]+-\d+\b/);
 
+/** The head this plugin last reviewed for a PR (an earlier review task), for a re-review of only what changed. */
+export function lastReviewedSha(repo: string, num: number, excludeId?: string): string | undefined {
+  const t = listTasks({ limit: 3000 }).filter((x) => x.id !== excludeId && x.data?.review?.num === num && String(x.data?.review?.repo ?? "").toLowerCase() === repo.toLowerCase() && x.data?.reviewSha)
+    .sort((a, b) => (a.updated_at < b.updated_at ? 1 : -1))[0];
+  return t?.data.reviewSha;
+}
+
+/** Findings of your latest review of your OWN PR (H8), offered as fixes – undefined when there are none (or > 7 days old). */
+export function ownFindingsFor(repo: string, num: number): string[] | undefined {
+  const t = listTasks({ limit: 3000 }).filter((x) => x.data?.review?.num === num && String(x.data?.review?.repo ?? "").toLowerCase() === repo.toLowerCase() && (x.data?.ownFindings ?? []).length)
+    .sort((a, b) => (a.updated_at < b.updated_at ? 1 : -1))[0];
+  if (!t || Date.now() - new Date(t.data.ownFindingsAt ?? 0).getTime() > 7 * 86_400_000) return undefined;
+  return t.data.ownFindings;
+}
+
 export const REVIEW_STEPS: Record<string, (ctx: StepCtx) => Promise<StepResult>> = {
   /** Read the PR from GitHub and check its code out read-only (a detached worktree; no branch is created). */
   async fetch_pr(ctx) {
@@ -171,7 +186,14 @@ export const REVIEW_STEPS: Record<string, (ctx: StepCtx) => Promise<StepResult>>
     const gh = clients.github();
     if (!gh?.prForReview) return { status: "fail", reason: "GitHub is not connected" };
     const pr = await gh.prForReview(r.repo, r.num);
-    if (pr.merged) return { status: "fail", reason: `PR #${r.num} is already merged` };
+    // H4: a merged PR is reviewed as merged work (against its ticket and today's code), never as a dead end
+    if (pr.merged) {
+      const key = ticketKeyRe(ctx.project.jira?.keys ?? []).exec(`${pr.title} ${pr.headRef} ${pr.body}`)?.[0]?.toUpperCase();
+      const { startAuditFromText } = await import("./steps/audit.js");
+      const msg = await startAuditFromText(key ? `review ${key}` : `review commits ${pr.baseSha}..${pr.headSha}`, ctx.task.data.review?.by ?? "you").catch((e: any) => `❓ ${e?.message ?? e}`);
+      await notify({ kind: "info", taskId: ctx.task.id, taskRef: ctx.task.source_ref ?? undefined, dedupeKey: `merged-review:${r.repo}#${r.num}`, title: `🔎 PR #${r.num} is already merged – reviewing the merged change instead`, body: msg, url: pr.url }).catch(() => {});
+      return { status: "done", note: "merged – reviewed as merged work" };
+    }
     if (pr.state !== "open") return { status: "fail", reason: `PR #${r.num} is ${pr.state}` };
     let wt = ctx.task.worktree;
     if (!wt || !fs.existsSync(wt) || ctx.task.data.reviewSha !== pr.headSha) {
@@ -187,7 +209,14 @@ export const REVIEW_STEPS: Record<string, (ctx: StepCtx) => Promise<StepResult>>
     // patches can be large: keep what a reviewer needs
     let budget = 150_000;
     const files = pr.files.map((f) => { const patch = f.patch ? truncate(f.patch, Math.max(0, Math.min(20_000, budget))) : undefined; budget -= patch?.length ?? 0; return { ...f, patch }; });
-    ctx.save({ prInfo: { ...pr, files }, reviewSha: pr.headSha, ticket, worktreePath: wt });
+    // H3: a re-review after the author's new commits looks only at what changed since the last review of this PR
+    const prev = ctx.task.data.reviewSha ?? lastReviewedSha(r.repo, r.num, ctx.task.id);
+    let since: { from: string; files: string[] } | undefined;
+    if (prev && prev !== pr.headSha) {
+      const changed = G.git(ctx.project.local.path, ["diff", "--name-only", prev, pr.headSha], { allowFail: true }).split("\n").map((x) => x.trim()).filter(Boolean);
+      if (changed.length && changed.length < files.length) since = { from: prev, files: changed };
+    }
+    ctx.save({ prInfo: { ...pr, files }, reviewSha: pr.headSha, ticket, worktreePath: wt, reReview: since ?? null });
     return { status: "ok", note: `${pr.files.length} files at ${pr.headSha.slice(0, 7)}${key ? `, ticket ${key}` : ""}` };
   },
 
@@ -196,7 +225,9 @@ export const REVIEW_STEPS: Record<string, (ctx: StepCtx) => Promise<StepResult>>
     const pr: PrReviewInfo = ctx.task.data.prInfo;
     const t = ctx.task.data.ticket;
     let diffBudget = 60_000;
-    const patches = pr.files.map((f) => {
+    const re = ctx.task.data.reReview as { from: string; files: string[] } | null | undefined;
+    const shown = re ? pr.files.filter((f) => re.files.includes(f.path)) : pr.files;
+    const patches = shown.map((f) => {
       if (!f.patch) return `### ${f.path}\n(${f.status}, no text diff)`;
       const p = truncate(f.patch, Math.max(500, Math.min(15_000, diffBudget)));
       diffBudget -= p.length;
@@ -217,7 +248,8 @@ export const REVIEW_STEPS: Record<string, (ctx: StepCtx) => Promise<StepResult>>
       rulesBlock(ctx.project, 3000),
       pr.checks?.length ? `## CI checks\n${pr.checks.map((c) => `- ${c.name}: ${c.conclusion}`).join("\n")}` : "",
       pr.comments?.length ? `## Comments already on the PR (do not repeat these; when this is a new review after more commits, check whether each one was addressed and name the ones that were not in the summary)\n${untrusted("pr-comments", truncate(pr.comments.map((c) => `- ${c.author}${c.path ? ` on ${c.path}:${c.line ?? ""}` : ""}: ${c.body}`).join("\n"), 4000))}` : "",
-      `## Changed files (${pr.files.length})\n${untrusted(`pr-diff:${pr.number}`, patches)}`,
+      re ? `## Re-review: only the ${shown.length} file(s) changed since the last review (${re.from.slice(0, 7)}) are shown. Comment on those changes, and say in the summary which earlier comments are now addressed.` : "",
+      `## Changed files (${shown.length}${re ? ` of ${pr.files.length}` : ""})\n${untrusted(`pr-diff:${pr.number}`, patches)}`,
       feedback,
       "The PR's code is checked out in the current directory (read-only). Read the code around the change where it helps. Do not modify anything.",
     ].filter(Boolean).join("\n\n");
@@ -250,6 +282,19 @@ export const REVIEW_STEPS: Record<string, (ctx: StepCtx) => Promise<StepResult>>
     // the policy gate: "post review comments without showing them first" (settings.pr.autoPostReview or your rule)
     const { canComment } = await import("../policy/gate.js");
     const { approveByPolicy } = await import("../approvals/approvals.js");
+    // H8: your OWN PR – the findings are offered as fixes, never posted as comments on your own PR
+    const prOwn: PrReviewInfo = ctx.task.data.prInfo;
+    const { myLogin } = await import("./targets.js");
+    const me = await myLogin().catch(() => undefined);
+    if (me && prOwn?.author && prOwn.author.toLowerCase() === me.toLowerCase()) {
+      const d: ReviewDraft = ctx.task.data.reviewDraft;
+      const findings = [...(d?.comments ?? []).map((c) => `${c.file}:${c.line} – ${c.title}: ${c.body}`), ...(d?.general ?? [])].map((x) => truncate(x, 600));
+      ctx.save({ ownFindings: findings, ownFindingsAt: new Date().toISOString() });
+      await notify({ kind: "info", taskId: ctx.task.id, taskRef: ctx.task.source_ref ?? undefined, dedupeKey: `own-review:${prOwn.number}:${ctx.task.data.reviewSha}`,
+        title: `🔍 Your PR #${prOwn.number}: ${findings.length ? `${findings.length} thing${findings.length === 1 ? "" : "s"} to fix` : "looks good"}`,
+        body: `${findings.slice(0, 5).map((x, i) => `${i + 1}. ${truncate(x, 160)}`).join("\n")}${findings.length > 5 ? `\n… ${findings.length - 5} more – "details ${ctx.task.source_ref}"` : ""}${findings.length ? `\n\nIt's your own PR, so nothing is posted. Say "fix these on PR ${prOwn.number}" and I'll fix them (shown to you before pushing).` : ""}`, url: prOwn.url }).catch(() => {});
+      return { status: "done", note: `own PR – ${findings.length} findings offered as fixes` };
+    }
     const g = canComment(ctx.task.id, { target: "teammate_pr" });
     if (g.verdict === "deny") return { status: "fail", reason: g.reason };
     if (g.verdict === "allow") { approveByPolicy(ap.id, g.rule ?? "post_review"); return { status: "ok", note: "posted without asking (your preference)" }; }

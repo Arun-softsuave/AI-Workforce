@@ -98,7 +98,30 @@ export function findDecision(itemId: string | undefined | null, question: string
       ORDER BY created_at DESC LIMIT 1`).get(...([key, s.scope, ...(s.id === null ? [] : [s.id])] as any[]));
     if (r) return row2d(r);
   }
+  // O4: the same question in other words ("Show cancelled orders?" / "Should cancelled orders be shown in the list?") –
+  // most of its meaningful words in common with an answered one in the same scopes (no model call)
+  const mine = keyWords(question);
+  if (mine.size < 2) return undefined;
+  for (const s of scopesOf(itemId)) {
+    const rows = db().prepare(`SELECT * FROM decisions WHERE scope=? AND ${s.id === null ? "scope_id IS NULL" : "scope_id=?"} ORDER BY created_at DESC LIMIT 200`)
+      .all(...([s.scope, ...(s.id === null ? [] : [s.id])] as any[])) as any[];
+    let best: { r: any; score: number } | undefined;
+    for (const r of rows) {
+      const theirs = keyWords(r.question);
+      const common = [...mine].filter((w) => theirs.has(w)).length;
+      const score = common / Math.max(mine.size, theirs.size);
+      if (common >= 2 && score >= 0.6 && (!best || score > best.score)) best = { r, score };
+    }
+    if (best) return row2d(best.r);
+  }
   return undefined;
+}
+
+/** The meaningful words of a question, roughly stemmed ("orders" → "order", "shown" → "show"). */
+function keyWords(q: string): Set<string> {
+  const stop = new Set([...FILLER, "should", "would", "shall", "be", "being", "show", "list", "page", "screen", "use", "how", "when", "where", "who", "why", "yes", "no"]);
+  return new Set(String(q ?? "").toLowerCase().normalize("NFKD").replace(/[^a-z0-9\s-]/g, " ").split(/\s+/)
+    .filter((w) => w.length > 2 && !stop.has(w)).map((w) => w.replace(/(ing|ed|es|s|n)$/, "")).filter((w) => w.length > 2));
 }
 
 /** Every decision in force for an item (nearest scope first; a nearer answer hides the same question further out). */

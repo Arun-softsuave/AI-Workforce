@@ -315,7 +315,7 @@
   function agentsView() {
     var a = S.agents;
     if (!a) { loadAgents(); return '<div class="empty">Loading…</div>'; }
-    return '<div class="col"><div class="banner">' + svg('agents') + '<span><b>' + a.slots.total + ' slots</b> run at the same time. At most ' + a.slots.perRepo + ' builds per repository. Planning only reads code, so it never waits for a repository.</span></div>' +
+    return '<div class="col"><div class="banner">' + svg('agents') + '<span><b>' + a.slots.total + (a.slots.cap && a.slots.cap !== a.slots.total ? ' of ' + a.slots.cap : '') + ' slots</b> for AI work right now' + (a.slots.limitedBy ? ' – limited by ' + esc(a.slots.limitedBy) : '') + '. Git-only jobs (bringing the base in, close-out, CI watching) don't use a slot. At most ' + a.slots.perRepo + ' builds per repository. Change the maximum with "use N slots".</span></div>' +
       '<section><div class="sec-h"><h2>Working now</h2><p>' + a.slots.used + ' of ' + a.slots.total + ' slots in use</p></div>' + (a.busy.length ? '<div class="agents">' + a.busy.map(agentCard).join('') + '</div>' : '<div class="empty">No agent is working right now.</div>') + '</section>' +
       '<section><div class="sec-h"><h2>Ready</h2><p>Start when a ticket needs them</p></div><div class="agents">' + a.ready.map(function (r) {
         var col = colorFor(r.agent);

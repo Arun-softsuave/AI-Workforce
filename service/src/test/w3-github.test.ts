@@ -168,7 +168,7 @@ test("first poll: CI, comments and reviews on my PR, a review request; no 'opene
 
   // what the kernel does with them
   const s = loadSettings();
-  assert.equal(reactionFor(cr[0], getItem(ticket.id), s)?.job, "comment_fix");
+  assert.equal(reactionFor(cr[0], getItem(ticket.id), s)?.recipe, "notify", "G10: told and offered, no job until you say so");
   assert.equal(reactionFor(rr[0], light, s)?.recipe, "notify");
   assert.equal(reactionFor(passed[0], getItem(ticket.id), s)?.recipe, "notify");
 });
@@ -249,7 +249,10 @@ test("my own pushes are not news; the PR merged → pr_merged on the item", asyn
   set(`/repos/${REPO}/commits/sha7c/check-runs`, { check_runs: [] });
   set(`/repos/${REPO}/commits/sha7c/status`, { statuses: [] });
   await poll();
-  assert.equal(evs("new_commits").length, 1, "only my commits → no event");
+  // I2: the plugin did not push sha7c – a push by you (same login) is news: local work moves on top of it
+  const nc = evs("new_commits");
+  assert.equal(nc.length, 2, "your own push outside the plugin is news");
+  assert.equal(nc.at(-1)!.payload.by, "you");
 
   set(`/repos/${REPO}/pulls`, [pr(7, { author: ME, sha: "sha7c", ref: "feature/KAN-45-refunds", updated: at(50) }), pr(9, { author: "priya", rr: [ME] })].map((p) =>
     p.number === 7 ? { ...p, state: "closed", merged_at: at(50), merged_by: user("bob") } : p));

@@ -231,7 +231,7 @@ test("v2: two events for the same item never run two jobs at once", async () => 
   const item = getItem("PAY-2")!;
   assert.equal(item.state, "PR_OPEN");
   const e1 = emit({ type: "ci_failed", idemKey: "t:ci:1", itemId: item.id, payload: { ours: true, round: 1, repo: "acme/pay", num: prs[1].number } })!;
-  const e2 = emit({ type: "changes_requested", idemKey: "t:cr:1", itemId: item.id, payload: { ours: true, repo: "acme/pay", num: prs[1].number } })!;
+  const e2 = emit({ type: "user_command", idemKey: "t:cr:1", itemId: item.id, payload: { ours: true, command: "resolve", repo: "acme/pay", num: prs[1].number } })!;
   assert.ok(e1 && e2);
   routeEvents(loadSettings());
   const queued = jobsOf(item.id).filter((j) => j.state === "queued");

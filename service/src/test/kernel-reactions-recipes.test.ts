@@ -44,7 +44,7 @@ test("reactions: each event type maps to the planned job", () => {
   const cases: [string, Record<string, any>, string, string][] = [
     ["ci_failed", {}, "ci_fix", "ci_fix"],
     ["ci_passed", {}, "none", "notify"],
-    ["changes_requested", {}, "comment_fix", "comment_fix"],
+    ["changes_requested", {}, "none", "notify"],
     ["comment_added", {}, "none", "notify"],
     ["review_comment", {}, "none", "notify"],
     ["pr_conflict", {}, "rebase", "rebase"],
@@ -117,8 +117,9 @@ test("reactions guards: comments are fixed only when asked (command, directive o
   assert.equal(reactionFor(ev("review_comment"), item(), settings((s) => { (s.pr as any).autoResolveComments = true; }))!.job, "comment_fix");
   // comments on a teammate's PR are not ours to fix or summarise
   assert.equal(reactionFor(ev("comment_added", { command: "resolve" }), item({ owner: "sneha" }), settings()), undefined);
-  // changes requested on ours → fix (the gate still shows it first)
-  assert.equal(reactionFor(ev("changes_requested"), item(), settings())!.job, "comment_fix");
+  // G10: changes requested on ours → told (blocking) with the offer; fixed by itself only under auto-resolve
+  assert.equal(reactionFor(ev("changes_requested"), item(), settings())!.job, "none");
+  assert.equal(reactionFor(ev("changes_requested"), item({ data: { pr: {}, directives: { auto_resolve: true } } }), settings())!.job, "comment_fix");
 });
 
 test("reactions guards: review requests, teammates' new commits, own pushes, close-out", () => {

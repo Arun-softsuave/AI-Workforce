@@ -79,8 +79,32 @@ export async function processItems(project: ProjectConfig, items: WorkItem[], me
       const t = await handleEvent(project, e, prev);
       if (t) created.push(t);
     }
+    if (prev) await newJiraComments(item, me).catch(() => {});
   }
   return created;
+}
+
+/**
+ * K6: a comment on a ticket being worked on (a PM or BA clarifying something) – information, never an order (§11a):
+ * the ticket's comments are refreshed for the next step, and you get one line with "adapt KAN-x" if it changes the work.
+ * Your own comments and the plugin's are not news.
+ */
+async function newJiraComments(i: WorkItem, me: string): Promise<void> {
+  const list = i.comments ?? [];
+  if (!list.length) return;
+  const key = `jira.comments.${i.id}`;
+  const seen = getMeta(key);
+  const latest = list.map((c) => c.created).sort().at(-1) ?? "";
+  if (!seen) { setMeta(key, latest); return; }                       // first look: nothing is "new"
+  const fresh = list.filter((c) => c.created > seen && c.author !== me && !/AI Workforce/i.test(c.body ?? ""));
+  setMeta(key, latest);
+  if (!fresh.length) return;
+  for (const t of activeTasksForIssue(i.id)) {
+    const c = fresh.at(-1)!;
+    mergeData(t.id, { ticket: { ...(t.data.ticket ?? {}), comments: list }, lastJiraComment: { author: c.author, body: String(c.body ?? "").slice(0, 1500), created: c.created } });
+    await notify({ kind: "info", taskId: t.id, taskRef: i.key, dedupeKey: `jira-comment:${i.id}:${c.created}`, title: `💬 ${c.author || "Someone"} commented on ${i.key}`,
+      body: `"${String(c.body ?? "").replace(/\s+/g, " ").slice(0, 220)}"\n\nI'll take it into account from the next step. If it changes what to build, say "adapt ${i.key}".` });
+  }
 }
 
 async function handleEvent(project: ProjectConfig, e: GateEvent, prev: Snapshot | undefined): Promise<Task | undefined> {
@@ -99,10 +123,14 @@ async function handleEvent(project: ProjectConfig, e: GateEvent, prev: Snapshot 
       for (const t of activeTasksForIssue(i.id)) {
         // engine v2: a raised PR is looked after until it is merged or closed – the ticket moving on does not cancel it
         if (engineVersion() === "v2" && AFTER_PR.includes(t.state)) continue;
-        if (!["AWAITING_APPROVAL"].includes(t.state)) {
-          await cancelTask(t.id, e.type === "closed" ? "ticket closed" : "ticket unassigned");
-          await notify({ kind: "info", taskId: t.id, taskRef: i.key, title: `${i.key} stopped`, body: e.type === "closed" ? "The ticket was closed, so the work was cancelled." : "The ticket was reassigned, so the work was cancelled. Artefacts are kept for 7 days." });
-        }
+        // C8: paused (never thrown away) – you decide: carry on, or cancel and clean up
+        const why = e.type === "closed" ? "moved to Done / closed in Jira" : "reassigned to someone else in Jira";
+        try { const { stopItemJobs } = await import("../kernel/runner.js"); stopItemJobs(t.id, why); } catch { /* v1 */ }
+        const cur = getTask(t.id);
+        if (cur && canTransition(cur, "PAUSED")) transition(t.id, "PAUSED", `ticket ${why}`);
+        mergeData(t.id, { pausedByJira: { why, at: new Date().toISOString() } });
+        await notify({ kind: "paused", taskId: t.id, taskRef: i.key, dedupeKey: `jira-${e.type}:${t.id}`, title: `⏸️ ${i.key} was ${why}`,
+          body: `I paused my work on it – nothing is lost.\n\n- "resume ${i.key}" – carry on anyway\n- "cancel ${i.key}" – stop and clean up (the branch is kept for 7 days)` });
       }
       return undefined;
     }

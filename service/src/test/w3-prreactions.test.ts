@@ -294,7 +294,8 @@ test("reactions: K6 minor Jira change is information only; design before buildin
   assert.equal(reactionFor(ev("pr_reopened"), it({ state: "CLOSED" }), s)!.setState, "PR_OPEN");
   // intake/github.ts puts the COMMENTER in payload.author on talk events: still our PR, still a summary to us
   assert.equal(reactionFor(ev("review_comment", { author: "eric", text: "Check the limit" }), it(), s)!.recipe, "notify");
-  assert.equal(reactionFor(ev("changes_requested", { author: "eric" }), it(), s)!.job, "comment_fix");
+  // G10: changes requested → you are told (blocking) and offered the fix; no job until you say so
+  assert.equal(reactionFor(ev("changes_requested", { author: "eric" }), it(), s)!.recipe, "notify");
   assert.match(noticeFor(ev("review_comment", { author: "eric", text: "Check the limit", num: 7 }), it({ source_ref: "KAN-9" } as any), s)!.title, /^💬 eric commented on PR #7 · KAN-9$/);
   // ...but on CI events author is the PR's author (a teammate's PR is not ours to fix)
   assert.equal(reactionFor(ev("ci_failed", { author: "eric" }), it(), s), undefined);
@@ -378,7 +379,9 @@ test("G9–G11 on v2: comment fixes on a ticket's PR use the job's own context a
   // the ticket's own build had feedback and answers – they must not leak into the fix
   db().prepare("UPDATE tasks SET data=json_set(data,'$.feedback',json('[\"old build feedback\"]')) WHERE id=?").run(ticket.id);
   const head0 = remoteHead("feat/KAN-9/refund");
+  // changes requested (told to you) → you say "resolve the comments"
   emit({ type: "changes_requested", idemKey: "w3:cr:1", itemId: ticket.id, payload: { ours: true, repo: "acme/shop", num: 7, author: "eric" } });
+  emit({ type: "user_command", idemKey: "w3:cr:1:resolve", itemId: ticket.id, payload: { ours: true, command: "resolve", by: "sneha" } });
   const waiting = await settleJob(ticket.id, "comment_fix");
   assert.equal(waiting.state, "waiting", waiting.error ?? "");
   const ap = waiting.data.ctx.fixApprovalId;
