@@ -669,9 +669,20 @@ export function overview() {
       inProgress: n("RUNNING", "QUEUED", "PUBLISHING", "WAITING_PARTS", "NEEDS_INFO", "AWAITING_APPROVAL", "STALE", "PAUSED", "REJECTED", "FAILED_PUBLISH", "ASKING_LEAD"),
       waiting: n("DETECTED", "TRIAGED", "AWAITING_START"),
       connections: { ok: conns.filter((c) => c.tone === "ok").length, total: conns.length, toCheck: needConn.length },
+      cost: costTile(),
     },
     needs, working, board: b, feed: feed(), timers: timers(), connections: conns, scopes: scopes(), filters: scopeFilters(),
   };
+}
+
+/** Cost of the last 7 days and how much of the model input came from the prompt cache (cheaper, same answers). */
+function costTile(): { usd: number; cacheHit: number | null } | null {
+  try {
+    const r = db().prepare("SELECT COALESCE(SUM(cost_usd),0) AS usd, COALESCE(SUM(cache_read),0) AS cr, COALESCE(SUM(fresh_in),0) AS fi, COALESCE(SUM(cache_write),0) AS cw FROM steps WHERE started_at > ?")
+      .get(new Date(Date.now() - 7 * 86_400_000).toISOString()) as any;
+    const all = Number(r.cr) + Number(r.fi) + Number(r.cw);
+    return { usd: Math.round(Number(r.usd) * 100) / 100, cacheHit: all ? Math.round((Number(r.cr) / all) * 100) : null };
+  } catch { return null; }
 }
 
 /** The overview, shared between clients for a moment (the bus drops it as soon as something changes). */

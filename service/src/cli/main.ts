@@ -201,6 +201,21 @@ export async function main(argv: string[]): Promise<number> {
       return checks.some((c) => !c.ok && c.required) ? 1 : 0;
     }
     case "bench": {
+      // aiw bench conductor [--tier medium|large] [--effort low|medium|high] – Teams understanding on real messages, in a
+      // scratch home (your data is never touched; only the model calls cost tokens, about $1–2 per run)
+      if (sub === "conductor") {
+        const { spawnSync } = await import("node:child_process");
+        const { fileURLToPath } = await import("node:url");
+        const script = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "bench", "conductorEval.js");
+        const home = fs.mkdtempSync(path.join(os.tmpdir(), "aiw-eval-"));
+        const extra = ["tier", "effort", "only"].flatMap((k) => (a[k] ? [`--${k}`, String(a[k])] : []));
+        const r = spawnSync(process.execPath, [script, "--home", home, "--from", paths.home(), ...extra], { encoding: "utf8", stdio: ["ignore", "pipe", "inherit"], maxBuffer: 32 * 1024 * 1024 });
+        try { fs.rmSync(home, { recursive: true, force: true }); } catch { /* temp */ }
+        if (r.status !== 0) { out("The evaluation did not finish.", json); return 1; }
+        const res = JSON.parse(r.stdout);
+        out(json ? res : `Teams understanding: ${res.passed}/${res.total} right (${res.rate}%) · model calls ${res.byPath.conductorPassed}/${res.byPath.conductor} · $${res.costUsd}${res.misses.length ? `\n\nMissed:\n${res.misses.map((m: any) => `- ${m.id} "${String(m.text).slice(0, 60)}": ${m.why}`).join("\n")}` : ""}`, json);
+        return 0;
+      }
       const B = await import("../bench/benchmark.js");
       if (!sub || sub === "report") {
         const r = B.baselineReport(undefined, { since: str(a.since) });

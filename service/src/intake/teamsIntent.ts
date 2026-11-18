@@ -102,7 +102,8 @@ type RuleResult = { intent: Intent } | { reply: string } | { option: { ref: stri
 
 /** Deterministic understanding of common replies (the fast path). Exported for tests. */
 export function ruleIntent(text: string, p: Pending = pendingItems(), aiAvailable = true): RuleResult {
-  const t = text.trim();
+  // a command pasted in quotes or as code ("resume FIX-131@nue-backend", `/aiw status`) is the command itself
+  const t = text.trim().replace(/^["'“”‘’`]+\s*|\s*["'“”‘’`]+$/g, "").trim();
   if (!t) return undefined;
 
   // J11 small talk and J10 "I'm back": short replies, no action

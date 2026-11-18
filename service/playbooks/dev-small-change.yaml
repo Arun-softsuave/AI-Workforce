@@ -6,6 +6,7 @@ steps:
   - prepare_workspace
   - context_pack
   - plan: { tier: medium }   # a short plan, so even small changes are approved before any code
+  - doc_readiness            # one fresh-eyes readiness check of the design document (quality first)
   - plan_gate                # pauses for plan approval (settings.workflow.planApproval: always)
   - implement_test
   - reviews: { reviewers: [combined] }

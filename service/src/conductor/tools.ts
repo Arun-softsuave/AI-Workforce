@@ -688,6 +688,9 @@ async function undoLast(ctx: ToolCtx): Promise<ToolResult> {
 
 async function toolFixPr(args: ToolArgs, ctx: ToolCtx): Promise<ToolResult> {
   const { startFixFromText } = await import("../engine/prFix.js");
+  // "PR-131@nue-backend" / "PR 131" (a PR named like an item): the PR itself, found by its number in that repository
+  const prRef = /^\s*PR[\s#-]*(\d+)(?:@([\w.-]+))?\s*$/i.exec(args.ref ?? "");
+  if (prRef) args = { ...args, ref: undefined, text: `${args.text ?? ctx.original ?? ""} PR ${prRef[1]}${prRef[2] ? ` ${prRef[2]}` : ""}`.trim() };
   // "KAN-52@nue-backend" names one repository's part – keep it; "KAN-52" is the ticket
   const ref = args.ref && keysIn(args.ref).length ? (/@[\w.-]+/.test(args.ref) ? args.ref.trim().split(/\s+/)[0] : keysIn(args.ref)[0].split("@")[0]) : undefined;
   const ticketKey = ref?.split("@")[0];

@@ -33,7 +33,7 @@ import * as DD from "./designDoc.js";
 export type GoldfishCheck = "readiness" | "critic";
 export interface GoldfishProfile {
   /** "none" for S work (the plan review is enough) and for parts (their lead's document is checked). */
-  row: "none" | "M" | "L" | "two-repo" | "scope";
+  row: "none" | "S" | "M" | "L" | "two-repo" | "scope";
   checks: GoldfishCheck[];
   maxRounds: number;
   reason: string;
@@ -54,7 +54,8 @@ export function goldfishProfile(item: { size?: string | null; kind?: string | nu
   const size = String(item.size ?? item.data?.triage?.size ?? "M").toUpperCase();
   if (twoRepo) return { row: "two-repo", checks: ["readiness", "critic"], maxRounds: 2, reason: "two repositories" };
   if (size === "L") return { row: "L", checks: ["readiness", "critic"], maxRounds: 2, reason: "size L" };
-  if (size === "S") return { row: "none", checks: [], maxRounds: 0, reason: "size S – the plan review is enough" };
+  // quality first (18 Nov): a small change gets one readiness round too – a missed requirement costs more than the check
+  if (size === "S") return { row: "S", checks: ["readiness"], maxRounds: 1, reason: "size S" };
   return { row: "M", checks: ["readiness"], maxRounds: 2, reason: "size M" };
 }
 

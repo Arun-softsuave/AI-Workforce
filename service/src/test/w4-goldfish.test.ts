@@ -51,8 +51,9 @@ const ctxOf = (t: Task) => buildStepCtx({ task: getTask(t.id)!, project: getProj
 const PLAN = { summary: "Add a refund endpoint", steps: ["Add route", "Call refund()"], files: ["src/services/refund.ts – return the refund reason", "src/app.ts – new route"], tests: ["refund returns reason"], risks: [] };
 const REQ = { requirements: ["Refund a payment from the order page"], acceptanceCriteria: ["Refund shows the reason"], openQuestions: [] };
 
-test("size table: S none; M readiness 2 rounds; L and two-repo readiness + critic; scopes on the scope doc; parts none", () => {
-  assert.deepEqual(goldfishProfile({ size: "S" }).checks, []);
+test("size table: S readiness 1 round; M readiness 2 rounds; L and two-repo readiness + critic; scopes on the scope doc; parts none", () => {
+  // quality first (18 Nov): a small change gets one readiness round
+  assert.deepEqual([goldfishProfile({ size: "S" }).checks, goldfishProfile({ size: "S" }).maxRounds], [["readiness"], 1]);
   assert.deepEqual(goldfishProfile({ size: "M" }), { row: "M", checks: ["readiness"], maxRounds: 2, reason: "size M" });
   assert.deepEqual(goldfishProfile({ size: null }).checks, ["readiness"], "unknown size counts as M");
   assert.deepEqual(goldfishProfile({ size: "L" }).checks, ["readiness", "critic"]);
@@ -73,13 +74,13 @@ test("agent definitions: medium tier, medium effort, no tools, registered in the
   }
 });
 
-test("S runs no goldfish", async () => {
+test("S runs one readiness round (quality first) – no critic", async () => {
   const t = item("S", { requirements: REQ, plan: PLAN });
   const before = gfCalls().length;
   const r = await DOC_READINESS_STEPS.doc_readiness(ctxOf(t));
   assert.equal(r.status, "ok");
-  assert.match((r as any).note, /size S/);
-  assert.equal(gfCalls().length, before);
+  assert.match((r as any).note, /^S: readiness/);
+  assert.ok(gfCalls().length > before, "the readiness goldfish ran");
 });
 
 test("goldfish prompt holds only the document and the named files – no planner, chat or ticket history", async () => {

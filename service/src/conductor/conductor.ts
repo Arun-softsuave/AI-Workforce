@@ -236,9 +236,39 @@ function parseCalls(data: any): ToolCall[] {
 }
 
 async function callModel(system: string, prompt: string): Promise<AgentResult> {
-  const r = await getRunner().run({ agent: "conductor", tier: CONDUCTOR_AGENT.tier, effort: CONDUCTOR_AGENT.effort, maxTurns: CONDUCTOR_AGENT.maxTurns, system, prompt, schema: CONDUCTOR_SCHEMA });
+  const s = loadSettings() as any;
+  // the Conductor's model and effort: settings.conductor (chosen by measured accuracy – `aiw bench conductor`), else the defaults
+  const tier = s.conductor?.tier ?? CONDUCTOR_AGENT.tier;
+  const effort = s.conductor?.effort ?? CONDUCTOR_AGENT.effort;
+  let r = await getRunner().run({ agent: "conductor", tier, effort, maxTurns: CONDUCTOR_AGENT.maxTurns, system, prompt, schema: CONDUCTOR_SCHEMA });
+  // one retry on a model error (M1) – a dropped call must not lose your message
+  if (!r.ok && !r.data) {
+    await new Promise((res) => setTimeout(res, 1500));
+    r = await getRunner().run({ agent: "conductor", tier, effort, maxTurns: CONDUCTOR_AGENT.maxTurns, system, prompt, schema: CONDUCTOR_SCHEMA });
+  }
   recordUsage("teams:conductor", r, { agent: "conductor" });
   return r;
+}
+
+/**
+ * Evaluation only (`aiw bench conductor`): what the Conductor WOULD do for a message – its tool calls, nothing executed
+ * except the read-only lookups it asks for (status, find, explain, lookup) when it wants their results for a second round.
+ */
+export async function planTurn(text: string, ctx: TurnContext = {}): Promise<{ calls: ToolCall[]; reply: string; ok: boolean; tokensIn: number; costUsd: number }> {
+  const system = stablePrefix();
+  let r = await callModel(system, await buildPrompt(text, ctx));
+  let cost = r.costUsd ?? 0, tokensIn = r.tokensIn ?? 0;
+  if (!r.ok) return { calls: [], reply: "", ok: false, tokensIn, costUsd: cost };
+  let calls = parseCalls(r.data);
+  const safe = new Set(["status", "find", "explain", "lookup"]);
+  if (r.data?.needResults && calls.length && calls.every((c) => safe.has(c.tool))) {
+    const reads: string[] = [];
+    for (const c of calls) { const x = await runTool(c, { who: "eval", original: text } as ToolCtx); reads.push(`${c.tool}(${JSON.stringify(c.args)}):\n${truncate(x.reply, 1500)}`); }
+    r = await callModel(system, await buildPrompt(text, ctx, reads.join("\n\n")));
+    cost += r.costUsd ?? 0; tokensIn += r.tokensIn ?? 0;
+    if (r.ok) calls = [...calls, ...parseCalls(r.data)];
+  }
+  return { calls, reply: typeof r.data?.reply === "string" ? r.data.reply : "", ok: r.ok, tokensIn, costUsd: cost };
 }
 
 /** Run the calls in order. The first one that asks stops the rest; the rest wait behind the question. */

@@ -9,6 +9,8 @@ steps:
     when: "!data.adopt.nothingLeft"
   - name: plan_review
     when: "!data.adopt.nothingLeft"
+  - name: doc_readiness   # fresh eyes on the design document for the rest
+    when: "!data.adopt.nothingLeft"
   - name: plan_gate       # the plan for the rest (approval per your settings)
     when: "!data.adopt.nothingLeft"
   - name: implement_test  # new commits on top of yours

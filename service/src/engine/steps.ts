@@ -938,10 +938,12 @@ export const STEPS: Record<string, StepFn> = {
     const r = await ctx.agent("planner",
       `${areaRules ? `${areaRules}\n\n` : ""}${ticketBlock(ctx.task)}\n\n## Requirements\n${json(ctx.task.data.requirements ?? {})}${ctx.task.data.findings ? `\n\n## Code Explorer findings (files, symbols and lines to build on)\n${findingsText(ctx.task.data.findings)}` : ""}\n\n## Project context\n${ctx.task.data.contextPack ?? ""}${feedbackBlock(ctx.task)}${prior}${assumptions}\n\n${scopeNoteBlock(ctx.task)}${ctx.task.data.planIssues?.length ? `\n\n${designDocFor(ctx.task, "plan")}` : ""}\n\nPlan from the findings; read files only to confirm a location they leave open. Do not modify anything.`,
       { cwd: ctx.task.worktree ?? ctx.project.local.path, tools: ["Read", "Grep", "Glob"], maxTurns: 20, tier: ctx.params.tier });
-    ctx.save({ plan: r.data, planAt: new Date().toISOString() });
-    // finishing a developer's branch (W16): the plan covers only the rest, and the document keeps what was left to do
+    // finishing a developer's branch (W16): the plan covers only the rest, and the plan (and so the document, which is
+    // re-synced from it by later checks) keeps what was left to do
     const left: string[] = ctx.task.data.adopt?.gap?.remaining ?? [];
-    docWrite(() => writePlan(ctx.task, left.length ? { ...r.data, summary: `Left to do on ${ctx.task.data.adopt.branch ?? "your branch"}:\n${left.map((x) => `- ${x}`).join("\n")}\n\n${r.data.summary ?? ""}`.trim() } : r.data));
+    const plan = left.length ? { ...r.data, summary: `Left to do on ${ctx.task.data.adopt.branch ?? "your branch"}:\n${left.map((x) => `- ${x}`).join("\n")}\n\n${r.data.summary ?? ""}`.trim() } : r.data;
+    ctx.save({ plan, planAt: new Date().toISOString() });
+    docWrite(() => writePlan(ctx.task, plan));
     return { status: "ok" };
   },
 

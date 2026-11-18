@@ -149,6 +149,7 @@
       '<div class="stat you"><span class="k">Needs you</span><span class="v num">' + needs().length + '<small>' + (needs().length ? 'decisions waiting' : 'all clear') + '</small></span></div>' +
       '<div class="stat"><span class="k">Agents working</span><span class="v num">' + t.agentsBusy + '<small>of ' + t.slots + ' slots</small></span></div>' +
       '<div class="stat"><span class="k">Tickets in progress</span><span class="v num">' + t.inProgress + '<small>' + t.waiting + ' waiting</small></span></div>' +
+      (t.cost ? '<div class="stat"><span class="k">Cost, 7 days</span><span class="v num">$' + Number(t.cost.usd).toFixed(2) + '<small>' + (t.cost.cacheHit == null ? 'no AI use yet' : t.cost.cacheHit + '% of input from cache') + '</small></span></div>' : '') +
       '<div class="stat"><span class="k">Connections</span><span class="v">' + (cn.toCheck ? '<span class="dot you"></span>' + cn.ok + '/' + cn.total + '<small>' + cn.toCheck + ' to check</small>' : '<span class="dot ok"></span>All good') + '</span></div>' +
       '</section>';
   }
