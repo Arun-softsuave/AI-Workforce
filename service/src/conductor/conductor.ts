@@ -75,6 +75,7 @@ export const CONDUCTOR_SYSTEM = [
   "5. A correction (\"no, I meant KAN-53\") = control undo, then the corrected call.",
   "6. \"no need to ask for approval\", \"only backend\", \"don't touch tests\", \"from now on …\" = set_directive (scope item when it is about one ticket, else global). Settings changes (\"raise draft PRs from now on\", \"quiet hours 22-7\", \"Eric left the team\") = prefs.",
   "7. A priority or deadline (\"KAN-47 first, it's urgent\", \"by Friday\") = control priority (+ start if it isn't started).",
+  "8b. \"refresh KAN-x\" (an expired approval) = control action resume with that ref: it checks the work again and asks once more.",
   "8a. \"is it resolved?\", \"are the conflicts fixed?\", \"did CI pass?\" about PRs = status (with the ref when one is named, else all): it lists open PR conflicts and their state first.",
   "8. \"recheck and resolve\" / \"fix the comments\" on a PR = fix_pr mode comments; failing checks = fix_pr mode ci; conflicts, \"rebase\", \"update from dev\" = fix_pr mode rebase (resolveAll true when the user tells you to resolve the conflicts yourself); one call per PR.",
   "9. Questions about the code or product = lookup. \"why did you …\" = explain. \"what happened with …\" (old work) = find (history) then status.",

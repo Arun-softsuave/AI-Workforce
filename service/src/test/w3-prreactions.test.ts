@@ -522,6 +522,26 @@ test("a git hook that fails on the merge commit is reported as a hook (never as 
   } finally { fs.rmSync(hook, { force: true }); }
 });
 
+test("PR #90/#95 case: a Conventional Commit hook accepts the merge commit (the team's message, not git's default) and the update is pushed", async () => {
+  pushAs("main", "docs/cc.md", "conventional\n", "docs for the commit-msg test");
+  const head0 = remoteHead("feat/KAN-9/refund");
+  const hook = path.join(repo, ".git", "hooks", "commit-msg");   // git runs it for merge commits made with -m too
+  fs.mkdirSync(path.dirname(hook), { recursive: true });
+  fs.writeFileSync(hook, "#!/bin/sh\nif ! head -1 \"$1\" | grep -Eq '^(feat|fix|chore|docs|style|refactor|test|ci|build|perf)(\\(.+\\))?: '; then echo 'Conventional Commit......................................................Failed'; exit 1; fi\n");
+  fs.chmodSync(hook, 0o755);
+  const before = jobsOf(ticket.id).filter((x) => x.type === "rebase").length;
+  try {
+    emit({ type: "pr_conflict", idemKey: "w3:conflict:cc", itemId: ticket.id, payload: { ours: true, repo: "acme/shop", num: 7 } });
+    const job = await waitFor(() => { void tick(); const j = jobsOf(ticket.id).filter((x) => x.type === "rebase")[before]; return j && ["done", "failed"].includes(j.state) ? j : undefined; }, 90_000, 100);
+    assert.equal(job.state, "done", job.error ?? "");
+    const head1 = remoteHead("feat/KAN-9/refund");
+    assert.notEqual(head1, head0, "the merge was pushed (the hook accepted the message)");
+    const subject = sh(origin, "log", "-1", "--format=%s", head1);
+    assert.match(subject, /^chore(\(.+\))?: merge main into feat\/KAN-9\/refund/);
+    assert.equal(sh(repo, "merge-base", "--is-ancestor", head0, head1), "", "a normal push on top (no force-push)");
+  } finally { fs.rmSync(hook, { force: true }); }
+});
+
 test("G13: someone else pushed to our branch with nothing local here → nothing moved, nothing overwritten", async () => {
   const head = pushAs("feat/KAN-9/refund", "src/extra.ts", "export const x = 1;\n", "Eric's commit");
   emit({ type: "new_commits", idemKey: "w3:nc:1", itemId: ticket.id, payload: { by: "eric", repo: "acme/shop", num: 7 } });

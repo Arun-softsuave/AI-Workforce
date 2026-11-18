@@ -188,7 +188,7 @@ export async function tick(): Promise<void> {
       const t = getTask(a.task_id);
       if (t && canTransition(t, "STALE") && t.state === "AWAITING_APPROVAL") {
         transition(t.id, "STALE", "approval expired");
-        await notify({ kind: "stale", taskId: t.id, taskRef: t.source_ref ?? undefined, dedupeKey: a.id, title: `${t.source_ref}: approval expired`, body: `Run \`/aiw refresh ${t.source_ref}\` to rebase, re-test and request approval again.` });
+        await notify({ kind: "stale", taskId: t.id, taskRef: t.source_ref ?? undefined, dedupeKey: a.id, title: `${t.source_ref}: approval expired`, body: `Say "refresh ${t.source_ref}" here (or click Refresh on the dashboard): I check it again and ask you once more.` });
       }
     }
     // Paused = no AI work at all: new tickets are only recorded (DETECTED) and triaged after resume.
@@ -579,7 +579,11 @@ export function refreshTask(ref: string): Task | undefined {
     return transition(t.id, "QUEUED", "refresh after stale approval");
   }
   const pb = getPlaybook(t.playbook ?? "dev-feature");
-  const at = stepIndex(pb, "prepublish");
+  // only a stale PR / push approval goes back to prepublish (rebase, re-test, ask again). A stale PLAN or requirements
+  // approval re-runs its own step (it asks again) – jumping to prepublish would publish without building.
+  const last = latestApproval(t.id);
+  const prLike = !last || /^(create_pr|push_|publish)/.test(last.action);
+  const at = prLike ? stepIndex(pb, "prepublish") : -1;
   if (at >= 0) updateTask(t.id, { step_index: at });
   return transition(t.id, "QUEUED", "refresh after stale approval");
 }

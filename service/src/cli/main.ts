@@ -580,6 +580,33 @@ export async function main(argv: string[]): Promise<number> {
       const r = viaService ?? await answerTask(looksLikeRef ? sub : undefined, text, loadSettings().profile.name || os.userInfo().username);
       out(r.message, json); return r.ok ? 0 : 1;
     }
+    case "secret": {
+      // aiw secret set NAME [project] · aiw secret list [project] · aiw secret remove NAME [project]
+      // A value a ticket needs (API key, password …): kept ONLY in the OS credential vault, given to that project's
+      // local runs as an environment variable. Never typed into Teams, never written to a file, never printed.
+      const { setSecret, getSecret, deleteSecret } = await import("../core/secrets.js");
+      const action = sub;
+      const name = action === "list" ? "" : String(a._[2] ?? "");
+      const projArg = String((action === "list" ? a._[2] : a._[3]) ?? a.project ?? "");
+      const projects = loadProjects();
+      const projectId = projArg || (projects.length === 1 ? projects[0].id : "");
+      const usage = `Usage: aiw secret set NAME [project] | aiw secret list [project] | aiw secret remove NAME [project]\nProjects: ${projects.map((p) => p.id).join(", ")}`;
+      if (!["set", "list", "remove"].includes(action ?? "") || !projectId || !getProject(projectId)) { out(usage, json); return 1; }
+      if (action !== "list" && !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) { out(`Give the setting's name, e.g. STRIPE_API_KEY.\n${usage}`, json); return 1; }
+      let cur: Record<string, string> = {};
+      try { cur = JSON.parse(getSecret(`qa.${projectId}.env`) ?? "{}"); } catch { /* none */ }
+      if (action === "list") { const names = Object.keys(cur); out(names.length ? `Stored for ${projectId} (names only): ${names.join(", ")}` : `Nothing stored for ${projectId}.`, json); return 0; }
+      if (action === "remove") {
+        delete cur[name];
+        if (Object.keys(cur).length) setSecret(`qa.${projectId}.env`, JSON.stringify(cur)); else deleteSecret(`qa.${projectId}.env`);
+        out(`Removed ${name} for ${projectId}.`, json); return 0;
+      }
+      const value = (await readStdin(`Value of ${name} for ${projectId} (input is hidden): `)).trim();
+      if (!value) { out("No value given – nothing saved.", json); return 1; }
+      setSecret(`qa.${projectId}.env`, JSON.stringify({ ...cur, [name]: value }));
+      out(`Saved ${name} for ${projectId} in the OS credential vault. Local runs of ${projectId} get it as an environment variable. Now reply "done" in Teams.`, json);
+      return 0;
+    }
     case "qa": case "fix": {
       // aiw qa account <project> <email> – the demo login QA uses for the live local app (password asked hidden, kept in the OS vault)
       if (cmd === "qa" && sub === "account") {

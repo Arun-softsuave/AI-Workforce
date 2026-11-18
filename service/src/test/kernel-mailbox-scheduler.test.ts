@@ -224,9 +224,16 @@ test("scheduler: item states, pause, retry and one job per item give plain reaso
   assert.deepEqual(ids(d.start), [q.H1.id]);
   assert.equal(d.held.find((h) => h.job.id === q.A.id)!.reason, "connector");
   assert.equal(d.held.find((h) => h.job.id === q.G.id)!.reason, "retry_later");
-  // an item with a waiting job (asked you something) keeps its mailbox closed
-  const w = decide(L, snap({ items: [item("H", { state: "PR_OPEN" })], queued: [q.H2], active: [job("H", { state: "waiting" })] }));
-  assert.equal(reasonOf(w, q.H2.id), "waiting for its current job");
+  // an item with a waiting job (asked you something) holds other work, with the reason shown …
+  const w = decide(L, snap({ items: [item("H", { state: "PR_OPEN" })], queued: [q.H2], active: [job("H", { state: "waiting", type: "comment_fix" })] }));
+  assert.equal(reasonOf(w, q.H2.id), "waiting behind comment fix (it waits for you)");
+  // … but never silently blocks keeping the PR healthy: a rebase or CI fix runs beside it (its own folder)
+  const rb = job("H", { type: "rebase" });
+  const w2 = decide(L, snap({ items: [item("H", { state: "PR_OPEN" })], queued: [rb, q.H2], active: [job("H", { state: "waiting", type: "comment_fix" })] }));
+  assert.deepEqual(ids(w2.start), [rb.id]);
+  // a RUNNING job still keeps everything else waiting, repair jobs included
+  const w3 = decide(L, snap({ items: [item("H", { state: "PR_OPEN" })], queued: [job("H", { type: "ci_fix" })], active: [job("H", { state: "running", type: "comment_fix" })] }));
+  assert.deepEqual(w3.start, []);
   // retry time passed → starts
   const later = decide(L, snap({ items, queued: [q.G], now: new Date("2026-11-17T14:00:00Z") }));
   assert.deepEqual(ids(later.start), [q.G.id]);

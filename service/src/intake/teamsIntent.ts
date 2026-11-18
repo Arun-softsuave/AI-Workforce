@@ -1,13 +1,13 @@
 import { audit } from "../core/db.js";
 import { loadSettings } from "../core/config.js";
-import { truncate } from "../core/util.js";
+import { truncate, redactSecrets as redactKnownKeys } from "../core/util.js";
 import { formatChoices, optionNumber, plainNumbers } from "../core/questions.js";
 import { listTasks, getTask, type Task } from "../engine/tasks.js";
 import { decideAndApply, answerTask, cancelTask, resumeTask, tick, isPaused, resumeAll } from "../engine/engine.js";
 import { createRequest, resolveProduct } from "../engine/requests.js";
 import { statusText, taskNow, inboxSummaryLine } from "../api/ops.js";
 import { answerQuestion, answerWithSuggestion } from "../chat/assistant.js";
-import { getFocus, setFocus, catchUpText } from "../notify/chatLog.js";
+import { getFocus, setFocus, catchUpText, redactSecrets as redactChatSecrets } from "../notify/chatLog.js";
 import { parsePrRef, reviewCommand, startReviewFromText, REVIEW_EDIT } from "../engine/prReview.js";
 import { personIn } from "../engine/targets.js";
 import { qaCommand, QA_EDIT } from "../engine/qa.js";
@@ -227,6 +227,8 @@ export function ruleIntent(text: string, p: Pending = pendingItems(), aiAvailabl
     if (total > 1) return ambiguous(p);
   }
   if (shortCancel && key) return { intent: { intent: "cancel", ref: key } };
+  // "no, I meant KAN-47" names ANOTHER ticket than the waiting one: a correction, not a reject – the Conductor decides (J5)
+  if (NO.test(t) && only && key && key.split("@")[0].toUpperCase() !== refOf(only.task).split("@")[0].toUpperCase()) return undefined;
   if (NO.test(t) && only) return replyTo(only, t);
 
   // Without the AI model (offline/mock mode) a few more cases are decided by rules.
@@ -465,6 +467,11 @@ export type MessageContext = TurnContext;
 /** Understand and act on one message from the owner in the Teams chat. Returns the reply to post. */
 export async function handleChatMessage(text: string, who: string, ctx: MessageContext = {}): Promise<string> {
   text = plainNumbers(text);                       // "1️⃣" copied back from our message means "1"
+  // M3 / C10: a pasted secret never reaches a rule, an answer, the Conductor or a model – one safe reply, nothing kept
+  if (pastedSecret(text)) {
+    audit(`user:${who}`, "teams.secret_blocked", undefined, {});
+    return "🔒 That message looks like it contains a secret (a key, token or password), so I did not read it or keep it.\n\n- Please **revoke or rotate it** – it is now in the Teams history.\n- To give me a value safely, run `aiw secret set NAME` on this computer, then reply \"done\".";
+  }
   const awaiting = getAwaiting();
   if (awaiting) {
     const r = await handleAwaiting(awaiting, text, who);
@@ -499,6 +506,12 @@ export async function handleChatMessage(text: string, who: string, ctx: MessageC
   // Everything else: the Conductor (one model call with tools)
   if (aiAvailable && conductorEnabled()) return (await conductorTurn(text, who, ctx)).reply;
   return legacyPath(text, who, p, aiAvailable);
+}
+
+/** A secret pasted into chat: known key formats, JWTs, NAME=secret lines or a long key-like string (URLs ignored). */
+export function pastedSecret(text: string): boolean {
+  const t = String(text ?? "").replace(/https?:\/\/\S+/g, " ");
+  return redactKnownKeys(t) !== t || redactChatSecrets(t) !== t || /\b(AKIA[0-9A-Z]{16}|sk-[A-Za-z0-9_-]{20,}|-----BEGIN [A-Z ]*PRIVATE KEY-----)/.test(t);
 }
 
 /** The older path while the Conductor is off: the intent model reads it; decisions are read back first. */

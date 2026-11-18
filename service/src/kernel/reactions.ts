@@ -196,6 +196,9 @@ export interface RouteDeps {
 export const OPEN_PR_EVENTS: ReadonlySet<string> = new Set(["pr_conflict", "ci_failed", "changes_requested", "review_comment", "comment_added", "new_commits", "new_base"]);
 
 /** Events about our own PR that must never be dropped silently: when no job can start, you get one line. */
+/** A PR of a DONE item (old engine) that is merged or closed now: reopen it once so close-out / the question runs (G17). */
+const PR_END_EVENTS: ReadonlySet<string> = new Set(["pr_merged", "pr_closed"]);
+
 const TELL_IF_IGNORED: ReadonlySet<string> = new Set(["pr_conflict", "ci_failed", "changes_requested"]);
 
 let wired: RouteDeps | undefined;
@@ -229,7 +232,7 @@ export const routeEvents: RouteEvents & ((settings: Settings, deps?: RouteDeps) 
   for (const ev of d.pendingEvents()) {
     let item = ev.item_id ? d.getItem(ev.item_id) : undefined;
     // the PR is still open, but the old engine ended the ticket at DONE when the PR was raised: look after it again
-    if (item && item.state === "DONE" && OPEN_PR_EVENTS.has(ev.type) && ev.payload?.ours !== false && d.reopenForOpenPr) {
+    if (item && item.state === "DONE" && (OPEN_PR_EVENTS.has(ev.type) || PR_END_EVENTS.has(ev.type)) && ev.payload?.ours !== false && d.reopenForOpenPr) {
       try { item = d.reopenForOpenPr(item.id) ?? item; } catch { /* keep the item as it is */ }
     }
     const r = reactionFor(ev, item, settings);

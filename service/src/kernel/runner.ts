@@ -527,7 +527,7 @@ export interface KernelTickOpts {
 /** One kernel pass (engine.ts tick when engine.version is v2): migrate once, route events, keep jobs, start what may run. */
 export async function kernelTick(opts: KernelTickOpts = {}): Promise<void> {
   const settings = opts.settings ?? loadSettings();
-  try { migrateToKernel(); repairIgnoredPrEvents(); } catch (e: any) { logger.error("v2 data migration failed", { error: e.message }); }
+  try { migrateToKernel(); repairIgnoredPrEvents(); db().prepare("UPDATE jobs SET state='waiting' WHERE type='ci_watch' AND state='queued'").run(); } catch (e: any) { logger.error("v2 data migration failed", { error: e.message }); }
   linkParts();
   try { routeEvents(settings); } catch (e: any) { logger.error("event routing failed", { error: e.message }); }
   sweepJobs();

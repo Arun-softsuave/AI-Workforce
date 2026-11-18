@@ -608,12 +608,12 @@ async function undoLast(ctx: ToolCtx): Promise<ToolResult> {
 async function toolFixPr(args: ToolArgs, ctx: ToolCtx): Promise<ToolResult> {
   const { startFixFromText } = await import("../engine/prFix.js");
   // "KAN-52@nue-backend" names one repository's part – keep it; "KAN-52" is the ticket
-  const ref = args.ref && keysIn(args.ref).length ? (/@[w.-]+/.test(args.ref) ? args.ref.trim().split(/s+/)[0] : keysIn(args.ref)[0].split("@")[0]) : undefined;
+  const ref = args.ref && keysIn(args.ref).length ? (/@[\w.-]+/.test(args.ref) ? args.ref.trim().split(/\s+/)[0] : keysIn(args.ref)[0].split("@")[0]) : undefined;
   const ticketKey = ref?.split("@")[0];
   const text = [args.text ?? ctx.original, args.ref && !ref ? args.ref : ""].filter(Boolean).join(" ");
   // engine v2: a ticket of yours with an open PR gets the fix as a job on its own item (W9/W10, G8 "recheck and resolve")
   // "resolve the conflicts yourself / by yourself": your explicit OK for bigger conflicts (still shown before any push)
-  const resolveAll = args.resolveAll === true || (args.mode === "rebase" && /(by )?yourself|resolve (them|all|the conflicts|every)/i.test(String(args.text ?? ctx.original ?? "")));
+  const resolveAll = args.resolveAll === true || (args.mode === "rebase" && /\b(by )?yourself\b|\bresolve (them|all|the conflicts|every)/i.test(String(args.text ?? ctx.original ?? "")));
   const command = args.mode === "ci" ? "fix_ci" : args.mode === "rebase" ? "rebase" : args.mode === "issues" ? undefined : "resolve";
   let item = ref && command && engineVersion() === "v2" ? taskFor(ref) : undefined;
   // a PR link or number: the ticket item that raised it (a ticket finished by the old engine with its PR still
@@ -624,8 +624,18 @@ async function toolFixPr(args: ToolArgs, ctx: ToolCtx): Promise<ToolResult> {
       const found = await resolvePrTargets(text, ticketKey);
       if (!("error" in found) && found.targets.length === 1) {
         const { itemForPr, reopenForOpenPr } = await import("../kernel/prs.js");
-        const hit = itemForPr(found.targets[0].repo, found.targets[0].num);
+        const tg = found.targets[0];
+        const hit = itemForPr(tg.repo, tg.num);
         if (hit && hit.owner === "me") item = (reopenForOpenPr(hit.id) ?? hit) as any;
+        // a PR nothing here raised: your explicit order on your own PR gets a light PR item, never a dead end
+        else if (!hit && command === "rebase") {
+          const { myLogin } = await import("../engine/targets.js");
+          const mine = await myLogin().catch(() => undefined);
+          if (!tg.author || !mine || tg.author.toLowerCase() === mine.toLowerCase()) {
+            const { itemForPrOrLight } = await import("../kernel/prs.js");
+            item = itemForPrOrLight(tg.project.id, tg.repo, tg.num) as any;
+          }
+        }
       }
     } catch { /* fall back to the fix task below */ }
   }
@@ -636,9 +646,13 @@ async function toolFixPr(args: ToolArgs, ctx: ToolCtx): Promise<ToolResult> {
     const { prParts, prOpen } = await import("../api/actions.js");
     const { reopenForOpenPr } = await import("../kernel/prs.js");
     const parts = prParts(item as Task);
-    targets = (parts.length ? parts : prOpen(item as Task) ? [item as Task] : [])
+    const { prEnded } = await import("../kernel/prs.js");
+    const d = (item as Task).data ?? {};
+    const hasOpenPr = prOpen(item as Task) || (!!(d.pr || (d.prs ?? []).length || d.prRef) && !prEnded(d));
+    targets = (parts.length ? parts : hasOpenPr ? [item as Task] : [])
       .map((x) => (x.state === "DONE" ? ((reopenForOpenPr(x.id) as any) ?? x) : x))
-      .filter((x) => x.state === "PR_OPEN" && ((x as any).owner ?? "me") === "me");
+      // any open state with a PR (paused, stale, blocked, waiting …) – only finished work is left alone
+      .filter((x) => !["DONE", "CANCELLED", "FAILED", "MERGED"].includes(x.state) && ((x as any).owner ?? "me") === "me");
   }
   if (targets.length) {
     const { emit } = await import("../kernel/events.js");

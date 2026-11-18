@@ -22,6 +22,7 @@ import { requestApproval, getApproval, decide, verifyBinding } from "../../appro
 import { notify } from "../../notify/router.js";
 import { untrusted } from "../../agents/runner.js";
 import type { ProjectConfig } from "../../core/config.js";
+import { commitMessageFor } from "../../brain/conventions.js";
 import type { StepCtx, StepResult } from "../steps.js";
 import { runningJob, jobEvents, prOf, jobFolderId, refOf } from "./common.js";
 
@@ -49,6 +50,18 @@ export function failedHooks(text: string): string[] {
   return [...new Set(String(text ?? "").split("\n")
     .map((l) => /^(.+?)\.{3,}\s*Failed\b/.exec(l.trim().replace(/^git \S+ failed:\s*/i, ""))?.[1]?.trim())
     .filter((x): x is string => !!x))];
+}
+
+/**
+ * Messages for the merge commit, best first: the team's own commit convention, then a plain Conventional Commit.
+ * git's default ("Merge commit 'refs/aiw/base/dev' into …") is refused by commit-message hooks (Conventional Commit).
+ */
+export function mergeMessages(project: Pick<ProjectConfig, "conventions">, task: { source_ref?: string | null; data?: Record<string, any> }, base: string, branch: string): string[] {
+  const key0 = String(task.data?.ticket?.key ?? task.source_ref ?? "").split("@")[0];
+  const key = /^[A-Z][A-Z0-9]+-\d+$/.test(key0) && !/^(PR|FIX|QA|CI)-/.test(key0) ? key0 : "";
+  const summary = `merge ${base} into ${branch}`;
+  const own = commitMessageFor(project.conventions as any, key, "chore", summary, []);
+  return [...new Set([own, `chore: ${summary}`].filter(Boolean))];
 }
 
 /** Your explicit order on this job: "resolve the conflicts yourself" (payload.resolveAll). */
@@ -153,8 +166,17 @@ export const REBASE_STEPS: Record<string, (ctx: StepCtx) => Promise<StepResult>>
       G.git(wt, ["reset", "--hard", "HEAD"], { allowFail: true });
     }
     const before = G.headSha(wt);
+    const messages = mergeMessages(ctx.project, ctx.task as any, r.base, r.branch);
     let mergeError = "";
-    try { G.git(wt, ["merge", "--no-ff", "--no-edit", r.baseRefName]); } catch (e: any) { mergeError = String(e?.message ?? e); }
+    for (const msg of messages) {
+      mergeError = "";
+      try { G.git(wt, ["merge", "--no-ff", "-m", msg, r.baseRefName]); break; } catch (e: any) { mergeError = String(e?.message ?? e); }
+      // file conflicts: handled below. A refused merge commit (a hook on the message): try the next message once.
+      const conflicted = G.git(wt, ["diff", "--name-only", "--diff-filter=U"], { allowFail: true }).trim();
+      if (conflicted) break;
+      G.git(wt, ["merge", "--abort"], { allowFail: true });
+      G.git(wt, ["reset", "--hard", before], { allowFail: true });
+    }
     if (!mergeError) {
       const changed = G.headSha(wt) !== before;
       ctx.save({ rebase: { ...r, changed, how: changed ? `merged ${r.base} in (no conflicts)` : "already up to date" } });
@@ -212,8 +234,8 @@ export const REBASE_STEPS: Record<string, (ctx: StepCtx) => Promise<StepResult>>
     const left = files.filter((f) => { try { return MARKERS.test(fs.readFileSync(path.join(wt, f.path), "utf8")); } catch { return true; } });
     if (left.length) return stop(`I could not resolve every conflict safely (${left.length} file${left.length === 1 ? "" : "s"} still have conflict markers).`, left.map((f) => f.path));
     let commitError = "";
-    for (let i = 0; i < 2; i++) {
-      try { G.git(wt, ["add", "-A"]); G.git(wt, ["commit", "--no-edit", "--quiet"]); commitError = ""; break; } catch (e: any) { commitError = String(e?.message ?? e); }
+    for (const msg of messages) {
+      try { G.git(wt, ["add", "-A"]); G.git(wt, ["commit", "--quiet", "-m", msg]); commitError = ""; break; } catch (e: any) { commitError = String(e?.message ?? e); }
     }
     if (commitError) {
       const hooks = failedHooks(commitError);

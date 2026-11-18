@@ -244,7 +244,10 @@ export async function pollCi(): Promise<Task[]> {
   for (const p of loadProjects().filter((x) => x.github && x.roles.some((r) => r === "devops-engineer" || /developer$/.test(r)))) {
     const cursor = `ci:${p.id}`;
     const since = getCursor(cursor) ?? new Date(Date.now() - 6 * 3_600_000).toISOString();
-    const branches = p.roles.includes("devops-engineer") ? [p.github!.baseBranch, "aiw/*"] : ["aiw/*"];
+    // engine v2: failures on the plugin's own PR branches are the kernel's ci_fix job (never a second DevOps task)
+    const own = engineVersion() === "v2" ? [] : ["aiw/*"];
+    const branches = p.roles.includes("devops-engineer") ? [p.github!.baseBranch, ...own] : own;
+    if (!branches.length) continue;
     const started = nowIso();
     const runs = await gh.failedRuns(p.github!.repo, since, branches);
     for (const run of runs) {

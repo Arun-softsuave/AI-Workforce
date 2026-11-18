@@ -441,8 +441,10 @@ export const FIX_STEPS: Record<string, (ctx: StepCtx) => Promise<StepResult>> = 
     // A fix planned before the CI rules (W9) existed has check items without a class: "needs a person" checks
     // (baselines, evals) and lock-file updates would be handed to the code agent, which can never make them pass.
     // Look at the PR again with today's rules (fresh checks, fresh classes, fresh plan) before changing any code.
-    if (isLegacyCiPlan(ctx.task.data.fixItems) && !ctx.task.data.reclassified) {
-      ctx.save({ reclassified: new Date().toISOString(), implementation: null, implementAttempt: 0, stuck: null });
+    if (isLegacyCiPlan(ctx.task.data.fixItems) && ctx.task.data.reclassifiedV !== 2) {
+      // the old items and plan go too: otherwise fix_prepare sees "workspace reused" and the same old plan comes back
+      ctx.save({ reclassified: new Date().toISOString(), reclassifiedV: 2, implementation: null, implementAttempt: 0, stuck: null, fixItems: null, fixPlan: null, baseSha: null, ciFailures: null, feedback: [] });
+      ctx.task = { ...ctx.task, data: { ...ctx.task.data, fixItems: null, fixPlan: null, baseSha: null } };
       const prep = await FIX_STEPS.fix_prepare(ctx);
       if (prep.status !== "ok") return prep;
       const plan = await FIX_STEPS.fix_plan(ctx);

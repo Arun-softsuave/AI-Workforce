@@ -122,12 +122,17 @@ function compareJobs(items: Record<string, SchedItem>) {
   };
 }
 
+/** Jobs that keep an open PR healthy; they may run while another job of the item waits for a person. */
+export const REPAIR_JOBS: readonly string[] = ["rebase", "ci_fix"];
+
 /** The pure decision: jobs to start now and a plain reason for each one that waits. */
 export function decide(limits: SchedulerLimits, snap: SchedulerSnapshot): Decision {
   const now = (snap.now ?? new Date()).getTime();
   const items = snap.items;
   const running = snap.active.filter((j) => j.state === "running");
-  const busyItems = new Set(snap.active.map((j) => j.item_id));
+  const busyItems = new Set(snap.active.filter((j) => j.state === "running").map((j) => j.item_id));
+  /** Items with a job waiting for a person (approval, answer): other jobs wait, but repair jobs may run beside it. */
+  const waitingOn = new Map(snap.active.filter((j) => j.state === "waiting").map((j) => [j.item_id, j] as const));
   /** Build jobs taking a repo slot / an area: the running ones plus those started in this pass. */
   const building: Job[] = running.filter(isBuildJob);
   let used = running.length;
@@ -169,6 +174,9 @@ export function decide(limits: SchedulerLimits, snap: SchedulerSnapshot): Decisi
 
     // 4. one active job per item
     if (busyItems.has(job.item_id)) { hold(job, "item_busy", "waiting for its current job"); continue; }
+    // a job waiting for you never silently blocks keeping the PR healthy: rebase / CI fixes run in their own folder
+    const w = waitingOn.get(job.item_id);
+    if (w && !REPAIR_JOBS.includes(job.type)) { hold(job, "item_busy", `waiting behind ${w.type.replace(/_/g, " ")} (it waits for you)`); continue; }
 
     // 5. waves: unmet depends_on (stacked on a PR that is open is enough)
     if (limits.honourEdges) {

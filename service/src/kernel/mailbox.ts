@@ -118,7 +118,9 @@ export function startJob(jobId: string): Job | undefined {
   return atomic(() => {
     const j = getJob(jobId);
     if (!j || j.state !== "queued") return undefined;
-    const busy = db().prepare(`SELECT id FROM jobs WHERE item_id=? AND id<>? AND state IN ${ACTIVE_SQL} AND ${NOT_PASSIVE} LIMIT 1`).get(j.item_id, j.id);
+    // a repair job (rebase, ci_fix) may start beside a job that only WAITS for a person; never beside a running one
+    const repair = j.type === "rebase" || j.type === "ci_fix";
+    const busy = db().prepare(`SELECT id FROM jobs WHERE item_id=? AND id<>? AND ${repair ? "state='running'" : `state IN ${ACTIVE_SQL}`} AND ${NOT_PASSIVE} LIMIT 1`).get(j.item_id, j.id);
     if (busy) return undefined;
     db().prepare("UPDATE jobs SET state='running', updated_at=? WHERE id=?").run(nowIso(), j.id);
     return getJob(j.id);

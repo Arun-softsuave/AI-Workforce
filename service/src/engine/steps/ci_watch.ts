@@ -154,7 +154,10 @@ export async function runCiWatches(): Promise<number> {
     try { st = await ciState(w); } catch { continue; }                 // GitHub unreachable: next time
     if (!st || (st.at === "running" && st.sha === w.sha)) continue;
     resumeJob(j.id, { stepIndex: 0 });
-    await runJob(j.id);
+    const after = await runJob(j.id);
+    // the item had another job running: the watch could not start – it goes back to watching (never stuck "queued",
+    // which no scheduler picks up for ci_watch); the next CI timer tries again
+    if (after?.state === "queued") { db().prepare("UPDATE jobs SET state='waiting', updated_at=? WHERE id=? AND state='queued'").run(new Date().toISOString(), j.id); continue; }
     ran++;
   }
   return ran;
