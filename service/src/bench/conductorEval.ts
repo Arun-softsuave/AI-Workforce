@@ -28,7 +28,9 @@ const READS = new Set(["status", "find", "explain", "lookup", "reply", "unclear"
 
 /** A Conductor tool call as "tool[:action|mode|decision]" + its ticket ref. */
 export function canonical(tool: string, args: Record<string, any> = {}): Call {
-  const sub = tool === "control" ? args.action : tool === "decide" ? (args.decision ?? "approve") : tool === "fix_pr" ? (args.mode ?? "comments") : tool === "start" && args.role ? args.role : tool === "prefs" && args.key ? String(args.key) : undefined;
+  // the same reading conductor/tools.ts runTool applies: prefs with a GitHub owner/repo and no key = adding that repository
+  const prefsKey = tool === "prefs" ? (args.key ? String(args.key) : /^[\w.-]+\/[\w.-]+$/.test(String(args.github ?? args.value ?? "").replace(/^https?:\/\/github\.com\//i, "").replace(/\.git$/, "")) ? "project.add" : undefined) : undefined;
+  const sub = tool === "control" ? args.action : tool === "decide" ? (args.decision ?? "approve") : tool === "fix_pr" ? (args.mode ?? "comments") : tool === "start" && args.role ? args.role : prefsKey;
   const ref = typeof args.ref === "string" ? args.ref : Array.isArray(args.refs) && args.refs.length ? String(args.refs[0]) : undefined;
   return { name: sub ? `${tool}:${sub}` : tool, ref: ref ? normRef(ref) : undefined };
 }
